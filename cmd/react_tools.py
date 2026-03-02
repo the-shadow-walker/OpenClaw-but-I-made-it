@@ -113,7 +113,7 @@ class ToolRegistry:
                     if explanation:
                         print(f"\n{explanation}")
                     prompt = "\n   Proceed? (y/n): "
-                    if not confirm_cb(prompt):
+                    if not confirm_cb(prompt, command):
                         return ToolResult(False, "", "Cancelled by user", {"risk": risk})
                 else:
                     # No TTY available — reject high-risk actions automatically
@@ -134,7 +134,7 @@ class ToolRegistry:
                     f"   Confidence: {confidence}%\n"
                     f"   Proceed? (y/n): "
                 )
-                if not confirm_cb(prompt):
+                if not confirm_cb(prompt, f"create file: {args.get('path', '?')}"):
                     return ToolResult(False, "", "Cancelled by user", {})
 
         elif tool == "patch_file":
@@ -145,7 +145,7 @@ class ToolRegistry:
                     f"   Confidence: {confidence}%\n"
                     f"   Proceed? (y/n): "
                 )
-                if not confirm_cb(prompt):
+                if not confirm_cb(prompt, f"patch file: {args.get('path', '?')} — search: {str(args.get('search', ''))[:120]}"):
                     return ToolResult(False, "", "Cancelled by user", {})
 
         handler_map = {

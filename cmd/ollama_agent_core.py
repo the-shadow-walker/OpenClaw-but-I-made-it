@@ -1101,13 +1101,42 @@ JSON only."""
 
     # ================================================================ ReAct ==
 
-    def _default_confirm(self, prompt: str) -> bool:
+    def _default_confirm(self, prompt: str, command_info: str = "") -> bool:
         """Interactive confirmation; returns False safely on EOFError (no TTY)."""
         try:
             answer = input(prompt)
             return answer.strip().lower() in ("y", "yes")
         except EOFError:
             return False
+
+    def _ai_confirm(self, prompt: str, command_info: str = "") -> bool:
+        """AI safety filter: fast model inspects the command with no task context.
+        If it judges the command safe, auto-approve. If unsafe, ask the user."""
+        if not command_info:
+            return self._default_confirm(prompt)
+
+        system = (
+            "You are a security scanner for a Linux server. "
+            "A command or file operation is about to run. "
+            "Reply with exactly one word: SAFE or UNSAFE.\n"
+            "UNSAFE means: irreversible data loss, system-wide destruction, "
+            "network exfiltration, privilege escalation abuse, or overwriting "
+            "critical system files. Normal installs, service restarts, "
+            "writing project files, and common sysadmin tasks are SAFE."
+        )
+        verdict = self._call_model_oneshot(
+            self.fast_model,
+            f"Command/operation:\n{command_info}",
+            system,
+            timeout=15,
+        ).strip().upper()
+
+        if "UNSAFE" in verdict:
+            print(f"\n🤖 Safety agent flagged this as potentially unsafe.")
+            return self._default_confirm(prompt)
+        else:
+            print(f"\n🤖 Auto-approved by safety agent.")
+            return True
 
     def _verify_react_completion(
         self,
@@ -1400,7 +1429,7 @@ Return JSON only:
     ) -> Dict[str, Any]:
         """Core ReAct loop: Reason → Act → Observe × N."""
         if confirm_cb is None:
-            confirm_cb = self._default_confirm
+            confirm_cb = self._ai_confirm
 
         max_iter = max_iterations if max_iterations is not None else self.max_react_iterations
 
