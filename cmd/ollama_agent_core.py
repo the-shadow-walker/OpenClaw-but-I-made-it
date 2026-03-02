@@ -310,6 +310,8 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
+    NUM_CTX = 32768  # Ollama context window; default is only 4096
+
     def __init__(
         self,
         model: str = "qwen3-coder:30b",
@@ -358,7 +360,7 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1},
+            "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
 
         try:
@@ -388,6 +390,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "options": {"num_ctx": self.NUM_CTX},
         }
 
         curl_cmd = [
@@ -427,7 +430,7 @@ class OllamaCommandAgent:
             "model": self.fast_model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1},
+            "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
 
         try:
