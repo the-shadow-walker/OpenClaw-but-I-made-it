@@ -1806,8 +1806,6 @@ def main():
     from task_chain import TaskDecomposer, HandoffExtractor, AcceptanceCriteriaRunner
 
     parser = argparse.ArgumentParser(description="Ollama Agent CLI")
-    parser.add_argument("--iterations", "-n", type=int, default=None,
-                        help="Per-phase iteration override (default: budget-derived)")
     parser.add_argument("--budget", "-b", type=int, default=200,
                         help="Total iteration budget for decomposition (default: 200)")
     parser.add_argument("--task", "-t", type=str, default=None,
@@ -1834,7 +1832,7 @@ def main():
             model="qwen3-coder:30b",
             searxng_url="http://10.0.0.58:8080",
         )
-        agent.max_react_iterations = cli_args.iterations or subtasks[0]["max_iterations"]
+        agent.max_react_iterations = subtasks[0]["max_iterations"]
         agent.run(instruction)
         return
 
@@ -1842,7 +1840,7 @@ def main():
     print(f"\n📋 DECOMPOSED PLAN ({len(subtasks)} phases, {cli_args.budget} iteration budget):\n")
     for st in subtasks:
         complexity = st.get("complexity", "medium")
-        iters = cli_args.iterations or st["max_iterations"]
+        iters = st["max_iterations"]
         print(f"  Phase {st['index']+1} [{complexity}, {iters} iter]: {st['instruction']}")
         if st.get("acceptance_criteria"):
             print(f"           Check: {st['acceptance_criteria']}")
@@ -1859,7 +1857,7 @@ def main():
     for st in subtasks:
         print(f"\n{'='*70}")
         print(f"🔗 PHASE {st['index']+1}/{len(subtasks)}: {st['instruction'][:80]}")
-        iters = cli_args.iterations or st["max_iterations"]
+        iters = st["max_iterations"]
         print(f"   Budget: {iters} iterations")
 
         phase_agent = OllamaCommandAgent(
