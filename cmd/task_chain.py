@@ -242,8 +242,8 @@ class AcceptanceCriteriaRunner:
 class TaskDecomposer:
     """Breaks a high-level goal into a list of scoped sub-tasks with iteration budgets."""
 
-    COMPLEXITY_DEFAULTS = {"small": 15, "medium": 25, "large": 40}
-    MIN_ITERATIONS_PER_TASK = 10
+    COMPLEXITY_DEFAULTS = {"small": 25, "medium": 50, "large": 100}
+    MIN_ITERATIONS_PER_TASK = 20
 
     def __init__(self, agent):
         self.agent = agent
@@ -272,9 +272,9 @@ Rules:
 - Order tasks so each builds on the previous
 - acceptance_criteria must be a simple verifiable shell command
   (e.g. "systemctl is-active nginx", "test -f /etc/nginx/nginx.conf", "curl -sf http://localhost")
-- Complexity budgets: small=15 iterations, medium=25, large=40
+- Complexity budgets: small=25 iterations, medium=50, large=100
 - Total max_iterations across all tasks should roughly equal {total_budget}
-- Aim for 3-8 sub-tasks
+- Aim for 3-8 sub-tasks; prefer fewer larger phases over many tiny ones
 
 Return ONLY the JSON array, no other text."""
 

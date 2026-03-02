@@ -1966,8 +1966,8 @@ def main():
     from task_chain import TaskDecomposer, HandoffExtractor, AcceptanceCriteriaRunner
 
     parser = argparse.ArgumentParser(description="Ollama Agent CLI")
-    parser.add_argument("--budget", "-b", type=int, default=200,
-                        help="Total iteration budget for decomposition (default: 200)")
+    parser.add_argument("--budget", "-b", type=int, default=500,
+                        help="Total iteration budget for decomposition (default: 500)")
     parser.add_argument("--task", "-t", type=str, default=None,
                         help="Run a single task non-interactively")
     parser.add_argument("--yes", "-y", action="store_true",
