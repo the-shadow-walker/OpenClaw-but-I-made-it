@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# everything commited just fine
 import argparse
 import subprocess
 import json
@@ -1802,25 +1803,87 @@ Return JSON only:
 
 
 def main():
+    from task_chain import TaskDecomposer, HandoffExtractor, AcceptanceCriteriaRunner
+
     parser = argparse.ArgumentParser(description="Ollama Agent CLI")
-    parser.add_argument("--iterations", "-n", type=int, default=100,
-                        help="Maximum ReAct iterations (default: 100)")
+    parser.add_argument("--iterations", "-n", type=int, default=None,
+                        help="Per-phase iteration override (default: budget-derived)")
+    parser.add_argument("--budget", "-b", type=int, default=200,
+                        help="Total iteration budget for decomposition (default: 200)")
     parser.add_argument("--task", "-t", type=str, default=None,
                         help="Run a single task non-interactively")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation prompt for multi-phase plans")
     cli_args = parser.parse_args()
-
-    agent = OllamaCommandAgent(
-        model="qwen3-coder:30b",
-        searxng_url="http://10.0.0.58:8080",
-    )
-    agent.max_react_iterations = cli_args.iterations
 
     if cli_args.task:
         instruction = cli_args.task
     else:
         instruction = input("What would you like me to do? ")
 
-    agent.run(instruction)
+    # Decompose the instruction
+    decomp_agent = OllamaCommandAgent(
+        model="qwen3-coder:30b",
+        searxng_url="http://10.0.0.58:8080",
+    )
+    subtasks = TaskDecomposer(decomp_agent).decompose(instruction, total_budget=cli_args.budget)
+
+    # Single subtask → run directly, same behaviour as before
+    if len(subtasks) == 1:
+        agent = OllamaCommandAgent(
+            model="qwen3-coder:30b",
+            searxng_url="http://10.0.0.58:8080",
+        )
+        agent.max_react_iterations = cli_args.iterations or subtasks[0]["max_iterations"]
+        agent.run(instruction)
+        return
+
+    # Multi-phase: show plan and confirm
+    print(f"\n📋 DECOMPOSED PLAN ({len(subtasks)} phases, {cli_args.budget} iteration budget):\n")
+    for st in subtasks:
+        complexity = st.get("complexity", "medium")
+        iters = cli_args.iterations or st["max_iterations"]
+        print(f"  Phase {st['index']+1} [{complexity}, {iters} iter]: {st['instruction']}")
+        if st.get("acceptance_criteria"):
+            print(f"           Check: {st['acceptance_criteria']}")
+        print()
+
+    if not cli_args.yes:
+        answer = input("Proceed? [Y/n] ").strip().lower()
+        if answer and answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # Run chain loop
+    handoff = None
+    for st in subtasks:
+        print(f"\n{'='*70}")
+        print(f"🔗 PHASE {st['index']+1}/{len(subtasks)}: {st['instruction'][:80]}")
+        iters = cli_args.iterations or st["max_iterations"]
+        print(f"   Budget: {iters} iterations")
+
+        phase_agent = OllamaCommandAgent(
+            model="qwen3-coder:30b",
+            searxng_url="http://10.0.0.58:8080",
+        )
+        phase_agent.max_react_iterations = iters
+        result = phase_agent.run(st["instruction"], incoming_handoff=handoff)
+
+        # Reset stuck-loop guard state so it doesn't carry across phases
+        phase_agent.tool_registry._recent_calls.clear()
+        phase_agent.tool_registry._stuck_warn_count = 0
+
+        # Extract structured handoff for next phase
+        handoff = HandoffExtractor(phase_agent).extract(st["instruction"], result)
+
+        # Run acceptance criteria check if provided
+        if st.get("acceptance_criteria"):
+            ac_result = AcceptanceCriteriaRunner().run(st["acceptance_criteria"])
+            status = "✅ PASSED" if ac_result["passed"] else "⚠️  FAILED"
+            print(f"   Acceptance check: {status} — {st['acceptance_criteria']}")
+
+        if not result.get("success"):
+            print(f"⚠️  Phase {st['index']+1} did not fully complete — continuing with partial handoff")
 
 
 if __name__ == "__main__":
