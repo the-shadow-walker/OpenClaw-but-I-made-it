@@ -310,7 +310,8 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 32768  # Ollama context window; default is only 4096
+    NUM_CTX = 32768       # fast model (14b) — ReAct history needs long context
+    HEAVY_NUM_CTX = 8192  # heavy model (30b) — one-shot only, short prompt in/out
 
     def __init__(
         self,
@@ -356,11 +357,12 @@ class OllamaCommandAgent:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        ctx = self.HEAVY_NUM_CTX if model == self.model else self.NUM_CTX
         request_data = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
+            "options": {"temperature": 0.1, "num_ctx": ctx},
         }
 
         try:
@@ -390,7 +392,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"num_ctx": self.NUM_CTX},
+            "options": {"num_ctx": self.HEAVY_NUM_CTX},
         }
 
         curl_cmd = [
