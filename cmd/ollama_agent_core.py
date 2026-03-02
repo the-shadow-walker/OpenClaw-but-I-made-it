@@ -419,7 +419,7 @@ class OllamaCommandAgent:
         self,
         react_history: List[Dict],
         system_prompt: str,
-        timeout: int = 60,
+        timeout: int = 180,
     ) -> str:
         """Fast-model (14b) caller for the ReAct decision loop.
         Only picks tools and writes short args — never generates file content.
@@ -1436,8 +1436,10 @@ Return JSON only:
         if re.search(r"already exists", error_str, re.IGNORECASE) and tool == "execute_command":
             return "Object already exists — skip creation or use IF NOT EXISTS / CREATE OR REPLACE."
 
-        # Command not found
-        if re.search(r"(command not found|No such file or directory)", error_str):
+        # Command not found (binary missing — NOT "file argument doesn't exist")
+        # Only trigger when the binary itself is missing, not when ls/mv/etc report
+        # that their *argument* path doesn't exist.
+        if re.search(r"command not found", error_str):
             cmd = (args.get("command", "") or "").split()[0]
             return (
                 f"Binary '{cmd}' not found. Either install the package that provides it "
