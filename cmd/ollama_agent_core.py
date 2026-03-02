@@ -131,10 +131,11 @@ CODE / FILE GENERATION RULES:
     model will write the actual content — do NOT attempt to write it yourself.
     Example: {{"path": "/var/www/html/index.html", "content": "",
                "description": "Full portfolio page: hero, case studies, contact form, 2-color CSS, no JS libs, WCAG AA"}}
-11. For patch_file with non-trivial changes: set "replace": "" and write a
-    "description" of what the replacement should do. For tiny changes (e.g. a
-    port number or a single word) you MAY write the replacement inline.
-    Example: {{"path": "server.py", "search": "port = 80", "replace": "",
+11. For patch_file: use description mode for non-trivial changes.
+    - If you know the exact text to replace: set "search": "<exact text>", "replace": "", "description": "<what to do>"
+    - If you are NOT sure of the exact text (e.g. after many failed patches): set BOTH "search": "" AND "replace": "" with a detailed "description". The heavy model will read the file and locate the correct section itself.
+    - For tiny changes (e.g. a port number or single word) you MAY write both inline.
+    Example (unsure of search): {{"path": "app.py", "search": "", "replace": "",
                "description": "Change port to 8443 and add SSL context"}}
 12. Always `read_file` before modifying any source file
 13. After editing code, run it with `execute_command` to verify it works
@@ -1237,6 +1238,54 @@ Return JSON only:
         replacement = self.call_ollama_heavy(prompt, system, timeout=180)
         return self._strip_code_fences(replacement)
 
+    def _generate_patch_search_and_replace(
+        self,
+        path: str,
+        description: str,
+        task: str,
+        context_summary: str,
+    ) -> tuple:
+        """Heavy model reads the actual file and returns (search, replace).
+        Used when the fast model doesn't know the exact search string.
+        Returns (None, None) on failure.
+        """
+        try:
+            with open(path, "r") as f:
+                file_content = f.read()
+        except Exception as e:
+            return None, None
+
+        ext = os.path.splitext(path)[1].lower()
+        lang_hint = {
+            ".py": "Python", ".js": "JavaScript", ".html": "HTML",
+            ".css": "CSS", ".sh": "Bash",
+        }.get(ext, "code")
+
+        print(f"\n⚙️  [{self.model}] Locating + writing patch → {path}")
+
+        system = (
+            f"You are an expert {lang_hint} developer. "
+            "You will identify the exact text to replace in a file and write the replacement. "
+            "Respond with ONLY a JSON object with two keys: \"search\" and \"replace\". "
+            "No explanation, no markdown fences, no extra text."
+        )
+        prompt = (
+            f"File: {path}\n\n"
+            f"Current file content:\n{file_content}\n\n"
+            f"What to change:\n{description}\n\n"
+            f"Overall task: {task}\n"
+            f"Recent context:\n{context_summary}\n\n"
+            "Return a JSON object: {{\"search\": \"<exact text to find>\", \"replace\": \"<replacement text>\"}}\n"
+            "The search string MUST match the file content exactly (same whitespace/indentation)."
+        )
+        raw = self.call_ollama_heavy(prompt, system, timeout=240)
+        raw = self._strip_code_fences(raw).strip()
+        try:
+            result = json.loads(raw)
+            return result.get("search"), result.get("replace")
+        except Exception:
+            return None, None
+
     # ================================================================ ReAct ==
 
     def _diagnose_error(self, tool: str, args: Dict, result) -> str:
@@ -1554,6 +1603,25 @@ Return JSON only:
                     react_history.append({
                         "role": "user",
                         "content": "ERROR: Code generation model returned empty content. Try a simpler description or break the file into smaller pieces.",
+                    })
+                    continue
+
+            elif tool == "patch_file" and not args.get("search") and args.get("description"):
+                # Fast model left search blank — heavy model reads the file and
+                # figures out both the exact search string and the replacement.
+                description = args.get("description", "")
+                ctx = self._build_context_summary(react_history[-6:])
+                search, replace = self._generate_patch_search_and_replace(
+                    args.get("path", ""), description, instruction, ctx
+                )
+                if search and replace is not None:
+                    args["search"] = search
+                    args["replace"] = replace
+                    print(f"  ✏️  Heavy model located search ({len(search):,} chars) + replacement ({len(replace):,} chars)")
+                else:
+                    react_history.append({
+                        "role": "user",
+                        "content": "ERROR: Heavy model could not locate the section to patch. Try read_file first to confirm the exact content.",
                     })
                     continue
 
