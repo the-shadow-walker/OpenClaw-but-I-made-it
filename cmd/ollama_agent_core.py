@@ -1100,6 +1100,7 @@ JSON only."""
             return False
 
     PROGRESS_PATH = os.path.expanduser("~/.agent_bin/progress.md")
+    CHECKLIST_PATH = os.path.expanduser("~/.agent_bin/checklist.md")
 
     def _write_progress_md(self, instruction: str, iteration: int, max_iter: int) -> None:
         """Fast model summarises the recent trace into a human-readable progress file."""
@@ -1534,6 +1535,15 @@ Return JSON only:
         else:
             react_plan = "(planning unavailable)"
 
+        # Write plan as a persistent checklist the agent can tick off
+        try:
+            os.makedirs(os.path.dirname(self.CHECKLIST_PATH), exist_ok=True)
+            items = [f"- [ ] {l.strip()}" for l in react_plan.splitlines() if l.strip()]
+            with open(self.CHECKLIST_PATH, "w") as f:
+                f.write("# Task Checklist\n\n" + "\n".join(items) + "\n")
+        except Exception:
+            pass
+
         initial_message = (
             f"TASK: {instruction}\n\n"
             f"SYSTEM CONTEXT:\n{os_summary}\n\n"
@@ -1593,6 +1603,8 @@ Return JSON only:
         _path_fail_counts: Dict[str, int] = {}
         # How many times we've challenged a premature finish (challenge fires once only)
         _premature_finish_challenges: int = 0
+        # Consecutive JSON parse failures — triggers heavy model rescue at 5
+        _consecutive_json_failures: int = 0
         # Inject a task-progress reminder every N iterations
         # Use max_iter//8 so a 100-iteration run gets a checkpoint every ~12 steps,
         # catching plan drift early rather than at 25% (too late).
@@ -1602,9 +1614,9 @@ Return JSON only:
             print(f"\n{'=' * 70}")
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
-            # Trim history to keep context window manageable
-            if len(react_history) > 25:
-                react_history = react_history[:1] + react_history[-24:]
+            # Trim history to keep context window manageable (keep more = better memory)
+            if len(react_history) > 60:
+                react_history = react_history[:1] + react_history[-59:]
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
             if iteration > 1 and iteration % _checkpoint_interval == 0:
@@ -1619,6 +1631,8 @@ Return JSON only:
                     f"If you have drifted from the plan (e.g. checking unrelated services, "
                     f"debugging the wrong thing), stop and return to the next pending plan step. "
                     f"Do not call finish until every requirement in the task is implemented and tested.\n\n"
+                    f"CHECKLIST (mark steps done with patch_file: `- [ ]` → `- [x]`):\n"
+                    f"{open(self.CHECKLIST_PATH).read() if os.path.exists(self.CHECKLIST_PATH) else '(unavailable)'}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )})
 
@@ -1641,16 +1655,40 @@ Return JSON only:
             parsed = self.extract_json(raw)
 
             if not parsed or not isinstance(parsed, dict):
-                print("⚠️  Failed to parse JSON, injecting error reminder")
-                react_history.append({
-                    "role": "user",
-                    "content": (
-                        "ERROR: Your response was not valid JSON. "
-                        "You MUST respond with ONLY a JSON object containing: "
-                        "thought, confidence, tool, args. No other text."
-                    ),
-                })
-                continue
+                _consecutive_json_failures += 1
+                print(f"⚠️  Failed to parse JSON ({_consecutive_json_failures} consecutive)")
+                if _consecutive_json_failures >= 5:
+                    print(f"🆘 JSON cascade — calling heavy model to rescue...")
+                    ctx = self._build_context_summary(react_history[-8:])
+                    rescue_raw = self._call_model_oneshot(
+                        self.model,
+                        f"Context:\n{ctx}\n\nBased on the above, produce the single best next tool call.",
+                        'Return ONLY a JSON object: {"thought":"...","confidence":90,"tool":"...","args":{}}',
+                        timeout=120,
+                    )
+                    if rescue_raw:
+                        rescue_parsed = self.extract_json(rescue_raw)
+                        if rescue_parsed and isinstance(rescue_parsed, dict):
+                            print(f"  ✅ Heavy model rescue succeeded")
+                            react_history.append({"role": "assistant", "content": rescue_raw})
+                            parsed = rescue_parsed
+                            _consecutive_json_failures = 0
+                            # Fall through to normal tool dispatch below
+                        else:
+                            react_history.append({"role": "user", "content": "ERROR: Heavy model rescue also failed. Produce a valid JSON tool call."})
+                            continue
+                    else:
+                        react_history.append({"role": "user", "content": "ERROR: Rescue call returned nothing. Produce a valid JSON tool call."})
+                        continue
+                else:
+                    react_history.append({
+                        "role": "user",
+                        "content": (
+                            'ERROR: Your response was not valid JSON. '
+                            'Respond with ONLY a JSON object: {"thought":"...","confidence":90,"tool":"...","args":{}}'
+                        ),
+                    })
+                    continue
 
             thought = parsed.get("thought", "")
             confidence = int(parsed.get("confidence", 50))
