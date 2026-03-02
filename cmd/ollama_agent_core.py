@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# everything commited just fine
+# =============================================================================
+# ollama_agent_core.py  —  v2
+# Features in this build:
+#   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
+#   - num_ctx: fast=32768, heavy=8192 (prevents 30b KV cache OOM)
+#   - react timeout: 180s (was 60s — handles 32k context prefill)
+#   - Chain mode CLI: --budget/-b, --yes/-y  (TaskDecomposer multi-phase)
+#   - Persistent checklist: ~/.agent_bin/checklist.md (written from plan)
+#   - Progress checkpointing: ~/.agent_bin/progress.md (every N iterations)
+#   - JSON cascade rescue: heavy model steps in after 5 consecutive failures
+#   - History window: 60 messages (was 25)
+#   - AI auto-confirm: fast model safety-screens commands, only escalates UNSAFE
+#   - Heavy model patch: generates both search+replace when search is empty
+#   - False "binary not found" diagnosis fixed (ENOENT != command not found)
+# =============================================================================
 import argparse
 import subprocess
 import json
