@@ -1099,6 +1099,42 @@ JSON only."""
             print(f"⚠️  Only {success_count}/{total_count} succeeded")
             return False
 
+    PROGRESS_PATH = os.path.expanduser("~/.agent_bin/progress.md")
+
+    def _write_progress_md(self, instruction: str, iteration: int, max_iter: int) -> None:
+        """Fast model summarises the recent trace into a human-readable progress file."""
+        # Build a compact trace summary from the last 10 entries
+        recent = self.react_trace[-10:] if self.react_trace else []
+        trace_text = ""
+        for e in recent:
+            status = "✅" if (e.get("result") and e["result"].success) else "❌"
+            trace_text += f"  {status} [{e['tool']}] {e.get('thought', '')[:120]}\n"
+
+        system = (
+            "You are a progress tracker for an autonomous agent. "
+            "Write a concise markdown status file. "
+            "Use these exact sections: "
+            "## Task, ## Done, ## Current Focus, ## Struggling With, ## Still To Do, ## Notes. "
+            "Be brief — max 30 lines total. No code blocks."
+        )
+        prompt = (
+            f"Task: {instruction}\n\n"
+            f"Iteration: {iteration}/{max_iter}\n\n"
+            f"Recent actions:\n{trace_text}\n\n"
+            f"Write the progress markdown file."
+        )
+        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=20)
+        if not content:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.PROGRESS_PATH), exist_ok=True)
+            with open(self.PROGRESS_PATH, "w") as f:
+                f.write(f"<!-- updated: iteration {iteration}/{max_iter} -->\n")
+                f.write(content.strip() + "\n")
+            print(f"\n📝 Progress saved → {self.PROGRESS_PATH}")
+        except Exception:
+            pass
+
     # ================================================================ ReAct ==
 
     def _default_confirm(self, prompt: str, command_info: str = "") -> bool:
@@ -1534,6 +1570,21 @@ Return JSON only:
             context_block = "\n".join(context_lines)
             initial_message = context_block + "\n\n" + initial_message
 
+        # Inject previous session progress notes if they exist
+        try:
+            if os.path.exists(self.PROGRESS_PATH):
+                with open(self.PROGRESS_PATH) as f:
+                    prev_progress = f.read().strip()
+                if prev_progress:
+                    initial_message = (
+                        "PREVIOUS SESSION NOTES (from last run — use this to pick up where you left off):\n"
+                        f"{prev_progress}\n\n"
+                        "--- END OF PREVIOUS NOTES ---\n\n"
+                    ) + initial_message
+                    print(f"\n📖 Loaded previous session notes from {self.PROGRESS_PATH}")
+        except Exception:
+            pass
+
         react_history: List[Dict] = [{"role": "user", "content": initial_message}]
         self.react_trace = []
         finish_summary = ""
@@ -1557,6 +1608,7 @@ Return JSON only:
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
             if iteration > 1 and iteration % _checkpoint_interval == 0:
+                self._write_progress_md(instruction, iteration, max_iter)
                 remaining = max_iter - iteration
                 react_history.append({"role": "user", "content": (
                     f"[PROGRESS CHECK — iteration {iteration}/{max_iter}, "
@@ -1838,6 +1890,17 @@ Return JSON only:
             "iterations_used": iterations_used,
             "trace": self.react_trace,
         }
+
+        if result_dict["success"]:
+            # Clear progress notes — task is done
+            try:
+                if os.path.exists(self.PROGRESS_PATH):
+                    os.remove(self.PROGRESS_PATH)
+            except Exception:
+                pass
+        else:
+            # Write a final progress snapshot so the next run can pick up here
+            self._write_progress_md(instruction, iterations_used, max_iter)
 
         if not result_dict["success"]:
             state_path = os.path.expanduser("~/.agent_bin/last_incomplete_task.json")
