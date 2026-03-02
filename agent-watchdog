@@ -1,0 +1,22 @@
+#!/bin/bash
+# agent-watchdog — called by systemd OnFailure= drop-ins
+# Install to /usr/local/bin/agent-watchdog and make executable.
+#
+# Usage in a systemd override:
+#   [Unit]
+#   OnFailure=agent-watchdog@%n.service
+#
+# Or call directly:
+#   agent-watchdog nginx.service failed
+
+set -euo pipefail
+
+UNIT="${1:-unknown.service}"
+EVENT="${2:-failed}"
+API_URL="${AGENT_API_URL:-http://localhost:5000}"
+API_KEY="${AGENT_API_KEY:?AGENT_API_KEY must be set}"
+
+curl -s -X POST "${API_URL}/api/v1/watchdog" \
+  -H "X-API-Key: ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"unit\": \"${UNIT}\", \"event\": \"${EVENT}\"}"
