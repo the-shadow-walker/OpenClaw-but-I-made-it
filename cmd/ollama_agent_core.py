@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # =============================================================================
-# ollama_agent_core.py  —  v2
+# ollama_agent_core.py  —  v2.1
 # Features in this build:
 #   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
-#   - num_ctx: fast=32768, heavy=8192 (prevents 30b KV cache OOM)
-#   - react timeout: 180s (was 60s — handles 32k context prefill)
+#   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
+#   - react timeout: 180s; one-shot calls use their own per-call timeout
 #   - Chain mode CLI: --budget/-b, --yes/-y  (TaskDecomposer multi-phase)
 #   - Persistent checklist: ~/.agent_bin/checklist.md (written from plan)
 #   - Progress checkpointing: ~/.agent_bin/progress.md (every N iterations)
 #   - JSON cascade rescue: heavy model steps in after 5 consecutive failures
-#   - History window: 60 messages (was 25)
+#   - History window: 20 messages (first + last 19) — keeps context under 32k
+#   - Observation caps: success=800 chars, failure stdout/stderr=1000 chars each
 #   - AI auto-confirm: fast model safety-screens commands, only escalates UNSAFE
 #   - Heavy model patch: generates both search+replace when search is empty
 #   - False "binary not found" diagnosis fixed (ENOENT != command not found)
@@ -1637,9 +1638,10 @@ Return JSON only:
             print(f"\n{'=' * 70}")
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
-            # Trim history to keep context window manageable (keep more = better memory)
-            if len(react_history) > 60:
-                react_history = react_history[:1] + react_history[-59:]
+            # Trim history to keep context window manageable.
+            # 20 messages × ~2k chars each ≈ 10k tokens — well inside 32k.
+            if len(react_history) > 20:
+                react_history = react_history[:1] + react_history[-19:]
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
             if iteration > 1 and iteration % _checkpoint_interval == 0:
@@ -1887,9 +1889,9 @@ Return JSON only:
                     f"{what_ran}\n"
                     f"Exit code : {exit_code}\n"
                     f"\n── STDOUT ───────────────────────────────────────────────────\n"
-                    f"{stdout_text[:4000]}\n"
+                    f"{stdout_text[:1000]}\n"
                     f"\n── STDERR / ERROR ───────────────────────────────────────────\n"
-                    f"{stderr_text[:4000]}\n"
+                    f"{stderr_text[:1000]}\n"
                     f"\n── DIAGNOSIS ────────────────────────────────────────────────\n"
                     f"{diagnosis}\n"
                     f"\n── REQUIRED ACTION ──────────────────────────────────────────\n"
@@ -1913,7 +1915,7 @@ Return JSON only:
                     f"OBSERVATION [iteration {iteration}] — ✅ SUCCESS\n"
                     f"Tool: {tool}\n"
                     f"Args: {json.dumps(args)}\n"
-                    f"Output:\n{result.output[:3000]}\n"
+                    f"Output:\n{result.output[:800]}\n"
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )
