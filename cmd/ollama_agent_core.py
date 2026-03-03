@@ -371,12 +371,14 @@ class OllamaCommandAgent:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        ctx = self.HEAVY_NUM_CTX if model == self.model else self.NUM_CTX
+        # One-shot calls (decomposer, planner, ai_confirm, etc.) never need the
+        # full 32k window — allocating it adds seconds of overhead even for short
+        # prompts. Only call_ollama_react (the ReAct loop) uses NUM_CTX=32k.
         request_data = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1, "num_ctx": ctx},
+            "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
         }
 
         try:
