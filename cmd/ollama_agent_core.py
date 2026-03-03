@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# ollama_agent_core.py  —  v2.1
+# ollama_agent_core.py  —  v2.2
 # Features in this build:
 #   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
 #   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
@@ -14,6 +14,9 @@
 #   - AI auto-confirm: fast model safety-screens commands, only escalates UNSAFE
 #   - Heavy model patch: generates both search+replace when search is empty
 #   - False "binary not found" diagnosis fixed (ENOENT != command not found)
+#   - PostRunVerifier: QA agent runs after finish (writes tests, runs them,
+#     heavy model produces PASS/FAIL report with fix plan + improvements)
+#   - Line-buffered stdout: live output works correctly when piped to tee
 # =============================================================================
 import argparse
 import subprocess
@@ -2025,8 +2028,228 @@ Return JSON only:
         return result
 
 
+# ---------------------------------------------------------------------------
+# PostRunVerifier
+# ---------------------------------------------------------------------------
+
+class PostRunVerifier:
+    """
+    QA agent that runs after the main ReAct agent calls finish.
+
+    Steps:
+      1. Fast model selects the 10 most informative trace entries.
+      2. Heavy model (qwen3-coder:30b) generates 3-8 verification shell commands.
+      3. Commands are executed; pass/fail recorded.
+      4. Heavy model writes a PASS/FAIL report with root cause + fix plan.
+    """
+
+    MAX_CURATED_ENTRIES = 10
+
+    def __init__(self, agent: "OllamaCommandAgent"):
+        self.agent = agent
+
+    def _curate_trace(self, trace: list) -> str:
+        """Fast model picks the most informative trace entries; returns full detail text."""
+        if not trace:
+            return "(no trace entries)"
+
+        summaries = []
+        for i, entry in enumerate(trace):
+            tool = entry.get("tool", "?")
+            args = entry.get("args", {})
+            result = entry.get("result")
+            if hasattr(result, "success"):
+                ok, out = result.success, (result.output or "")[:80]
+            elif isinstance(result, dict):
+                ok, out = result.get("success", False), str(result.get("output", ""))[:80]
+            else:
+                ok, out = False, ""
+            summaries.append(
+                f"[{i}] {tool} ok={ok} args={json.dumps(args)[:120]} out={out!r}"
+            )
+
+        prompt = (
+            f"Select the {self.MAX_CURATED_ENTRIES} most informative entries from this agent trace.\n"
+            "Prefer: file creations, file patches, service starts, major installs, config writes, finish.\n"
+            "Skip: trivial reads, failed retries, memory lookups.\n\n"
+            "TRACE:\n" + "\n".join(summaries) +
+            f"\n\nReturn a JSON array of integer indices (max {self.MAX_CURATED_ENTRIES}). JSON only."
+        )
+        try:
+            raw = self.agent._call_model_oneshot(
+                self.agent.fast_model, prompt,
+                "Return only a JSON array of integers. No prose.", timeout=30
+            )
+            indices = self.agent.extract_json(raw)
+            if not isinstance(indices, list):
+                raise ValueError()
+            indices = sorted(set(i for i in indices if isinstance(i, int) and 0 <= i < len(trace)))
+        except Exception:
+            indices = list(range(min(len(trace), self.MAX_CURATED_ENTRIES)))
+
+        lines = []
+        for i in indices:
+            entry = trace[i]
+            tool = entry.get("tool", "?")
+            args = entry.get("args", {})
+            thought = entry.get("thought", "")[:200]
+            result = entry.get("result")
+            if hasattr(result, "success"):
+                ok, out, err = result.success, (result.output or "")[:600], (result.error or "")[:300]
+            elif isinstance(result, dict):
+                ok = result.get("success", False)
+                out = str(result.get("output", ""))[:600]
+                err = str(result.get("error", ""))[:300]
+            else:
+                ok, out, err = False, "", ""
+            lines.append(
+                f"--- [{i}] {tool} (success={ok}) ---\n"
+                f"Thought: {thought}\n"
+                f"Args: {json.dumps(args, indent=2)[:500]}\n"
+                f"Output: {out!r}\n"
+                f"Error: {err!r}\n"
+            )
+        return "\n".join(lines)
+
+    def verify(self, goal: str, react_result: dict, plan_text: str = "") -> dict:
+        """
+        Full QA pass.  Returns {passed, passed_count, total_count, test_results, report}.
+        """
+        import subprocess as _sp
+
+        print(f"\n{'='*70}", flush=True)
+        print("🔍 POST-RUN VERIFICATION (qwen3-coder:30b)", flush=True)
+        print(f"{'='*70}", flush=True)
+
+        trace = react_result.get("trace", [])
+        finish_summary = react_result.get("finish_summary", "")
+
+        # 1. Curate trace
+        print("  ↳ Selecting key trace entries...", flush=True)
+        curated = self._curate_trace(trace)
+
+        context_block = (
+            f"ORIGINAL GOAL:\n{goal}\n\n"
+            f"PLAN / CHECKLIST:\n{plan_text if plan_text else '(not available)'}\n\n"
+            f"AGENT FINISH SUMMARY:\n{finish_summary}\n\n"
+            f"KEY TRACE ENTRIES (fast-model selected):\n{curated}"
+        )
+
+        # 2. Heavy model writes verification commands
+        print("  ↳ Generating verification tests...", flush=True)
+        test_prompt = (
+            "You are a QA engineer. An autonomous agent just finished a task.\n"
+            "Write 3-8 shell commands that verify it actually worked correctly.\n"
+            "Each command must exit 0 on success, non-zero on failure.\n"
+            "Focus on: files present, services running, endpoints responding, data correct.\n\n"
+            + context_block +
+            '\n\nReturn ONLY a JSON array:\n'
+            '[{"command": "systemctl is-active nginx", "purpose": "nginx is running"}, ...]\n'
+            "JSON only, no prose."
+        )
+        try:
+            raw = self.agent._call_model_oneshot(
+                self.agent.model, test_prompt,
+                "Return only a JSON array with command and purpose fields. No prose.", timeout=120
+            )
+            test_commands = self.agent.extract_json(raw)
+            if not isinstance(test_commands, list):
+                raise ValueError()
+        except Exception:
+            test_commands = []
+            print("  ⚠️  Could not generate test commands — skipping to analysis", flush=True)
+
+        # 3. Run the tests
+        test_results = []
+        for tc in test_commands:
+            cmd = (tc.get("command") or "").strip()
+            purpose = tc.get("purpose", "")
+            if not cmd:
+                continue
+            print(f"  🧪 {purpose}", flush=True)
+            print(f"     $ {cmd}", flush=True)
+            try:
+                r = _sp.run(
+                    cmd, shell=True, capture_output=True, text=True,
+                    timeout=30, executable="/bin/bash"
+                )
+                passed, stdout, stderr, exit_code = (
+                    r.returncode == 0, r.stdout[:500], r.stderr[:300], r.returncode
+                )
+            except Exception as e:
+                passed, stdout, stderr, exit_code = False, "", str(e), -1
+            print(f"     {'✅ PASS' if passed else '❌ FAIL'}", flush=True)
+            test_results.append({
+                "command": cmd, "purpose": purpose,
+                "passed": passed, "stdout": stdout, "stderr": stderr, "exit_code": exit_code,
+            })
+
+        passed_count = sum(1 for r in test_results if r["passed"])
+        total_count = len(test_results)
+        all_passed = (passed_count == total_count) if total_count > 0 else True
+
+        # 4. Heavy model writes the report
+        print("  ↳ Writing analysis report...", flush=True)
+        results_text = "\n".join(
+            f"[{'PASS' if r['passed'] else 'FAIL'}] {r['purpose']}\n"
+            f"  $ {r['command']}\n"
+            f"  stdout: {r['stdout']!r}\n"
+            f"  stderr: {r['stderr']!r}"
+            for r in test_results
+        ) if test_results else "(no tests were run)"
+
+        analyze_prompt = (
+            "You are a senior engineer reviewing the outcome of an automated task.\n\n"
+            + context_block +
+            f"\n\nVERIFICATION RESULTS ({passed_count}/{total_count} passed):\n{results_text}\n\n"
+            "Write a technical report with these sections:\n"
+            "1. VERDICT: PASSED or FAILED\n"
+            "2. WHAT WORKS: confirmed working items\n"
+            "3. WHAT FAILED: specific failures with root cause (if any)\n"
+            "4. FIX PLAN: exact shell commands to fix each failure (if any)\n"
+            "5. IMPROVEMENTS: optional suggestions for robustness\n\n"
+            "Be specific — use exact paths, service names, and commands from the context above."
+        )
+        try:
+            report = self.agent._call_model_oneshot(
+                self.agent.model, analyze_prompt,
+                "You are a senior engineer writing a concise technical verification report.", timeout=180
+            )
+        except Exception as e:
+            report = f"(could not generate analysis report: {e})"
+
+        print(f"\n{'='*70}", flush=True)
+        verdict = "✅ PASSED" if all_passed else "❌ FAILED"
+        print(f"{verdict}  ({passed_count}/{total_count} tests passed)", flush=True)
+        print(f"{'='*70}", flush=True)
+        print(report, flush=True)
+
+        return {
+            "passed": all_passed,
+            "passed_count": passed_count,
+            "total_count": total_count,
+            "test_results": test_results,
+            "report": report,
+        }
+
+
+def _read_checklist() -> str:
+    """Read the agent's written plan from ~/.agent_bin/checklist.md."""
+    path = os.path.expanduser("~/.agent_bin/checklist.md")
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
 def main():
+    import sys
     from task_chain import TaskDecomposer, HandoffExtractor, AcceptanceCriteriaRunner
+
+    # Force line-buffered output so live logs work correctly when piped to tee
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
 
     parser = argparse.ArgumentParser(description="Ollama Agent CLI")
     parser.add_argument("--budget", "-b", type=int, default=500,
@@ -2035,6 +2258,8 @@ def main():
                         help="Run a single task non-interactively")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Skip confirmation prompt for multi-phase plans")
+    parser.add_argument("--no-verify", action="store_true",
+                        help="Skip the post-run QA verification pass")
     cli_args = parser.parse_args()
 
     if cli_args.task:
@@ -2043,6 +2268,7 @@ def main():
         instruction = input("What would you like me to do? ")
 
     # Decompose the instruction
+    print("\n⏳ Decomposing task...", flush=True)
     decomp_agent = OllamaCommandAgent(
         model="qwen3-coder:30b",
         searxng_url="http://10.0.0.58:8080",
@@ -2056,13 +2282,15 @@ def main():
             searxng_url="http://10.0.0.58:8080",
         )
         agent.max_react_iterations = subtasks[0]["max_iterations"]
-        agent.run(instruction)
+        result = agent.run(instruction)
+        if not cli_args.no_verify:
+            PostRunVerifier(agent).verify(instruction, result, plan_text=_read_checklist())
         return
 
     # Multi-phase: show plan and confirm
-    print(f"\n📋 DECOMPOSED PLAN ({len(subtasks)} phases, {cli_args.budget} iteration budget):\n")
+    print(f"\n📋 DECOMPOSED PLAN ({len(subtasks)} phases, {cli_args.budget} iteration budget):\n", flush=True)
     for st in subtasks:
-        complexity = st.get("complexity", "medium")
+        complexity = st.get("estimated_complexity", "medium")
         iters = st["max_iterations"]
         print(f"  Phase {st['index']+1} [{complexity}, {iters} iter]: {st['instruction']}")
         if st.get("acceptance_criteria"):
@@ -2077,11 +2305,13 @@ def main():
 
     # Run chain loop
     handoff = None
+    last_result = None
+    last_agent = None
     for st in subtasks:
-        print(f"\n{'='*70}")
-        print(f"🔗 PHASE {st['index']+1}/{len(subtasks)}: {st['instruction'][:80]}")
+        print(f"\n{'='*70}", flush=True)
+        print(f"🔗 PHASE {st['index']+1}/{len(subtasks)}: {st['instruction'][:80]}", flush=True)
         iters = st["max_iterations"]
-        print(f"   Budget: {iters} iterations")
+        print(f"   Budget: {iters} iterations", flush=True)
 
         phase_agent = OllamaCommandAgent(
             model="qwen3-coder:30b",
@@ -2089,6 +2319,8 @@ def main():
         )
         phase_agent.max_react_iterations = iters
         result = phase_agent.run(st["instruction"], incoming_handoff=handoff)
+        last_result = result
+        last_agent = phase_agent
 
         # Reset stuck-loop guard state so it doesn't carry across phases
         phase_agent.tool_registry._recent_calls.clear()
@@ -2101,10 +2333,14 @@ def main():
         if st.get("acceptance_criteria"):
             ac_result = AcceptanceCriteriaRunner().run(st["acceptance_criteria"])
             status = "✅ PASSED" if ac_result["passed"] else "⚠️  FAILED"
-            print(f"   Acceptance check: {status} — {st['acceptance_criteria']}")
+            print(f"   Acceptance check: {status} — {st['acceptance_criteria']}", flush=True)
 
         if not result.get("success"):
-            print(f"⚠️  Phase {st['index']+1} did not fully complete — continuing with partial handoff")
+            print(f"⚠️  Phase {st['index']+1} did not fully complete — continuing with partial handoff", flush=True)
+
+    # Post-run verification after all phases complete
+    if not cli_args.no_verify and last_result is not None and last_agent is not None:
+        PostRunVerifier(last_agent).verify(instruction, last_result, plan_text=_read_checklist())
 
 
 if __name__ == "__main__":
