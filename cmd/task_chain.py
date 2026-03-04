@@ -254,10 +254,15 @@ class TaskDecomposer:
         Returns a list of sub-task dicts with enforced budget constraints.
         Falls back to single sub-task on LLM failure.
         """
+        # Give LLM a realistic per-phase target so it doesn't output tiny values
+        target_phases = min(8, max(3, total_budget // 100))
+        per_phase_hint = max(25, total_budget // target_phases)
+
         prompt = f"""Decompose this goal into sequential sub-tasks for an autonomous agent.
 
 GOAL: {goal}
 TOTAL ITERATION BUDGET: {total_budget}
+TARGET PHASES: {target_phases} (aim for this many, each getting ~{per_phase_hint} iterations)
 
 Return a JSON array of sub-tasks. Each element:
 {{
@@ -265,16 +270,16 @@ Return a JSON array of sub-tasks. Each element:
   "instruction": "specific, actionable instruction for one sub-task",
   "acceptance_criteria": "shell command that exits 0 on success, or null",
   "estimated_complexity": "small|medium|large",
-  "max_iterations": 25
+  "max_iterations": {per_phase_hint}
 }}
 
 Rules:
 - Order tasks so each builds on the previous
 - acceptance_criteria must be a simple verifiable shell command
   (e.g. "systemctl is-active nginx", "test -f /etc/nginx/nginx.conf", "curl -sf http://localhost")
-- Complexity budgets: small=25 iterations, medium=50, large=100
-- Total max_iterations across all tasks should roughly equal {total_budget}
-- Aim for 3-8 sub-tasks; prefer fewer larger phases over many tiny ones
+- Set max_iterations proportional to complexity: simpler phases get fewer, complex phases get more
+- Total max_iterations across all tasks must sum to approximately {total_budget}
+- Aim for {target_phases} sub-tasks; prefer fewer larger phases over many tiny ones
 
 Return ONLY the JSON array, no other text."""
 
@@ -309,15 +314,20 @@ Return ONLY the JSON array, no other text."""
         for i, task in enumerate(subtasks):
             task["index"] = i
 
-        # Budget enforcement (Python, not LLM): scale down if over budget
+        # Budget enforcement: always rescale so phases fill the total budget exactly
         total = sum(t.get("max_iterations", 25) for t in subtasks)
-        if total > total_budget:
+        if total != total_budget:
             scale = total_budget / total
             for task in subtasks:
                 task["max_iterations"] = max(
                     self.MIN_ITERATIONS_PER_TASK,
                     int(task["max_iterations"] * scale)
                 )
+            # Assign any rounding remainder to the last phase
+            used = sum(t["max_iterations"] for t in subtasks)
+            remainder = total_budget - used
+            if remainder > 0:
+                subtasks[-1]["max_iterations"] += remainder
 
         return subtasks
 

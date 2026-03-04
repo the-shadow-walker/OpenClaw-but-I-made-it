@@ -1166,7 +1166,9 @@ JSON only."""
             return
         try:
             os.makedirs(os.path.dirname(self.PROGRESS_PATH), exist_ok=True)
+            task_fp = instruction[:120].replace("\n", " ")
             with open(self.PROGRESS_PATH, "w") as f:
+                f.write(f"<!-- task: {task_fp} -->\n")
                 f.write(f"<!-- updated: iteration {iteration}/{max_iter} -->\n")
                 f.write(content.strip() + "\n")
             print(f"\n📝 Progress saved → {self.PROGRESS_PATH}")
@@ -1621,18 +1623,28 @@ Return JSON only:
             context_block = "\n".join(context_lines)
             initial_message = context_block + "\n\n" + initial_message
 
-        # Inject previous session progress notes if they exist
+        # Inject previous session progress notes if they match this task
         try:
             if os.path.exists(self.PROGRESS_PATH):
                 with open(self.PROGRESS_PATH) as f:
                     prev_progress = f.read().strip()
                 if prev_progress:
-                    initial_message = (
-                        "PREVIOUS SESSION NOTES (from last run — use this to pick up where you left off):\n"
-                        f"{prev_progress}\n\n"
-                        "--- END OF PREVIOUS NOTES ---\n\n"
-                    ) + initial_message
-                    print(f"\n📖 Loaded previous session notes from {self.PROGRESS_PATH}")
+                    # Check task fingerprint: first line is <!-- task: ... -->
+                    saved_fp = ""
+                    for line in prev_progress.splitlines()[:2]:
+                        if line.startswith("<!-- task:"):
+                            saved_fp = line[len("<!-- task:"):].rstrip(" -->").strip()
+                            break
+                    current_fp = instruction[:120].replace("\n", " ")
+                    if saved_fp and saved_fp != current_fp:
+                        print(f"\n⏭️  Skipping stale progress.md (different task)")
+                    else:
+                        initial_message = (
+                            "PREVIOUS SESSION NOTES (from last run — use this to pick up where you left off):\n"
+                            f"{prev_progress}\n\n"
+                            "--- END OF PREVIOUS NOTES ---\n\n"
+                        ) + initial_message
+                        print(f"\n📖 Loaded previous session notes from {self.PROGRESS_PATH}")
         except Exception:
             pass
 
