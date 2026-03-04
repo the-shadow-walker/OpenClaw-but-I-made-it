@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# ollama_agent_core.py  —  v2.2
+# ollama_agent_core.py  —  v3.0
 # Features in this build:
 #   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
 #   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
@@ -17,6 +17,13 @@
 #   - PostRunVerifier: QA agent runs after finish (writes tests, runs them,
 #     heavy model produces PASS/FAIL report with fix plan + improvements)
 #   - Line-buffered stdout: live output works correctly when piped to tee
+#   - v3.0: Premature-finish threshold capped at max(20, min(max_iter//4, 100))
+#   - v3.0: File write cap (3 per path) — blocks rewrites without concrete evidence
+#   - v3.0: Failed command blocking (2 identical failures → blocked)
+#   - v3.0: Forward progress detection (warn @20 idle iters, abort @35)
+#   - v3.0: Mechanical syntax check (py_compile / node --check) after create_file
+#   - v3.0: Hard phase gate — chain aborts on acceptance check failure
+#   - v3.0: manage_server tool — tracks Popen handles, prevents zombie processes
 # =============================================================================
 import argparse
 import subprocess
@@ -57,6 +64,7 @@ AVAILABLE TOOLS:
   read_file        — {{"path": str}}
   memory_lookup    — {{"query": str}}
   finish           — {{"summary": str, "success": bool}}
+  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}
 
 GENERAL RULES:
 1. Output ONLY valid JSON — no text before or after
@@ -93,6 +101,10 @@ GENERAL RULES:
     NEVER use --reload (it spawns child processes that hold pipes open and cause timeouts).
     After backgrounding, confirm with a separate execute_command: sleep 2 && curl -sf http://localhost:8000/
     If curl fails, read the log: cat /tmp/server.log | tail -20
+17b. Prefer manage_server over nohup for persistent servers — it tracks the PID and
+     lets you stop/restart cleanly. Always redirect logs in the command:
+     {{"action":"start","name":"backend","command":"uvicorn main:app --port 8000 >/tmp/backend.log 2>&1"}}
+     After starting, verify: execute_command 'sleep 2 && curl -sf http://localhost:8000/'
 18. Wrong package names cause Python 2 SyntaxErrors inside site-packages. When you see
     a SyntaxError in .venv/lib/.../site-packages/<pkg>.py: uninstall that package
     immediately (pip uninstall <pkg> -y) then install the CORRECT Python 3 package.
@@ -1496,6 +1508,8 @@ Return JSON only:
             confirm_cb = self._ai_confirm
 
         max_iter = max_iterations if max_iterations is not None else self.max_react_iterations
+        # Cap threshold so large --budget values don't prevent early finish
+        _finish_threshold = max(20, min(max_iter // 4, 100))
 
         # System survey + runbook
         survey = self.memory.get_system_survey()
@@ -1632,6 +1646,11 @@ Return JSON only:
         _premature_finish_challenges: int = 0
         # Consecutive JSON parse failures — triggers heavy model rescue at 5
         _consecutive_json_failures: int = 0
+        # Forward progress tracking
+        _last_progress_iteration: int = 0      # last iter with new file or unique cmd success
+        _seen_commands: set = set()            # unique successful commands this phase
+        _progress_warn_at: int = 20
+        _progress_kill_at: int = 35
         # Inject a task-progress reminder every N iterations
         # Use max_iter//8 so a 100-iteration run gets a checkpoint every ~12 steps,
         # catching plan drift early rather than at 25% (too late).
@@ -1802,12 +1821,22 @@ Return JSON only:
                 "result": result,
             })
 
+            # Track forward progress
+            if result.success:
+                if tool in ("create_file", "patch_file"):
+                    _last_progress_iteration = iteration
+                elif tool == "execute_command":
+                    cmd_key = args.get("command", "").strip()
+                    if cmd_key not in _seen_commands:
+                        _seen_commands.add(cmd_key)
+                        _last_progress_iteration = iteration
+
             if tool == "finish":
                 # Challenge premature success: fire once if < 50% of budget used
                 if (
                     args.get("success")
                     and _premature_finish_challenges < 1
-                    and iteration < int(max_iter * 0.5)
+                    and iteration < _finish_threshold   # was: int(max_iter * 0.5)
                 ):
                     _premature_finish_challenges += 1
                     pct = iteration * 100 // max_iter
@@ -1923,6 +1952,28 @@ Return JSON only:
                     f"Produce your next thought and tool call as JSON."
                 )
             react_history.append({"role": "user", "content": obs})
+
+            # Stagnation / forward progress enforcement
+            _idle = iteration - _last_progress_iteration
+            if _idle == _progress_warn_at:
+                print(f"⚠️  No forward progress for {_idle} iterations — injecting warning")
+                react_history.append({"role": "user", "content": (
+                    f"[STAGNATION WARNING — {_idle} iterations without meaningful progress]\n\n"
+                    f"You have not created/modified a file or run a new successful command in {_idle} iterations.\n\n"
+                    f"REQUIRED: Diagnose the blocker:\n"
+                    f"• What exactly is blocking you?\n"
+                    f"• Try a fundamentally different approach\n"
+                    f"• If the task is unresolvable, call finish(success=false) now\n\n"
+                    f"You have {_progress_kill_at - _idle} iterations before this phase is force-aborted.\n\n"
+                    f"Produce your next thought and tool call as JSON."
+                )})
+            elif _idle >= _progress_kill_at:
+                finish_summary = (
+                    f"Phase aborted: {_idle} consecutive iterations with no forward progress. "
+                    f"Last meaningful action at iteration {_last_progress_iteration}."
+                )
+                print(f"💀 {finish_summary}")
+                break
 
         else:
             finish_summary = f"Max iterations ({max_iter}) reached without finishing"
@@ -2322,9 +2373,8 @@ def main():
         last_result = result
         last_agent = phase_agent
 
-        # Reset stuck-loop guard state so it doesn't carry across phases
-        phase_agent.tool_registry._recent_calls.clear()
-        phase_agent.tool_registry._stuck_warn_count = 0
+        # Reset per-phase state so it doesn't carry across phases
+        phase_agent.tool_registry.reset_phase_state()
 
         # Extract structured handoff for next phase
         handoff = HandoffExtractor(phase_agent).extract(st["instruction"], result)
@@ -2332,8 +2382,17 @@ def main():
         # Run acceptance criteria check if provided
         if st.get("acceptance_criteria"):
             ac_result = AcceptanceCriteriaRunner().run(st["acceptance_criteria"])
-            status = "✅ PASSED" if ac_result["passed"] else "⚠️  FAILED"
-            print(f"   Acceptance check: {status} — {st['acceptance_criteria']}", flush=True)
+            if ac_result["passed"]:
+                print(f"   Acceptance check: ✅ PASSED — {st['acceptance_criteria']}", flush=True)
+            else:
+                print(
+                    f"   Acceptance check: ❌ FAILED — {st['acceptance_criteria']}\n"
+                    f"   stdout: {ac_result.get('stdout','')[:200]}\n"
+                    f"   stderr: {ac_result.get('stderr','')[:200]}",
+                    flush=True
+                )
+                print(f"❌ Phase {st['index']+1} failed — aborting chain", flush=True)
+                break   # Hard gate — do NOT run subsequent phases
 
         if not result.get("success"):
             print(f"⚠️  Phase {st['index']+1} did not fully complete — continuing with partial handoff", flush=True)

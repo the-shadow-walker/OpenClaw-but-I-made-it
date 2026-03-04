@@ -28,6 +28,7 @@ class ToolRegistry:
         "read_file",
         "memory_lookup",
         "finish",
+        "manage_server",   # NEW
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None):
@@ -41,6 +42,17 @@ class ToolRegistry:
         self._recent_calls: deque = deque(maxlen=4)
         # How many times we've already warned about a stuck loop this session
         self._stuck_warn_count: int = 0
+        self._file_write_counts: Dict[str, int] = {}   # path → write count
+        self._failed_commands: Dict[str, int] = {}      # command → fail count
+        self._server_procs: Dict[str, Any] = {}         # name → Popen
+
+    def reset_phase_state(self) -> None:
+        """Reset per-phase state. Call between chain phases."""
+        self._recent_calls.clear()
+        self._stuck_warn_count = 0
+        self._file_write_counts.clear()
+        self._failed_commands.clear()
+        # _server_procs intentionally NOT cleared — servers persist across phases
 
     # ---------------------------------------------------------------- gate --
 
@@ -148,6 +160,25 @@ class ToolRegistry:
                 if not confirm_cb(prompt, f"patch file: {args.get('path', '?')} — search: {str(args.get('search', ''))[:120]}"):
                     return ToolResult(False, "", "Cancelled by user", {})
 
+        elif tool == "manage_server":
+            action = args.get("action", "")
+            command = args.get("command", "")
+            if action in ("start", "restart") and command:
+                is_safe, risk, reason = self.safety_validator.validate_command(command)
+                if not is_safe or risk == "blocked":
+                    print(f"\n🛡️  BLOCKED: {reason}")
+                    return ToolResult(False, "", f"Blocked: {reason}", {"risk": "blocked"})
+                if self.explain_cb:
+                    print(f"\n{self.explain_cb(command)}")
+                needs_confirm = (confidence < 90) or (risk in ("medium", "high"))
+                if needs_confirm and confirm_cb:
+                    risk_icon = {"medium": "🟡", "high": "🔴"}.get(risk, "⚠️ ")
+                    print(f"\n{risk_icon} [{risk.upper()} RISK]  Confidence: {confidence}%")
+                    if not confirm_cb(f"\n   Start server? (y/n): ", command):
+                        return ToolResult(False, "", "Cancelled by user", {})
+                elif needs_confirm:
+                    return ToolResult(False, "", "Requires confirmation but no confirm_cb", {"risk": risk})
+
         handler_map = {
             "execute_command": self._handle_execute_command,
             "create_file":     self._handle_create_file,
@@ -156,6 +187,7 @@ class ToolRegistry:
             "read_file":       self._handle_read_file,
             "memory_lookup":   self._handle_memory_lookup,
             "finish":          self._handle_finish,
+            "manage_server":   self._handle_manage_server,
         }
         return handler_map[tool](args)
 
@@ -245,8 +277,22 @@ class ToolRegistry:
 
             if success:
                 print(f"✅ Done ({duration_ms}ms)")
+                self._failed_commands.pop(command.strip(), None)   # clear on success
             else:
                 print(f"❌ Failed — exit code {result.returncode} ({duration_ms}ms)")
+                norm = command.strip()
+                self._failed_commands[norm] = self._failed_commands.get(norm, 0) + 1
+                if self._failed_commands[norm] >= 2:
+                    return ToolResult(
+                        False, "",
+                        f"BLOCKED: this command has failed {self._failed_commands[norm]} times:\n"
+                        f"  {norm[:200]}\n\n"
+                        f"You MUST take a fundamentally different approach.\n"
+                        f"• Fix the ROOT CAUSE from the error above\n"
+                        f"• Try a different command\n"
+                        f"• Use web_search or memory_lookup for alternatives",
+                        {"blocked_repeated_failure": True}
+                    )
 
             if result.stdout:
                 lines = result.stdout.split("\n")
@@ -288,6 +334,18 @@ class ToolRegistry:
             if path.startswith(p):
                 return ToolResult(False, "", f"Blocked: cannot write to {p}", {})
 
+        # Cap at 3 successful writes per path
+        self._file_write_counts[path] = self._file_write_counts.get(path, 0) + 1
+        if self._file_write_counts[path] > 3:
+            return ToolResult(
+                False, "",
+                f"BLOCKED: '{path}' has been written {self._file_write_counts[path]-1} times.\n"
+                f"You MUST provide concrete failure evidence before rewriting.\n"
+                f"Options: run the file and show the error, OR use patch_file for targeted edits,\n"
+                f"OR call finish(success=false) if genuinely unresolvable.",
+                {"blocked_write_cap": True}
+            )
+
         print(f"\n📝 Creating file: {path}")
         try:
             directory = os.path.dirname(path)
@@ -296,7 +354,30 @@ class ToolRegistry:
             with open(path, "w") as f:
                 f.write(content)
             print(f"✅ Created: {path}")
-            return ToolResult(True, f"Created {path}", "", {"path": path})
+
+            # Mechanical syntax check
+            syntax_note = ""
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".py":
+                try:
+                    chk = subprocess.run(["python3", "-m", "py_compile", path],
+                                         capture_output=True, text=True, timeout=10)
+                    if chk.returncode != 0:
+                        syntax_note = f"\n\n⚠️  SYNTAX ERROR in {path}:\n{chk.stderr.strip()[:500]}"
+                        print(f"⚠️  Syntax error detected in {path}")
+                except Exception as e:
+                    syntax_note = f"\n\n⚠️  Syntax check failed: {e}"
+            elif ext in (".js", ".ts"):
+                try:
+                    chk = subprocess.run(["node", "--check", path],
+                                         capture_output=True, text=True, timeout=10)
+                    if chk.returncode != 0:
+                        syntax_note = f"\n\n⚠️  SYNTAX ERROR in {path}:\n{chk.stderr.strip()[:500]}"
+                        print(f"⚠️  Syntax error detected in {path}")
+                except Exception as e:
+                    syntax_note = f"\n\n⚠️  Syntax check failed: {e}"
+
+            return ToolResult(True, f"Created {path}{syntax_note}", "", {"path": path})
         except PermissionError:
             home = os.path.expanduser("~")
             return ToolResult(False, "",
@@ -413,3 +494,57 @@ class ToolRegistry:
         print(f"{icon} FINISH: {summary}")
         print(f"{'=' * 70}")
         return ToolResult(success, summary, "", {"finished": True})
+
+    def _handle_manage_server(self, args: dict) -> ToolResult:
+        action = (args.get("action") or "").lower()
+        name = args.get("name", "")
+        command = args.get("command", "")
+        if not name:
+            return ToolResult(False, "", "manage_server requires 'name'", {})
+        if action not in ("start", "stop", "status", "restart"):
+            return ToolResult(False, "", f"Unknown action '{action}'. Use: start|stop|status|restart", {})
+
+        if action == "status":
+            proc = self._server_procs.get(name)
+            if proc is None:
+                return ToolResult(True, f"'{name}': not tracked this session", "", {})
+            running = proc.poll() is None
+            return ToolResult(True, f"'{name}': {'running' if running else 'stopped'} (pid={proc.pid})", "", {"running": running})
+
+        if action in ("stop", "restart"):
+            proc = self._server_procs.get(name)
+            if proc and proc.poll() is None:
+                print(f"\n🛑 Stopping '{name}' (pid={proc.pid})")
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                except Exception as e:
+                    return ToolResult(False, "", f"Stop failed: {e}", {})
+                del self._server_procs[name]
+                print(f"✅ Stopped '{name}'")
+            elif action == "stop":
+                return ToolResult(True, f"'{name}' was not running", "", {})
+
+        if action in ("start", "restart"):
+            if not command:
+                return ToolResult(False, "", "manage_server start requires 'command'", {})
+            existing = self._server_procs.get(name)
+            if existing and existing.poll() is None:
+                return ToolResult(False, "", f"'{name}' already running (pid={existing.pid}). Use restart.", {"pid": existing.pid})
+            print(f"\n🚀 Starting '{name}': {command}")
+            try:
+                proc = subprocess.Popen(command, shell=True, executable="/bin/bash",
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+                self._server_procs[name] = proc
+                time.sleep(1)
+                if proc.poll() is not None:
+                    return ToolResult(False, "", f"'{name}' exited immediately (code={proc.returncode}). Check the command.", {})
+                print(f"✅ '{name}' started (pid={proc.pid})")
+                return ToolResult(True, f"'{name}' running (pid={proc.pid}). Redirect server logs in command: e.g. 'uvicorn ... >/tmp/{name}.log 2>&1'", "", {"pid": proc.pid})
+            except Exception as e:
+                return ToolResult(False, "", f"Start failed: {e}", {})
