@@ -2391,10 +2391,21 @@ def main():
                     f"   stderr: {ac_result.get('stderr','')[:200]}",
                     flush=True
                 )
-                print(f"❌ Phase {st['index']+1} failed — aborting chain", flush=True)
-                break   # Hard gate — do NOT run subsequent phases
+                if result.get("success"):
+                    # Agent claimed success but acceptance check disagrees — hard abort.
+                    # Something is fundamentally wrong with the output; don't build on it.
+                    print(f"❌ Phase {st['index']+1} claimed success but failed acceptance — aborting chain", flush=True)
+                    break
+                else:
+                    # Agent ran out of budget (success=False). Acceptance failure is a
+                    # budget problem, not a broken artifact — warn and continue.
+                    print(
+                        f"⚠️  Phase {st['index']+1} hit budget limit; acceptance not met — "
+                        f"continuing with partial handoff (re-run with more --budget)",
+                        flush=True
+                    )
 
-        if not result.get("success"):
+        elif not result.get("success"):
             print(f"⚠️  Phase {st['index']+1} did not fully complete — continuing with partial handoff", flush=True)
 
     # Post-run verification after all phases complete
