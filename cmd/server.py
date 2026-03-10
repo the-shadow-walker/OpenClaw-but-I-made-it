@@ -15,8 +15,15 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Optional
 import secrets
+import sys
 
-# Import the agent (assumes ollama_agent.py is in same directory)
+# When running from the Jarvis root (~/cmd = /mnt/storage/NAS/Jarvis), modules
+# live in the cmd/ subdirectory. Add it to the path so imports work correctly.
+_CMD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cmd")
+if os.path.isdir(_CMD_DIR) and _CMD_DIR not in sys.path:
+    sys.path.insert(0, _CMD_DIR)
+
+# Import the agent (assumes ollama_agent.py is in same directory or cmd/)
 from ollama_agent_core import OllamaCommandAgent
 from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskReplanner,
                         TaskDecomposer, TaskChain, cleanup_between_phases)
