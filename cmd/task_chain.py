@@ -13,7 +13,9 @@ Classes:
 import json
 import os
 import subprocess
+import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +23,70 @@ from ollama_agent_core import CommandSafetyValidator
 
 CHAINS_DIR = os.path.expanduser("~/.agent_bin/chains")
 INCOMPLETE_TASK_PATH = os.path.expanduser("~/.agent_bin/last_incomplete_task.json")
+
+# Common dev ports to clean up between chain phases
+_CLEANUP_PORTS = [5000, 8000, 3000, 8080, 8443]
+
+
+# ---------------------------------------------------------------------------
+# cleanup_between_phases
+# ---------------------------------------------------------------------------
+
+def cleanup_between_phases() -> None:
+    """Kill any processes occupying common dev ports. Safe no-op if nothing is listening."""
+    for port in _CLEANUP_PORTS:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True,
+        )  # ignore errors — port may not be in use
+    time.sleep(1)  # let processes die
+
+
+# ---------------------------------------------------------------------------
+# ImplementationArtifact
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ImplementationArtifact:
+    """Structured record of what a SubtaskOrchestrator phase produced."""
+    subtask_index: int
+    subtask_instruction: str
+    status: str                          # "completed" | "partial" | "failed"
+    summary: str                         # one paragraph prose
+    files_created: List[str] = field(default_factory=list)
+    files_modified: List[str] = field(default_factory=list)
+    services_running: List[Dict] = field(default_factory=list)   # [{name, port, pid}]
+    credentials: Dict[str, str] = field(default_factory=dict)    # {db_url: ..., secret_key: ...}
+    micro_task_reports: List[Dict] = field(default_factory=list) # raw Self-Correction Reports
+    notes: List[str] = field(default_factory=list)               # e.g. "route expects 'email'"
+
+    def to_dict(self) -> Dict:
+        return {
+            "subtask_index": self.subtask_index,
+            "subtask_instruction": self.subtask_instruction,
+            "status": self.status,
+            "summary": self.summary,
+            "files_created": self.files_created,
+            "files_modified": self.files_modified,
+            "services_running": self.services_running,
+            "credentials": self.credentials,
+            "micro_task_reports": self.micro_task_reports,
+            "notes": self.notes,
+        }
+
+    def compact_summary(self, max_chars: int = 500) -> str:
+        """Produce a ≤500-char summary for context injection into subsequent phases."""
+        parts = [f"[Phase {self.subtask_index}] {self.status.upper()}: {self.summary[:200]}"]
+        if self.files_created:
+            parts.append(f"Created: {', '.join(self.files_created[:5])}")
+        if self.files_modified:
+            parts.append(f"Modified: {', '.join(self.files_modified[:5])}")
+        if self.services_running:
+            svc = ", ".join(f"{s.get('name')}:{s.get('port')}" for s in self.services_running[:3])
+            parts.append(f"Services: {svc}")
+        if self.notes:
+            parts.append(f"Notes: {'; '.join(self.notes[:3])}")
+        return "\n".join(parts)[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -273,13 +339,23 @@ Return a JSON array of sub-tasks. Each element:
   "max_iterations": {per_phase_hint}
 }}
 
-Rules:
-- Order tasks so each builds on the previous
-- acceptance_criteria must be a simple verifiable shell command
-  (e.g. "systemctl is-active nginx", "test -f /etc/nginx/nginx.conf", "curl -sf http://localhost")
-- Set max_iterations proportional to complexity: simpler phases get fewer, complex phases get more
-- Total max_iterations across all tasks must sum to approximately {total_budget}
-- Aim for {target_phases} sub-tasks; prefer fewer larger phases over many tiny ones
+MANDATORY DECOMPOSITION RULES:
+1. PHASE 0 MUST be: "Create DOCS/ARCH.md with: module list, DB schema (if needed), API route table,
+   port assignments, auth approach, and file layout. No code — specification only."
+   Its acceptance_criteria: "test -f DOCS/ARCH.md"
+2. MODULAR STRUCTURE: Decompose so each phase touches ≤3 files. Prefer src/auth/, src/models/,
+   src/api/ layout over a monolithic app.py.
+3. DB MIGRATION: If a database is needed, one phase must be: "Initialize DB schema using schema.sql
+   or Alembic migration — do NOT create tables at app startup."
+4. SERVER VERIFICATION: Any phase that starts a server must be followed immediately by a
+   verification phase: "Read the server log and curl the /health endpoint to confirm it started."
+5. ORDER: Always put install/dependency phases before code phases, code before server start.
+6. Order tasks so each builds on the previous.
+7. acceptance_criteria must be a simple verifiable shell command
+   (e.g. "systemctl is-active nginx", "test -f /etc/nginx/nginx.conf", "curl -sf http://localhost")
+8. Set max_iterations proportional to complexity: simpler phases get fewer, complex phases get more.
+9. Total max_iterations across all tasks must sum to approximately {total_budget}.
+10. Aim for {target_phases} sub-tasks; prefer fewer larger phases over many tiny ones.
 
 Return ONLY the JSON array, no other text."""
 
@@ -403,6 +479,266 @@ Return JSON only:
                 "skip": False,
                 "reason": "replan failed",
             }
+
+
+# ---------------------------------------------------------------------------
+# SubtaskOrchestrator
+# ---------------------------------------------------------------------------
+
+class SubtaskOrchestrator:
+    """
+    Producer tier. Given one subtask + full chain context, breaks it into
+    3-5 micro-tasks and spawns sequential Minion agents (clean history each).
+
+    Tool sets:
+      CODER_TOOLS    — for code-writing micro-tasks (no command execution)
+      COMMANDER_TOOLS — for infrastructure micro-tasks (no file writing)
+    """
+
+    CODER_TOOLS = {"read_file", "create_file", "patch_file", "finish"}
+    COMMANDER_TOOLS = {"execute_command", "manage_server", "read_file", "finish"}
+
+    def __init__(self, agent):
+        """agent: shared OllamaCommandAgent instance (history cleared per minion)."""
+        self.agent = agent
+
+    # -------------------------------------------------------- public API --
+
+    def orchestrate(
+        self,
+        subtask: Dict,
+        chain_context: Dict,
+    ) -> ImplementationArtifact:
+        """
+        Break subtask into micro-tasks and run each as a Minion.
+        Returns an ImplementationArtifact aggregating all micro-task results.
+        """
+        subtask_index = subtask.get("index", 0)
+        subtask_instruction = subtask.get("instruction", "")
+
+        print(f"\n{'=' * 70}")
+        print(f"🎬 SubtaskOrchestrator: phase {subtask_index} — {subtask_instruction[:80]}")
+
+        # 1. Decompose subtask into micro-tasks
+        micro_tasks = self._decompose_to_micro_tasks(subtask_instruction, chain_context)
+        print(f"  📋 {len(micro_tasks)} micro-tasks planned")
+
+        micro_task_reports: List[Dict] = []
+        all_files_created: List[str] = []
+        all_files_modified: List[str] = []
+        all_services: List[Dict] = []
+        all_credentials: Dict[str, str] = {}
+        all_notes: List[str] = []
+        overall_status = "completed"
+
+        # 2. Run each micro-task as a Minion (clean history per minion)
+        for i, micro_task in enumerate(micro_tasks):
+            mt_type = micro_task.get("type", "command")
+            work_order = micro_task.get("work_order", micro_task.get("instruction", ""))
+            file_scope = micro_task.get("file_scope", [])
+
+            print(f"\n  🤖 Minion {i + 1}/{len(micro_tasks)} [{mt_type}]: {work_order[:80]}")
+
+            # Determine tool whitelist based on micro-task type
+            tools = self.CODER_TOOLS if mt_type == "code" else self.COMMANDER_TOOLS
+
+            # Build minion prompt
+            prompt = self._build_minion_prompt(
+                work_order=work_order,
+                chain_context=chain_context,
+                previous_reports=micro_task_reports,
+                file_scope=file_scope,
+                mt_type=mt_type,
+            )
+
+            # Clear agent history for a fresh minion context
+            self.agent.react_trace = []
+
+            # Run the minion
+            result = self.agent.run_react(
+                instruction=prompt,
+                tool_whitelist=tools,
+                max_iterations=15,
+            )
+
+            report = {
+                "micro_task_index": i,
+                "type": mt_type,
+                "work_order": work_order,
+                "success": result.get("success", False),
+                "finish_summary": result.get("finish_summary", ""),
+                "iterations_used": result.get("iterations_used", 0),
+            }
+
+            # Extract files touched from trace
+            for entry in result.get("trace", []):
+                entry_tool = entry.get("tool", "")
+                entry_args = entry.get("args", {})
+                entry_result = entry.get("result")
+                ok = getattr(entry_result, "success", False) if hasattr(entry_result, "success") \
+                    else (entry_result or {}).get("success", False)
+                if ok and entry_tool == "create_file":
+                    p = entry_args.get("path", "")
+                    if p and p not in all_files_created:
+                        all_files_created.append(p)
+                elif ok and entry_tool == "patch_file":
+                    p = entry_args.get("path", "")
+                    if p and p not in all_files_modified:
+                        all_files_modified.append(p)
+                elif ok and entry_tool == "manage_server":
+                    if entry_args.get("action") == "start":
+                        all_services.append({
+                            "name": entry_args.get("name", ""),
+                            "command": entry_args.get("command", ""),
+                        })
+
+            micro_task_reports.append(report)
+
+            if not report["success"]:
+                all_notes.append(f"Minion {i + 1} failed: {report['finish_summary'][:120]}")
+                overall_status = "partial"
+
+        # 3. Build ImplementationArtifact
+        summary_parts = [r.get("finish_summary", "") for r in micro_task_reports if r.get("finish_summary")]
+        summary = " | ".join(summary_parts[:3])[:500] or f"Phase {subtask_index} complete"
+
+        artifact = ImplementationArtifact(
+            subtask_index=subtask_index,
+            subtask_instruction=subtask_instruction,
+            status=overall_status,
+            summary=summary,
+            files_created=all_files_created,
+            files_modified=all_files_modified,
+            services_running=all_services,
+            credentials=all_credentials,
+            micro_task_reports=micro_task_reports,
+            notes=all_notes,
+        )
+
+        print(f"\n✅ SubtaskOrchestrator phase {subtask_index} done: {overall_status}")
+        return artifact
+
+    # ---------------------------------------------------- private helpers --
+
+    def _decompose_to_micro_tasks(
+        self, subtask_instruction: str, chain_context: Dict
+    ) -> List[Dict]:
+        """LLM call (fast model, one-shot) to break a subtask into 3-5 micro-tasks."""
+        context_summary = self._build_context_summary(chain_context)
+
+        prompt = f"""Break this sub-task into 3-5 sequential micro-tasks for individual worker agents.
+
+SUB-TASK: {subtask_instruction}
+
+CHAIN CONTEXT:
+{context_summary}
+
+Return a JSON array. Each element:
+{{
+  "index": 0,
+  "type": "code|command",
+  "work_order": "specific instruction for one micro-task worker",
+  "file_scope": ["list", "of", "files", "this", "worker", "should", "touch"]
+}}
+
+Rules:
+- type "code": for writing/editing files (use read_file, create_file, patch_file, finish)
+- type "command": for running shell commands, installing packages, starting services
+- Each micro-task should be completable in ≤15 iterations
+- Keep micro-tasks atomic and non-overlapping in file scope
+- 3 micro-tasks minimum, 5 maximum
+
+Return ONLY the JSON array, no prose."""
+
+        system = "You are a micro-task decomposer. Return only a JSON array. No prose."
+        try:
+            raw = self.agent._call_model_oneshot(
+                self.agent.fast_model, prompt, system, timeout=30
+            )
+            micro_tasks = self.agent.extract_json(raw)
+            if micro_tasks and isinstance(micro_tasks, list) and len(micro_tasks) >= 1:
+                for i, mt in enumerate(micro_tasks):
+                    mt.setdefault("index", i)
+                    mt.setdefault("type", "command")
+                    mt.setdefault("file_scope", [])
+                return micro_tasks[:5]
+        except Exception:
+            pass
+
+        # Fallback: single micro-task with the full instruction
+        return [{
+            "index": 0,
+            "type": "command",
+            "work_order": subtask_instruction,
+            "file_scope": [],
+        }]
+
+    def _build_context_summary(self, chain_context: Dict) -> str:
+        """Produce a compact (≤500 char) summary of chain state for minion prompts."""
+        goal = chain_context.get("goal", "")[:150]
+        parts = [f"Goal: {goal}"]
+
+        subtasks = chain_context.get("subtasks", [])
+        for st in subtasks:
+            idx = st.get("index", "?")
+            status = st.get("status", "pending")
+            instr = st.get("instruction", "")[:60]
+            artifact_dict = st.get("artifact")
+            if artifact_dict:
+                art_summary = artifact_dict.get("summary", "")[:80]
+                parts.append(f"  Phase {idx} [{status}]: {instr} → {art_summary}")
+            else:
+                parts.append(f"  Phase {idx} [{status}]: {instr}")
+
+        return "\n".join(parts)[:500]
+
+    def _build_minion_prompt(
+        self,
+        work_order: str,
+        chain_context: Dict,
+        previous_reports: List[Dict],
+        file_scope: List[str],
+        mt_type: str,
+    ) -> str:
+        """Build the full prompt for a Minion agent."""
+        goal = chain_context.get("goal", "")
+        arch_summary = chain_context.get("arch_summary", "(not yet written)")
+
+        # Compact previous micro-task reports
+        prev_summaries = []
+        for r in previous_reports:
+            idx = r.get("micro_task_index", "?")
+            ok = "✅" if r.get("success") else "❌"
+            summary = r.get("finish_summary", "")[:100]
+            prev_summaries.append(f"  {ok} Micro-task {idx}: {summary}")
+        prev_text = "\n".join(prev_summaries) if prev_summaries else "  (none yet)"
+
+        file_scope_text = (
+            f"Only touch these files: {', '.join(file_scope)}"
+            if file_scope else "No specific file scope restriction"
+        )
+
+        tool_note = (
+            "You may use: read_file, create_file, patch_file, finish"
+            if mt_type == "code"
+            else "You may use: execute_command, manage_server, read_file, finish"
+        )
+
+        return (
+            f"TASK: {work_order}\n\n"
+            f"CONTEXT:\n"
+            f"  Chain goal: {goal}\n"
+            f"  Architecture: {arch_summary}\n\n"
+            f"PREVIOUSLY COMPLETED IN THIS PHASE:\n{prev_text}\n\n"
+            f"CONSTRAINTS:\n"
+            f"  - {file_scope_text}\n"
+            f"  - {tool_note}\n"
+            f"  - You have a budget of 15 iterations — use them efficiently\n"
+            f"  - DO NOT start servers or background processes (unless type=command)\n"
+            f"  - Call finish() with a clear summary of exactly what you did and any key\n"
+            f"    facts (ports, credentials, file paths) for future agents\n\n"
+            f"Produce your first thought and tool call as JSON."
+        )
 
 
 # ---------------------------------------------------------------------------

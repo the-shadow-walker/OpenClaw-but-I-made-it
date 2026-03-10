@@ -31,18 +31,22 @@ class ToolRegistry:
         "manage_server",   # NEW
     }
 
-    def __init__(self, safety_validator, search_agent, memory, explain_cb=None):
+    def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
+                 allowed_tools=None):
         self.safety_validator = safety_validator
         self.search_agent = search_agent
         self.memory = memory
         # Optional callable(command: str) -> str that returns a human-readable
         # breakdown of the command segments, shown before execution / confirmation.
         self.explain_cb = explain_cb
+        # Optional set of tool names that are permitted (None = all tools allowed)
+        self.allowed_tools: Optional[set] = allowed_tools
         # Tracks the last 4 (tool, args_json) calls for stuck-loop detection
         self._recent_calls: deque = deque(maxlen=4)
         # How many times we've already warned about a stuck loop this session
         self._stuck_warn_count: int = 0
         self._file_write_counts: Dict[str, int] = {}   # path → write count
+        self._patch_counts: Dict[str, int] = {}         # path → patch count
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
 
@@ -51,6 +55,7 @@ class ToolRegistry:
         self._recent_calls.clear()
         self._stuck_warn_count = 0
         self._file_write_counts.clear()
+        self._patch_counts.clear()
         self._failed_commands.clear()
         # _server_procs intentionally NOT cleared — servers persist across phases
 
@@ -101,6 +106,10 @@ class ToolRegistry:
 
         if tool not in self.TOOL_NAMES:
             return ToolResult(False, "", f"Unknown tool: {tool}", {})
+
+        # ---- minion tool whitelist gate ----
+        if self.allowed_tools is not None and tool not in self.allowed_tools:
+            return ToolResult(False, "", f"Tool '{tool}' is not available to this agent.", {})
 
         # ---- safety / confidence gate ----
         if tool == "execute_command":
@@ -412,6 +421,28 @@ class ToolRegistry:
         if search not in original:
             return ToolResult(False, "", f"Search string not found in {path}", {})
 
+        # Per-file patch counter — block after 5 patches to prevent loops
+        self._patch_counts[path] = self._patch_counts.get(path, 0) + 1
+        if self._patch_counts[path] > 5:
+            return ToolResult(
+                False, "",
+                f"BLOCKED: '{path}' has been patched {self._patch_counts[path] - 1} times this phase. "
+                "Use create_file to rewrite the whole file instead.",
+                {"force_rewrite": True},
+            )
+
+        # Apply patch (first occurrence only)
+        new_content = original.replace(search, replace, 1)
+
+        # No-op detection — catches hallucination loops where search==replace
+        if new_content == original:
+            return ToolResult(
+                False, "",
+                "Error: search string found but replacement produced identical content. "
+                "You are in a no-op loop. Read the file again and provide a different search string.",
+                {},
+            )
+
         # Create timestamped backup
         backup_dir = os.path.expanduser("~/.agent_bin/backups")
         os.makedirs(backup_dir, exist_ok=True)
@@ -424,14 +455,34 @@ class ToolRegistry:
         except Exception as e:
             return ToolResult(False, "", f"Could not create backup: {e}", {})
 
-        # Apply patch (first occurrence only)
-        new_content = original.replace(search, replace, 1)
-
         try:
             with open(path, "w") as f:
                 f.write(new_content)
             print(f"✅ Patched: {path}  (backup: {backup_path})")
-            return ToolResult(True, f"Patched {path}", "", {"backup_path": backup_path})
+
+            # Mechanical syntax check (same gate as create_file)
+            syntax_note = ""
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".py":
+                try:
+                    chk = subprocess.run(["python3", "-m", "py_compile", path],
+                                         capture_output=True, text=True, timeout=10)
+                    if chk.returncode != 0:
+                        syntax_note = f"\n\n⚠️  SYNTAX ERROR in {path}:\n{chk.stderr.strip()[:500]}"
+                        print(f"⚠️  Syntax error detected in {path}")
+                except Exception as e:
+                    syntax_note = f"\n\n⚠️  Syntax check failed: {e}"
+            elif ext in (".js", ".ts"):
+                try:
+                    chk = subprocess.run(["node", "--check", path],
+                                         capture_output=True, text=True, timeout=10)
+                    if chk.returncode != 0:
+                        syntax_note = f"\n\n⚠️  SYNTAX ERROR in {path}:\n{chk.stderr.strip()[:500]}"
+                        print(f"⚠️  Syntax error detected in {path}")
+                except Exception as e:
+                    syntax_note = f"\n\n⚠️  Syntax check failed: {e}"
+
+            return ToolResult(True, f"Patched {path}{syntax_note}", "", {"backup_path": backup_path})
         except Exception as e:
             # Attempt to restore from backup
             try:

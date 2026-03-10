@@ -18,7 +18,8 @@ import secrets
 
 # Import the agent (assumes ollama_agent.py is in same directory)
 from ollama_agent_core import OllamaCommandAgent
-from task_chain import HandoffExtractor, AcceptanceCriteriaRunner, SubtaskReplanner, TaskDecomposer, TaskChain
+from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskReplanner,
+                        TaskDecomposer, TaskChain, cleanup_between_phases)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
@@ -315,7 +316,9 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
         chain.update_chain({"status": "completed", "completed_at": datetime.now().isoformat()})
         return
 
-    # 10. Update current index and submit next subtask
+    # 10. Clean up zombie ports, then submit next subtask
+    print(f"🧹 Chain {chain_id[:8]}: cleaning up dev ports before next phase...")
+    cleanup_between_phases()
     chain = TaskChain.load(chain_id)
     chain.update_chain({"current_subtask_index": next_index})
     print(f"▶️  Chain {chain_id[:8]}: advancing to subtask {next_index}")

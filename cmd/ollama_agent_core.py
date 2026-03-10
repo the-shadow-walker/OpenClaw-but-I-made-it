@@ -340,8 +340,9 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 32768       # fast model (14b) — ReAct history needs long context
+    NUM_CTX = 16384       # fast model (14b) — halves KV cache fill time on 3060
     HEAVY_NUM_CTX = 8192  # heavy model (30b) — one-shot only, short prompt in/out
+    MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
 
     def __init__(
         self,
@@ -371,6 +372,9 @@ class OllamaCommandAgent:
         )
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
+        # Pinned messages: always injected after system prompt regardless of history trimming
+        # (e.g. ARCH.md contents, schema.sql, key model definitions)
+        self.pinned_messages: List[Dict] = []
 
     # ---------------------------------------------------------------- LLM --
 
@@ -458,6 +462,10 @@ class OllamaCommandAgent:
         Does NOT touch self.conversation_history.
         """
         messages = [{"role": "system", "content": system_prompt}]
+        # Inject pinned architectural facts (ARCH.md, schema, models) after system prompt
+        # so they're always visible regardless of history trimming.
+        if self.pinned_messages:
+            messages.extend(self.pinned_messages)
         messages.extend(react_history)
 
         request_data = {
@@ -609,6 +617,20 @@ Just explain what it does."""
         if debug:
             print("   [JSON Extract] All strategies failed")
         return None
+
+    @staticmethod
+    def _strip_thought_fields(msg: dict) -> dict:
+        """Compress rotated-out assistant messages to just tool+args (drop thought/confidence).
+        Reduces token cost for history entries that are beyond the active window.
+        """
+        if msg.get("role") == "assistant":
+            try:
+                parsed = json.loads(msg["content"])
+                stripped = {"tool": parsed.get("tool"), "args": parsed.get("args")}
+                return {**msg, "content": json.dumps(stripped)}
+            except Exception:
+                pass
+        return msg
 
     def _strip_code_fences(self, text: str) -> str:
         """Remove markdown code fences the heavy model adds despite instructions.
@@ -1504,10 +1526,17 @@ Return JSON only:
         confirm_cb=None,
         max_iterations: Optional[int] = None,
         incoming_handoff: Optional[Dict] = None,
+        tool_whitelist: Optional[set] = None,
     ) -> Dict[str, Any]:
         """Core ReAct loop: Reason → Act → Observe × N."""
         if confirm_cb is None:
             confirm_cb = self._ai_confirm
+
+        # Apply minion tool whitelist if provided
+        if tool_whitelist is not None:
+            self.tool_registry.allowed_tools = tool_whitelist
+        else:
+            self.tool_registry.allowed_tools = None
 
         max_iter = max_iterations if max_iterations is not None else self.max_react_iterations
         # Cap threshold so large --budget values don't prevent early finish
@@ -1673,9 +1702,12 @@ Return JSON only:
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
             # Trim history to keep context window manageable.
-            # 20 messages × ~2k chars each ≈ 10k tokens — well inside 32k.
-            if len(react_history) > 20:
-                react_history = react_history[:1] + react_history[-19:]
+            # 12 messages × ~2k chars each ≈ 6k tokens — well inside 16k.
+            # Entries being rotated out have their thought/confidence stripped
+            # to compress them further before discarding.
+            if len(react_history) > 12:
+                keep_tail = react_history[-11:]
+                react_history = react_history[:1] + keep_tail
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
             if iteration > 1 and iteration % _checkpoint_interval == 0:
@@ -1842,6 +1874,26 @@ Return JSON only:
                     if cmd_key not in _seen_commands:
                         _seen_commands.add(cmd_key)
                         _last_progress_iteration = iteration
+
+            # Pin architectural reads so they survive history trimming
+            _ARCH_PATTERNS = ("ARCH.md", "schema.sql", "models.py", "schema.py",
+                               "config.py", "settings.py", "database.py")
+            if result.success and tool == "read_file":
+                read_path = args.get("path", "")
+                if any(pat in read_path for pat in _ARCH_PATTERNS):
+                    pin_content = (
+                        f"[PINNED ARCHITECTURAL REFERENCE — {read_path}]\n"
+                        f"{result.output[:3000]}"
+                    )
+                    # Replace existing pin for this path, or append new one
+                    self.pinned_messages = [
+                        m for m in self.pinned_messages
+                        if read_path not in m.get("content", "")
+                    ]
+                    self.pinned_messages.append({
+                        "role": "user",
+                        "content": pin_content,
+                    })
 
             if tool == "finish":
                 # Challenge premature success: fire once if < 50% of budget used
