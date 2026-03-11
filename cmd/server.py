@@ -32,6 +32,21 @@ from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskRepla
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
 
+# Thread-safe output capture: each worker thread routes print() to its own buffer
+# without touching global builtins.print (which is not thread-safe to monkey-patch).
+import builtins as _builtins
+_print_local = threading.local()
+_original_print = _builtins.print
+
+def _router_print(*args, **kwargs):
+    handler = getattr(_print_local, 'capture_fn', None)
+    if handler is not None:
+        handler(' '.join(map(str, args)))
+    else:
+        _original_print(*args, **kwargs)
+
+_builtins.print = _router_print
+
 # Configuration
 API_KEY = os.environ.get('AGENT_API_KEY', secrets.token_urlsafe(32))
 MAX_CONCURRENT_JOBS = 3
@@ -93,17 +108,14 @@ class JobRunner:
                     searxng_url=job.get('searxng_url', 'http://10.0.0.58:8080')
                 )
                 
-                # Capture output
+                # Capture output — thread-local so concurrent workers don't conflict
                 output_buffer = []
-                
+
                 def capture_print(text):
                     output_buffer.append(text)
                     job['output'] = '\n'.join(output_buffer)
-                
-                # Monkey patch print for this job (not ideal but works)
-                original_print = print
-                import builtins
-                builtins.print = lambda *args, **kwargs: capture_print(' '.join(map(str, args)))
+
+                _print_local.capture_fn = capture_print
                 
                 try:
                     # Honor per-job max_iterations (watchdog uses 15 vs default 25)
@@ -183,7 +195,7 @@ class JobRunner:
                     job['success'] = False
 
                 finally:
-                    builtins.print = original_print
+                    _print_local.capture_fn = None
                 
             except Exception as e:
                 job['status'] = 'failed'

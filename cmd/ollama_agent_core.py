@@ -407,7 +407,10 @@ class OllamaCommandAgent:
                  "-d", json.dumps(request_data)],
                 capture_output=True, text=True, timeout=timeout,
             )
-            return json.loads(result.stdout)["message"]["content"]
+            content = json.loads(result.stdout)["message"]["content"]
+            # Strip qwen3-style thinking blocks so extract_json sees only the answer
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            return content
         except Exception as e:
             print(f"❌ Ollama call failed ({model}): {e}")
             return ""
