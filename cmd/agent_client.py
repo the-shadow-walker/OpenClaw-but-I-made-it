@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/mnt/storage/NAS/Jarvis/.venv/bin/python3
 """Client library for Ollama Command Agent Service"""
 
 import requests
@@ -125,6 +125,7 @@ Examples:
                         help="API key (default: $AGENT_API_KEY)")
     parser.add_argument("--health", action="store_true", help="Check service health and exit")
     parser.add_argument("--chain", metavar="GOAL", help="Submit as a multi-phase chain instead of single job")
+    parser.add_argument("--chain-status", metavar="CHAIN_ID", help="Show status of a running/completed chain")
     parser.add_argument("--budget", type=int, default=200, help="Iteration budget for chains (default: 200)")
     parser.add_argument("--no-stream", action="store_true", help="Poll instead of streaming (fallback)")
 
@@ -142,6 +143,44 @@ Examples:
         print(f"\nFeatures:")
         for f in h.get('features', []):
             print(f"  ▸ {f}")
+        sys.exit(0)
+
+    # ── chain status ──────────────────────────────────────────────────────────
+    if args.chain_status:
+        resp = client.session.get(f"{client.base_url}/api/v1/chains/{args.chain_status}")
+        resp.raise_for_status()
+        d = resp.json()
+        STATUS_ICON = {
+            "running": "🔄", "completed": "✅", "failed": "❌",
+            "cancelled": "🚫", "decomposing": "🧠",
+        }
+        SUBTASK_ICON = {
+            "pending": "⏳", "running": "🔄", "passed": "✅",
+            "failed": "❌", "ac_failed": "⚠️ ", "skipped": "⏭️ ",
+        }
+        chain_status = d.get("status", "?")
+        icon = STATUS_ICON.get(chain_status, "❓")
+        print(f"\n{icon} Chain {d.get('chain_id','')[:8]}  [{chain_status.upper()}]")
+        print(f"   Goal: {d.get('goal','')[:100]}")
+        print(f"   Phase: {d.get('current_subtask_index', 0)} / {len(d.get('subtasks', []))}")
+        print()
+        for st in d.get("subtasks", []):
+            si = SUBTASK_ICON.get(st.get("status", "pending"), "❓")
+            idx = st.get("index", "?")
+            instr = st.get("instruction", "")[:70]
+            st_status = st.get("status", "pending")
+            artifact = st.get("artifact") or {}
+            art_summary = artifact.get("summary", "")[:60]
+            print(f"  {si} [{idx}] {instr}")
+            if art_summary:
+                print(f"       → {art_summary}")
+            elif st_status == "running":
+                print(f"       → running now...")
+            ac = st.get("acceptance_result")
+            if ac:
+                ac_icon = "✅" if ac.get("passed") else "❌"
+                print(f"       {ac_icon} AC: {ac.get('command','')[:50]}")
+        print()
         sys.exit(0)
 
     if not args.prompt and not args.chain:
@@ -162,7 +201,8 @@ Examples:
         print(f"[chain] Subtasks:")
         for st in data.get("subtasks", []):
             print(f"  {st['index']}. {st['instruction'][:80]}")
-        print(f"\n[chain] Poll status: python3 agent_client.py --chain-status {chain_id}")
+        print(f"\n[chain] Watch live:   sudo journalctl -u ollama-agent -f")
+        print(f"[chain] Poll status:  ./agent_client.py --chain-status {chain_id}")
         sys.exit(0)
 
     # ── single job mode ───────────────────────────────────────────────────────
