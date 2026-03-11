@@ -26,7 +26,8 @@ if os.path.isdir(_CMD_DIR) and _CMD_DIR not in sys.path:
 # Import the agent (assumes ollama_agent.py is in same directory or cmd/)
 from ollama_agent_core import OllamaCommandAgent
 from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskReplanner,
-                        TaskDecomposer, TaskChain, cleanup_between_phases)
+                        TaskDecomposer, TaskChain, cleanup_between_phases,
+                        SubtaskOrchestrator, ImplementationArtifact)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
@@ -35,6 +36,18 @@ CORS(app)  # Enable CORS for cross-origin requests
 API_KEY = os.environ.get('AGENT_API_KEY', secrets.token_urlsafe(32))
 MAX_CONCURRENT_JOBS = 3
 JOB_TIMEOUT = 3600  # 1 hour max per job
+
+SERVICE_VERSION = "3.1.0-studio"
+SERVICE_FEATURES = [
+    "Studio Model Hierarchy (Director → Producer → Minions)",
+    "SubtaskOrchestrator: 3-5 Minions per phase, clean context each",
+    "Minion tool whitelists: CODER={read,create,patch,finish} COMMANDER={exec,server,read,finish}",
+    "Patch no-op detection + per-file counter (block@5) + syntax check",
+    "NUM_CTX 16384 (was 32768), history window 12 (was 20)",
+    "Pinned messages: ARCH.md survives history trimming",
+    "cleanup_between_phases(): kills zombie dev ports between subtasks",
+    "TaskDecomposer: forced Phase-0 ARCH.md, modular layout, DB migration phase",
+]
 
 # Job storage
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -355,10 +368,12 @@ def health():
     return jsonify({
         'status': 'healthy',
         'service': 'ollama-command-agent',
-        'version': '1.0.0',
+        'version': SERVICE_VERSION,
         'timestamp': datetime.now().isoformat(),
         'active_jobs': len(active_jobs),
-        'queued_jobs': job_queue.qsize()
+        'queued_jobs': job_queue.qsize(),
+        'features': SERVICE_FEATURES,
+        'minions': 'ready',
     })
 
 
@@ -746,11 +761,18 @@ def cancel_chain(chain_id: str):
 
 if __name__ == '__main__':
     print("=" * 70)
-    print("🚀 Ollama Command Agent Service")
+    print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
+    print("=" * 70)
+    print()
+    print("  ✅ v3 STUDIO MODEL HIERARCHY IS RUNNING")
+    print("  🤖 Minions are ready to go")
+    print()
+    for feat in SERVICE_FEATURES:
+        print(f"  ▸ {feat}")
+    print()
     print("=" * 70)
     print(f"API Key: {API_KEY}")
-    print(f"Port: 5000")
-    print(f"Max Concurrent Jobs: {MAX_CONCURRENT_JOBS}")
+    print(f"Port: 5000  |  Max Concurrent Jobs: {MAX_CONCURRENT_JOBS}")
     print(f"Endpoints:")
     print(f"  POST   /api/v1/execute           - Execute command")
     print(f"  GET    /api/v1/jobs/<id>         - Get job status")
