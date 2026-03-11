@@ -26,6 +26,7 @@ class AgentClient:
     def execute(
         self,
         instruction: str,
+        searxng_url: str = "http://10.0.0.58:8080",
         model: str = "qwen3-coder:30b",
         async_mode: bool = True,
         timeout: int = 300
@@ -103,22 +104,86 @@ class AgentClient:
 
 if __name__ == "__main__":
     import os
-    
-    # Test the client
-    client = AgentClient(
-        base_url="http://localhost:5000",
-        api_key=os.environ.get('AGENT_API_KEY')
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Send a prompt to the Ollama Agent Service and stream output.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 agent_client.py "list all open ports"
+  python3 agent_client.py "build a flask hello world app" 2>&1 | tee run.log
+  python3 agent_client.py --chain "build a todo app with sqlite" --budget 200
+  python3 agent_client.py --health
+        """
     )
-    
-    print("Health:", client.health())
-    
-    job = client.execute("List files in current directory")
-    print(f"Job submitted: {job['job_id']}")
-    
-    print("\nStreaming output:")
-    for event in client.stream_output(job['job_id']):
-        if event['type'] == 'output':
-            print(event['content'], end='')
-        elif event['type'] == 'complete':
-            print(f"\n\nCompleted: {event['status']}")
-            break
+    parser.add_argument("prompt", nargs="?", help="Instruction to send to the agent")
+    parser.add_argument("--url", default=os.environ.get("AGENT_URL", "http://10.0.0.58:5000"),
+                        help="Service URL (default: http://10.0.0.58:5000, or $AGENT_URL)")
+    parser.add_argument("--key", default=os.environ.get("AGENT_API_KEY"),
+                        help="API key (default: $AGENT_API_KEY)")
+    parser.add_argument("--health", action="store_true", help="Check service health and exit")
+    parser.add_argument("--chain", metavar="GOAL", help="Submit as a multi-phase chain instead of single job")
+    parser.add_argument("--budget", type=int, default=200, help="Iteration budget for chains (default: 200)")
+    parser.add_argument("--no-stream", action="store_true", help="Poll instead of streaming (fallback)")
+
+    args = parser.parse_args()
+
+    client = AgentClient(base_url=args.url, api_key=args.key)
+
+    # ── health check ──────────────────────────────────────────────────────────
+    if args.health:
+        h = client.health()
+        print(f"Status:   {h.get('status')}")
+        print(f"Version:  {h.get('version')}")
+        print(f"Minions:  {h.get('minions')}")
+        print(f"Jobs:     active={h.get('active_jobs')}  queued={h.get('queued_jobs')}")
+        print(f"\nFeatures:")
+        for f in h.get('features', []):
+            print(f"  ▸ {f}")
+        sys.exit(0)
+
+    if not args.prompt and not args.chain:
+        parser.print_help()
+        sys.exit(1)
+
+    # ── chain mode ────────────────────────────────────────────────────────────
+    if args.chain:
+        print(f"[chain] Submitting goal: {args.chain}")
+        resp = client.session.post(
+            f"{client.base_url}/api/v1/chains",
+            json={"goal": args.chain, "total_budget": args.budget}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        chain_id = data.get("chain_id")
+        print(f"[chain] chain_id={chain_id}")
+        print(f"[chain] Subtasks:")
+        for st in data.get("subtasks", []):
+            print(f"  {st['index']}. {st['instruction'][:80]}")
+        print(f"\n[chain] Poll status: python3 agent_client.py --chain-status {chain_id}")
+        sys.exit(0)
+
+    # ── single job mode ───────────────────────────────────────────────────────
+    print(f"[job] Submitting: {args.prompt[:80]}{'…' if len(args.prompt) > 80 else ''}", flush=True)
+    job = client.execute(args.prompt)
+    job_id = job["job_id"]
+    print(f"[job] job_id={job_id}", flush=True)
+    print(f"[job] Streaming output (pipe through tee to record):\n", flush=True)
+
+    if args.no_stream:
+        result = client.wait_for_completion(job_id)
+        print(result.get("output", ""))
+        print(f"\n[job] Status: {result.get('status')}")
+    else:
+        try:
+            for event in client.stream_output(job_id):
+                if event["type"] == "output":
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "complete":
+                    print(f"\n\n[job] Done — status: {event.get('status', '?')}", flush=True)
+                    break
+        except KeyboardInterrupt:
+            print(f"\n[job] Interrupted. Job {job_id} may still be running on the server.")
+            print(f"       Cancel: curl -X DELETE {args.url}/api/v1/jobs/{job_id} -H 'X-API-Key: {args.key}'")
