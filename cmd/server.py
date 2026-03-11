@@ -110,16 +110,70 @@ class JobRunner:
                     if 'max_iterations' in job:
                         agent.max_react_iterations = int(job['max_iterations'])
 
-                    # Run the agent
-                    result = agent.run(
-                        job['instruction'],
-                        incoming_handoff=job.get('incoming_handoff'),
-                    )
+                    # Chain subtasks use SubtaskOrchestrator (Producer tier):
+                    # breaks each subtask into 3-5 micro-tasks → Minion agents.
+                    # Single jobs bypass the orchestrator and run directly.
+                    if job.get('chain_id') and job.get('subtask_index') is not None:
+                        chain_state = TaskChain.load(job['chain_id'])
+                        chain_data = chain_state.data
+                        subtask_rec = chain_data['subtasks'][job['subtask_index']]
+
+                        # Pin ARCH.md if it exists (created by Phase 0)
+                        arch_path = os.path.join(
+                            os.path.expanduser('~'), 'projects',
+                            chain_data.get('goal', '')[:20].replace(' ', '_'),
+                            'DOCS', 'ARCH.md'
+                        )
+                        if not os.path.exists(arch_path):
+                            # Fallback: search for any ARCH.md written recently
+                            import glob as _glob
+                            hits = _glob.glob(os.path.expanduser('~/*/DOCS/ARCH.md')) + \
+                                   _glob.glob(os.path.expanduser('~/**/ARCH.md'), recursive=True)
+                            arch_path = hits[0] if hits else None
+
+                        if arch_path and os.path.exists(arch_path):
+                            try:
+                                with open(arch_path) as _f:
+                                    _arch = _f.read()
+                                agent.pinned_messages = [{
+                                    'role': 'user',
+                                    'content': f'[PINNED ARCH.md]\n{_arch[:3000]}'
+                                }]
+                                chain_data['arch_summary'] = _arch[:500]
+                            except Exception:
+                                pass
+
+                        orchestrator = SubtaskOrchestrator(agent)
+                        artifact = orchestrator.orchestrate(subtask_rec, chain_data)
+
+                        # Store artifact in chain state for future phases
+                        chain_state.update_subtask(
+                            job['subtask_index'],
+                            {'artifact': artifact.to_dict()}
+                        )
+
+                        # Build react_result in the shape _advance_chain expects
+                        result = {
+                            'success': artifact.status in ('completed', 'partial'),
+                            'finish_summary': artifact.summary,
+                            'trace': [],
+                            'iterations_used': sum(
+                                r.get('iterations_used', 0)
+                                for r in artifact.micro_task_reports
+                            ),
+                        }
+                        job['success'] = result['success']
+                    else:
+                        # Single job — run the full ReAct loop directly
+                        result = agent.run(
+                            job['instruction'],
+                            incoming_handoff=job.get('incoming_handoff'),
+                        )
+                        job['success'] = result.get('success', True) if result else True
 
                     # Store results
                     job['status'] = 'completed'
                     job['execution_log'] = agent.execution_log
-                    job['success'] = result.get('success', True) if result else True
                     job['_react_result'] = result
                     job['_react_trace'] = agent.react_trace
 
