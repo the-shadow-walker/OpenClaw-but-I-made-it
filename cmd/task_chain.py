@@ -718,22 +718,47 @@ Return ONLY the JSON array, no prose."""
             if file_scope else "No specific file scope restriction"
         )
 
-        tool_note = (
-            "You may use: read_file, create_file, patch_file, finish"
-            if mt_type == "code"
-            else "You may use: execute_command, manage_server, read_file, finish"
-        )
+        if mt_type == "code":
+            tool_block = (
+                "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
+                "  ✅ read_file    — read an existing file\n"
+                "  ✅ create_file  — write a new file (or overwrite)\n"
+                "  ✅ patch_file   — make a targeted edit to an existing file\n"
+                "  ✅ finish       — call when done\n"
+                "  ❌ execute_command — BLOCKED. Do NOT attempt it.\n"
+                "  ❌ memory_lookup  — BLOCKED. Do NOT attempt it.\n"
+                "  ❌ web_search     — BLOCKED. Do NOT attempt it.\n"
+                "  ❌ manage_server  — BLOCKED. Do NOT attempt it.\n"
+                "\n"
+                "CRITICAL: Your FIRST tool call MUST be create_file or read_file.\n"
+                "Do NOT check prerequisites. Do NOT install packages.\n"
+                "Go straight to writing code with create_file."
+            )
+        else:
+            tool_block = (
+                "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
+                "  ✅ execute_command — run shell commands\n"
+                "  ✅ manage_server   — start/stop/restart named services\n"
+                "  ✅ read_file       — read an existing file\n"
+                "  ✅ finish          — call when done\n"
+                "  ❌ create_file  — BLOCKED. Do NOT attempt it.\n"
+                "  ❌ patch_file   — BLOCKED. Do NOT attempt it.\n"
+                "  ❌ memory_lookup— BLOCKED. Do NOT attempt it.\n"
+                "  ❌ web_search   — BLOCKED. Do NOT attempt it.\n"
+                "\n"
+                "CRITICAL: Your FIRST tool call MUST be execute_command."
+            )
 
         return (
             f"TASK: {work_order}\n\n"
+            f"TOOL RESTRICTIONS:\n{tool_block}\n\n"
             f"CONTEXT:\n"
             f"  Chain goal: {goal}\n"
             f"  Architecture: {arch_summary}\n\n"
             f"PREVIOUSLY COMPLETED IN THIS PHASE:\n{prev_text}\n\n"
             f"CONSTRAINTS:\n"
             f"  - {file_scope_text}\n"
-            f"  - {tool_note}\n"
-            f"  - You have a budget of 15 iterations — use them efficiently\n"
+            f"  - Budget: 15 iterations — use them efficiently\n"
             f"  - DO NOT start servers or background processes (unless type=command)\n"
             f"  - Call finish() with a clear summary of exactly what you did and any key\n"
             f"    facts (ports, credentials, file paths) for future agents\n\n"

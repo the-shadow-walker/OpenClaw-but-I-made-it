@@ -57,14 +57,7 @@ REQUIRED JSON SCHEMA (all 4 fields mandatory every iteration):
 }}
 
 AVAILABLE TOOLS:
-  execute_command  — {{"command": str, "timeout": int}}
-  create_file      — {{"path": str, "content": str, "description": str}}
-  patch_file       — {{"path": str, "search": str, "replace": str, "description": str}}
-  web_search       — {{"query": str}}
-  read_file        — {{"path": str}}
-  memory_lookup    — {{"query": str}}
-  finish           — {{"summary": str, "success": bool}}
-  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}
+{available_tools}
 
 GENERAL RULES:
 1. Output ONLY valid JSON — no text before or after
@@ -177,6 +170,20 @@ CODE / FILE GENERATION RULES:
 18. After patching a Python file always verify syntax BEFORE running it:
       python3 -c "import ast; ast.parse(open('/path/to/file.py').read()); print('syntax ok')"
 """
+
+# Per-tool schema lines used to build the AVAILABLE TOOLS section dynamically.
+# When tool_whitelist is set in run_react(), only whitelisted tools are shown.
+TOOL_SCHEMAS: dict = {
+    "execute_command":  '  execute_command  — {{"command": str, "timeout": int}}',
+    "create_file":      '  create_file      — {{"path": str, "content": str, "description": str}}',
+    "patch_file":       '  patch_file       — {{"path": str, "search": str, "replace": str, "description": str}}',
+    "web_search":       '  web_search       — {{"query": str}}',
+    "read_file":        '  read_file        — {{"path": str}}',
+    "memory_lookup":    '  memory_lookup    — {{"query": str}}',
+    "finish":           '  finish           — {{"summary": str, "success": bool}}',
+    "manage_server":    '  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}',
+}
+_ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
 
 
 class FlexibleSearchAgent:
@@ -1551,9 +1558,22 @@ Return JSON only:
         runbook_content = self.memory.load_runbook(keyword)
         runbook_text = runbook_content[:2000] if runbook_content else "No runbook found."
 
+        # Build tool list — only show whitelisted tools to minions so the model
+        # cannot plan around blocked tools.
+        if tool_whitelist:
+            available_tools_text = "\n".join(
+                TOOL_SCHEMAS[t] for t in ("execute_command", "create_file", "patch_file",
+                                           "web_search", "read_file", "memory_lookup",
+                                           "finish", "manage_server")
+                if t in tool_whitelist and t in TOOL_SCHEMAS
+            )
+        else:
+            available_tools_text = _ALL_TOOLS_TEXT
+
         system_prompt = REACT_SYSTEM_PROMPT_TEMPLATE.format(
             os_info=self.os_info,
             max_iterations=max_iter,
+            available_tools=available_tools_text,
         )
 
         home_dir = survey.get("home_dir", os.path.expanduser("~"))
@@ -1574,50 +1594,56 @@ Return JSON only:
         )
 
         # ---- pre-planning phase ----
-        print("\n📋 Planning task...")
-        plan_prompt = (
-            f"Task: {instruction}\n\n"
-            f"System: {self.os_info}, user={username}, home={home_dir}\n"
-            f"Project directory: {home_dir}/  (use this exact path — never guess)\n"
-            f"Already installed: {survey.get('installed_packages', 'unknown')[:300]}\n\n"
-            f"Create a concise numbered checklist (max 12 steps) of exactly what needs to "
-            f"be done. MANDATORY RULES:\n"
-            f"- Step 0: ONE command that batch-checks ALL missing prerequisites at once\n"
-            f"- Step 1: ONE command that installs ALL missing packages at once\n"
-            f"- Combine related setup into single steps with &&: mkdir + write config + restart = 1 step\n"
-            f"- Never add a step just to 'verify' something — verification is implicit after success\n"
-            f"- Use exact file paths rooted at {home_dir}/ for all project files\n"
-            f"- If the task has 3+ major components, order them logically (backend before frontend, DB before app)\n"
-            f"- Flag tasks needing >60 iterations with: '⚠️ LARGE TASK'\n"
-            f"- Pick EXACTLY ONE library per concern (one web framework, one ORM, one auth lib).\n"
-            f"  Only include the libraries the task explicitly requires — no extras.\n"
-            f"- ONLY include steps for services the task explicitly mentions. Do NOT add steps\n"
-            f"  to check/restart nginx, postgresql, or other services unless the task targets them.\n"
-            f"- NEVER clone from GitHub. All files must be created fresh with create_file.\n"
-            f"- Use ABSOLUTE paths everywhere. `cd /dir && cmd` is OK within one step.\n"
-            f"  But `.venv/bin/python3` is WRONG because cd does not persist between steps.\n"
-            f"  Write `/home/{username}/project/.venv/bin/python3` — the full absolute path.\n"
-            f"- Order: install → write all code → read files to confirm → start server → test endpoint\n"
-            f"Return ONLY the numbered list, no other text."
-        )
-        react_plan = self._call_model_oneshot(
-            self.fast_model, plan_prompt,
-            "Return only a numbered checklist. No prose.",
-            timeout=30,
-        )
-        if react_plan:
-            print(f"\n{react_plan}\n")
+        # Skip for whitelisted minions: they have a focused work_order already and
+        # pre-planning always generates execute_command steps that are blocked.
+        if tool_whitelist:
+            react_plan = "(minion mode — no pre-planning)"
+            print(f"\n🤖 Minion mode: tools={sorted(tool_whitelist)}\n")
         else:
-            react_plan = "(planning unavailable)"
+            print("\n📋 Planning task...")
+            plan_prompt = (
+                f"Task: {instruction}\n\n"
+                f"System: {self.os_info}, user={username}, home={home_dir}\n"
+                f"Project directory: {home_dir}/  (use this exact path — never guess)\n"
+                f"Already installed: {survey.get('installed_packages', 'unknown')[:300]}\n\n"
+                f"Create a concise numbered checklist (max 12 steps) of exactly what needs to "
+                f"be done. MANDATORY RULES:\n"
+                f"- Step 0: ONE command that batch-checks ALL missing prerequisites at once\n"
+                f"- Step 1: ONE command that installs ALL missing packages at once\n"
+                f"- Combine related setup into single steps with &&: mkdir + write config + restart = 1 step\n"
+                f"- Never add a step just to 'verify' something — verification is implicit after success\n"
+                f"- Use exact file paths rooted at {home_dir}/ for all project files\n"
+                f"- If the task has 3+ major components, order them logically (backend before frontend, DB before app)\n"
+                f"- Flag tasks needing >60 iterations with: '⚠️ LARGE TASK'\n"
+                f"- Pick EXACTLY ONE library per concern (one web framework, one ORM, one auth lib).\n"
+                f"  Only include the libraries the task explicitly requires — no extras.\n"
+                f"- ONLY include steps for services the task explicitly mentions. Do NOT add steps\n"
+                f"  to check/restart nginx, postgresql, or other services unless the task targets them.\n"
+                f"- NEVER clone from GitHub. All files must be created fresh with create_file.\n"
+                f"- Use ABSOLUTE paths everywhere. `cd /dir && cmd` is OK within one step.\n"
+                f"  But `.venv/bin/python3` is WRONG because cd does not persist between steps.\n"
+                f"  Write `/home/{username}/project/.venv/bin/python3` — the full absolute path.\n"
+                f"- Order: install → write all code → read files to confirm → start server → test endpoint\n"
+                f"Return ONLY the numbered list, no other text."
+            )
+            react_plan = self._call_model_oneshot(
+                self.fast_model, plan_prompt,
+                "Return only a numbered checklist. No prose.",
+                timeout=30,
+            )
+            if react_plan:
+                print(f"\n{react_plan}\n")
+            else:
+                react_plan = "(planning unavailable)"
 
-        # Write plan as a persistent checklist the agent can tick off
-        try:
-            os.makedirs(os.path.dirname(self.CHECKLIST_PATH), exist_ok=True)
-            items = [f"- [ ] {l.strip()}" for l in react_plan.splitlines() if l.strip()]
-            with open(self.CHECKLIST_PATH, "w") as f:
-                f.write("# Task Checklist\n\n" + "\n".join(items) + "\n")
-        except Exception:
-            pass
+            # Write plan as a persistent checklist the agent can tick off
+            try:
+                os.makedirs(os.path.dirname(self.CHECKLIST_PATH), exist_ok=True)
+                items = [f"- [ ] {l.strip()}" for l in react_plan.splitlines() if l.strip()]
+                with open(self.CHECKLIST_PATH, "w") as f:
+                    f.write("# Task Checklist\n\n" + "\n".join(items) + "\n")
+            except Exception:
+                pass
 
         initial_message = (
             f"TASK: {instruction}\n\n"
