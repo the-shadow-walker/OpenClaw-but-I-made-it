@@ -114,9 +114,12 @@ class JobRunner:
                 def capture_print(text):
                     output_buffer.append(text)
                     job['output'] = '\n'.join(output_buffer)
+                    # Mirror to stderr so journalctl shows live agent output
+                    sys.stderr.write(text + '\n')
+                    sys.stderr.flush()
 
                 _print_local.capture_fn = capture_print
-                
+
                 try:
                     # Honor per-job max_iterations (watchdog uses 15 vs default 25)
                     if 'max_iterations' in job:
@@ -125,38 +128,38 @@ class JobRunner:
                     # Chain subtasks use SubtaskOrchestrator (Producer tier):
                     # breaks each subtask into 3-5 micro-tasks → Minion agents.
                     # Single jobs bypass the orchestrator and run directly.
+                    _original_print(f"[worker] job {job_id[:8]} starting — chain={bool(job.get('chain_id'))} subtask={job.get('subtask_index')}", flush=True)
+
                     if job.get('chain_id') and job.get('subtask_index') is not None:
+                        _original_print(f"[worker] loading chain state for {job['chain_id'][:8]}", flush=True)
                         chain_state = TaskChain.load(job['chain_id'])
                         chain_data = chain_state.data
                         subtask_rec = chain_data['subtasks'][job['subtask_index']]
 
-                        # Pin ARCH.md if it exists (created by Phase 0)
-                        arch_path = os.path.join(
-                            os.path.expanduser('~'), 'projects',
-                            chain_data.get('goal', '')[:20].replace(' ', '_'),
-                            'DOCS', 'ARCH.md'
-                        )
-                        if not os.path.exists(arch_path):
-                            # Fallback: search for any ARCH.md written recently
+                        # Pin ARCH.md for phases after Phase 0 (Phase 0 creates it)
+                        if job.get('subtask_index', 0) > 0:
+                            # Search only shallow paths — never recurse into node_modules etc.
                             import glob as _glob
-                            hits = _glob.glob(os.path.expanduser('~/*/DOCS/ARCH.md')) + \
-                                   _glob.glob(os.path.expanduser('~/**/ARCH.md'), recursive=True)
-                            arch_path = hits[0] if hits else None
+                            arch_candidates = (
+                                _glob.glob(os.path.expanduser('~/*/DOCS/ARCH.md')) +
+                                _glob.glob(os.path.expanduser('~/DOCS/ARCH.md'))
+                            )
+                            if arch_candidates:
+                                try:
+                                    with open(arch_candidates[0]) as _f:
+                                        _arch = _f.read()
+                                    agent.pinned_messages = [{
+                                        'role': 'user',
+                                        'content': f'[PINNED ARCH.md]\n{_arch[:3000]}'
+                                    }]
+                                    chain_data['arch_summary'] = _arch[:500]
+                                except Exception:
+                                    pass
 
-                        if arch_path and os.path.exists(arch_path):
-                            try:
-                                with open(arch_path) as _f:
-                                    _arch = _f.read()
-                                agent.pinned_messages = [{
-                                    'role': 'user',
-                                    'content': f'[PINNED ARCH.md]\n{_arch[:3000]}'
-                                }]
-                                chain_data['arch_summary'] = _arch[:500]
-                            except Exception:
-                                pass
-
+                        _original_print(f"[worker] launching orchestrator for phase {job.get('subtask_index')}", flush=True)
                         orchestrator = SubtaskOrchestrator(agent)
                         artifact = orchestrator.orchestrate(subtask_rec, chain_data)
+                        _original_print(f"[worker] orchestrator done: {artifact.status}", flush=True)
 
                         # Store artifact in chain state for future phases
                         chain_state.update_subtask(
