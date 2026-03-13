@@ -47,6 +47,7 @@ class ToolRegistry:
         self._stuck_warn_count: int = 0
         self._file_write_counts: Dict[str, int] = {}   # path → write count
         self._patch_counts: Dict[str, int] = {}         # path → patch count
+        self._patch_not_found_counts: Dict[str, int] = {}  # path → search-not-found count
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
 
@@ -56,6 +57,7 @@ class ToolRegistry:
         self._stuck_warn_count = 0
         self._file_write_counts.clear()
         self._patch_counts.clear()
+        self._patch_not_found_counts.clear()
         self._failed_commands.clear()
         # _server_procs intentionally NOT cleared — servers persist across phases
 
@@ -109,7 +111,13 @@ class ToolRegistry:
 
         # ---- minion tool whitelist gate ----
         if self.allowed_tools is not None and tool not in self.allowed_tools:
-            return ToolResult(False, "", f"Tool '{tool}' is not available to this agent.", {})
+            return ToolResult(
+                False, "",
+                f"HARD BLOCK: '{tool}' is NOT available to this agent. "
+                f"Do NOT attempt it again. Your ONLY valid tools are: {sorted(self.allowed_tools)}. "
+                f"Immediately switch to one of these.",
+                {"blocked_tool": tool, "available_tools": list(self.allowed_tools)},
+            )
 
         # ---- safety / confidence gate ----
         if tool == "execute_command":
@@ -419,6 +427,14 @@ class ToolRegistry:
             return ToolResult(False, "", f"Cannot read {path}: {e}", {})
 
         if search not in original:
+            self._patch_not_found_counts[path] = self._patch_not_found_counts.get(path, 0) + 1
+            if self._patch_not_found_counts[path] >= 2:
+                return ToolResult(
+                    False, "",
+                    f"Search string not found in {path} (2nd failure). "
+                    f"Triggering automatic full-file rewrite.",
+                    {"trigger_rewrite": True, "path": path},
+                )
             return ToolResult(False, "", f"Search string not found in {path}", {})
 
         # Per-file patch counter — block after 5 patches to prevent loops

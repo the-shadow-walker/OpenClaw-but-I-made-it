@@ -1884,6 +1884,42 @@ Return JSON only:
             # Dispatch
             result = self.tool_registry.dispatch(tool, args, confidence, confirm_cb)
 
+            # ---- trigger_rewrite intercept ----
+            # When patch_file fails with "search not found" twice for the same file,
+            # ToolRegistry returns trigger_rewrite=True.  We auto-rewrite here instead
+            # of burning more iterations on hopeless patch retries.
+            if tool == "patch_file" and result.metadata.get("trigger_rewrite"):
+                rw_path = result.metadata["path"]
+                description = args.get("description", "Rewrite the file incorporating all required changes")
+                ctx = self._build_context_summary(react_history[-6:])
+                new_content = self._generate_file_content(rw_path, description, instruction, ctx)
+                if new_content:
+                    try:
+                        with open(os.path.expanduser(rw_path), "w") as _rw_f:
+                            _rw_f.write(new_content)
+                        observation = (
+                            f"OBSERVATION [iteration {iteration}]:\n"
+                            f"⚡ Auto-rewrote {rw_path} ({len(new_content):,} chars) due to "
+                            f"repeated patch failures. File has been fully replaced.\n\n"
+                            f"Produce your next thought and tool call as JSON."
+                        )
+                        print(f"  ⚡ Auto-rewrote {rw_path} ({len(new_content):,} chars)")
+                    except Exception as _rw_err:
+                        observation = (
+                            f"OBSERVATION [iteration {iteration}]:\n"
+                            f"⚡ Auto-rewrite triggered for {rw_path} but write failed: {_rw_err}.\n\n"
+                            f"Produce your next thought and tool call as JSON."
+                        )
+                else:
+                    observation = (
+                        f"OBSERVATION [iteration {iteration}]:\n"
+                        f"⚡ Auto-rewrite triggered for {rw_path} but heavy model returned empty content. "
+                        f"Try using create_file with explicit content instead.\n\n"
+                        f"Produce your next thought and tool call as JSON."
+                    )
+                react_history.append({"role": "user", "content": observation})
+                continue
+
             # Record in trace
             self.react_trace.append({
                 "iteration": iteration,

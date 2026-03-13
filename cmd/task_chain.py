@@ -539,60 +539,79 @@ class SubtaskOrchestrator:
 
             print(f"\n  🤖 Minion {i + 1}/{len(micro_tasks)} [{mt_type}]: {work_order[:80]}")
 
-            # Determine tool whitelist based on micro-task type
-            tools = self.CODER_TOOLS if mt_type == "code" else self.COMMANDER_TOOLS
+            # Feature 1: snapshot files before code micro-tasks so we can revert on failure
+            snapshot: Dict[str, Optional[str]] = {}
+            if mt_type == "code" and file_scope:
+                snapshot = self._snapshot_files(file_scope)
+                print(f"  📸 Snapshotted {len(snapshot)} file(s)")
 
-            # Build minion prompt
-            prompt = self._build_minion_prompt(
-                work_order=work_order,
-                chain_context=chain_context,
-                previous_reports=micro_task_reports,
-                file_scope=file_scope,
-                mt_type=mt_type,
-            )
+            # Feature 4: TDA — use test-first loop for Python code tasks
+            if self._is_tda_eligible(micro_task):
+                print(f"  🧪 TDA: running QA→Coder→Validator loop")
+                report = self._run_tda_code_task(micro_task, chain_context, micro_task_reports)
+            else:
+                # Determine tool whitelist based on micro-task type
+                tools = self.CODER_TOOLS if mt_type == "code" else self.COMMANDER_TOOLS
 
-            # Clear agent history for a fresh minion context
-            self.agent.react_trace = []
+                # Build minion prompt
+                prompt = self._build_minion_prompt(
+                    work_order=work_order,
+                    chain_context=chain_context,
+                    previous_reports=micro_task_reports,
+                    file_scope=file_scope,
+                    mt_type=mt_type,
+                )
 
-            # Run the minion
-            result = self.agent.run_react(
-                instruction=prompt,
-                tool_whitelist=tools,
-                max_iterations=15,
-            )
+                # Clear agent history for a fresh minion context
+                self.agent.react_trace = []
 
-            report = {
-                "micro_task_index": i,
-                "type": mt_type,
-                "work_order": work_order,
-                "success": result.get("success", False),
-                "finish_summary": result.get("finish_summary", ""),
-                "iterations_used": result.get("iterations_used", 0),
-            }
+                # Run the minion
+                result = self.agent.run_react(
+                    instruction=prompt,
+                    tool_whitelist=tools,
+                    max_iterations=15,
+                )
 
-            # Extract files touched from trace
-            for entry in result.get("trace", []):
-                entry_tool = entry.get("tool", "")
-                entry_args = entry.get("args", {})
-                entry_result = entry.get("result")
-                ok = getattr(entry_result, "success", False) if hasattr(entry_result, "success") \
-                    else (entry_result or {}).get("success", False)
-                if ok and entry_tool == "create_file":
-                    p = entry_args.get("path", "")
-                    if p and p not in all_files_created:
-                        all_files_created.append(p)
-                elif ok and entry_tool == "patch_file":
-                    p = entry_args.get("path", "")
-                    if p and p not in all_files_modified:
-                        all_files_modified.append(p)
-                elif ok and entry_tool == "manage_server":
-                    if entry_args.get("action") == "start":
-                        all_services.append({
-                            "name": entry_args.get("name", ""),
-                            "command": entry_args.get("command", ""),
-                        })
+                report = {
+                    "micro_task_index": i,
+                    "type": mt_type,
+                    "work_order": work_order,
+                    "success": result.get("success", False),
+                    "finish_summary": result.get("finish_summary", ""),
+                    "iterations_used": result.get("iterations_used", 0),
+                }
+
+                # Extract files touched from trace
+                for entry in result.get("trace", []):
+                    entry_tool = entry.get("tool", "")
+                    entry_args = entry.get("args", {})
+                    entry_result = entry.get("result")
+                    ok = getattr(entry_result, "success", False) if hasattr(entry_result, "success") \
+                        else (entry_result or {}).get("success", False)
+                    if ok and entry_tool == "create_file":
+                        p = entry_args.get("path", "")
+                        if p and p not in all_files_created:
+                            all_files_created.append(p)
+                    elif ok and entry_tool == "patch_file":
+                        p = entry_args.get("path", "")
+                        if p and p not in all_files_modified:
+                            all_files_modified.append(p)
+                    elif ok and entry_tool == "manage_server":
+                        if entry_args.get("action") == "start":
+                            all_services.append({
+                                "name": entry_args.get("name", ""),
+                                "command": entry_args.get("command", ""),
+                            })
 
             micro_task_reports.append(report)
+
+            # Feature 1: revert files if code micro-task failed
+            if not report["success"] and snapshot:
+                self._restore_snapshot(snapshot)
+                all_notes.append(
+                    f"Minion {i + 1} failed — reverted {len(snapshot)} file(s) to pre-task state"
+                )
+                print(f"  ↩️  Reverted {len(snapshot)} file(s) after minion failure")
 
             if not report["success"]:
                 all_notes.append(f"Minion {i + 1} failed: {report['finish_summary'][:120]}")
@@ -764,6 +783,132 @@ Return ONLY the JSON array, no prose."""
             f"    facts (ports, credentials, file paths) for future agents\n\n"
             f"Produce your first thought and tool call as JSON."
         )
+
+    # ------------------------------------------------- snapshot / revert ----
+
+    def _snapshot_files(self, file_scope: List[str]) -> Dict[str, Optional[str]]:
+        """Return {path: content_or_None}. None = file didn't exist (will be deleted on revert)."""
+        snap: Dict[str, Optional[str]] = {}
+        for path in file_scope:
+            try:
+                with open(os.path.expanduser(path), "r") as f:
+                    snap[path] = f.read()
+            except FileNotFoundError:
+                snap[path] = None
+        return snap
+
+    def _restore_snapshot(self, snapshot: Dict[str, Optional[str]]) -> None:
+        """Restore files to their pre-snapshot state."""
+        for path, content in snapshot.items():
+            expanded = os.path.expanduser(path)
+            if content is None:
+                try:
+                    os.remove(expanded)
+                except Exception:
+                    pass
+            else:
+                try:
+                    with open(expanded, "w") as f:
+                        f.write(content)
+                except Exception:
+                    pass
+
+    # ------------------------------------------------- TDA helpers ----------
+
+    def _is_tda_eligible(self, micro_task: Dict) -> bool:
+        """TDA applies only to code micro-tasks with .py files in scope."""
+        return (
+            micro_task.get("type") == "code"
+            and any(f.endswith(".py") for f in micro_task.get("file_scope", []))
+        )
+
+    def _run_tda_code_task(
+        self,
+        micro_task: Dict,
+        chain_context: Dict,
+        previous_reports: List[Dict],
+    ) -> Dict:
+        """Run QA → Coder → Validator loop with up to 2 Coder retries."""
+        work_order = micro_task.get("work_order", "")
+        file_scope = micro_task.get("file_scope", [])
+
+        # Derive test file path (e.g. foo.py → <same_dir>/test_foo.py)
+        py_files = [f for f in file_scope if f.endswith(".py")]
+        if py_files:
+            base = os.path.basename(py_files[0])
+            test_file = os.path.join(os.path.dirname(py_files[0]), f"test_{base}")
+        else:
+            test_file = "test_feature.py"
+
+        # Step 1: QA minion writes test file
+        qa_prompt = self._build_minion_prompt(
+            work_order=(
+                f"Write a pytest test file at {test_file} for this feature:\n{work_order}\n\n"
+                f"Tests MUST initially be failing (the implementation doesn't exist yet). "
+                f"Cover at least 2 behaviours. Use only standard library + pytest."
+            ),
+            chain_context=chain_context,
+            previous_reports=previous_reports,
+            file_scope=[test_file],
+            mt_type="code",
+        )
+        self.agent.react_trace = []
+        self.agent.run_react(qa_prompt, tool_whitelist=self.CODER_TOOLS, max_iterations=10)
+
+        test_output = ""
+        coder_success = False
+        finish_summary = ""
+
+        for attempt in range(3):  # Coder + up to 2 retries
+            # Step 2: Coder minion
+            retry_ctx = (
+                f"\n\nPREVIOUS TEST FAILURE (attempt {attempt}):\n{test_output}"
+                if test_output else ""
+            )
+            coder_prompt = self._build_minion_prompt(
+                work_order=work_order + retry_ctx,
+                chain_context=chain_context,
+                previous_reports=previous_reports,
+                file_scope=file_scope,
+                mt_type="code",
+            )
+            self.agent.react_trace = []
+            coder_result = self.agent.run_react(
+                coder_prompt, tool_whitelist=self.CODER_TOOLS, max_iterations=15
+            )
+            finish_summary = coder_result.get("finish_summary", "")
+
+            # Step 3: Validator commander runs pytest
+            validator_prompt = self._build_minion_prompt(
+                work_order=(
+                    f"Run: python -m pytest {test_file} -v --tb=short 2>&1 | head -60\n"
+                    f"Report pass or fail."
+                ),
+                chain_context=chain_context,
+                previous_reports=previous_reports,
+                file_scope=[],
+                mt_type="command",
+            )
+            self.agent.react_trace = []
+            val_result = self.agent.run_react(
+                validator_prompt, tool_whitelist=self.COMMANDER_TOOLS, max_iterations=5
+            )
+            test_output = val_result.get("finish_summary", "")
+
+            if "passed" in test_output.lower() and "failed" not in test_output.lower():
+                coder_success = True
+                break
+
+        return {
+            "micro_task_index": micro_task.get("index", 0),
+            "type": "code",
+            "work_order": work_order,
+            "success": coder_success,
+            "finish_summary": finish_summary + (
+                f" | Tests: {test_output[:120]}" if test_output else ""
+            ),
+            "iterations_used": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
