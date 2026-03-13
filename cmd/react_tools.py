@@ -50,6 +50,7 @@ class ToolRegistry:
         self._patch_not_found_counts: Dict[str, int] = {}  # path → search-not-found count
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
+        self._read_file_counts: Dict[str, int] = {}     # path → read count (no-offset reads)
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -59,6 +60,7 @@ class ToolRegistry:
         self._patch_counts.clear()
         self._patch_not_found_counts.clear()
         self._failed_commands.clear()
+        self._read_file_counts.clear()
         # _server_procs intentionally NOT cleared — servers persist across phases
 
     # ---------------------------------------------------------------- gate --
@@ -408,6 +410,20 @@ class ToolRegistry:
         except Exception as e:
             return ToolResult(False, "", f"Failed to create {path}: {e}", {})
 
+    @staticmethod
+    def _fuzzy_patch(original: str, search: str, replace: str):
+        """Try whitespace-flexible regex match. Returns patched content or None."""
+        escaped = re.escape(search.strip())
+        # Make any run of escaped whitespace flexible
+        flexible = re.sub(r'((?:\\ |\\\t|\\\n)+)', r'\\s+', escaped)
+        try:
+            m = re.search(flexible, original)
+        except re.error:
+            return None
+        if m:
+            return original[: m.start()] + replace + original[m.end() :]
+        return None
+
     def _handle_patch_file(self, args: dict) -> ToolResult:
         path = os.path.expanduser(args.get("path", ""))
         search = args.get("search", "")
@@ -427,15 +443,42 @@ class ToolRegistry:
             return ToolResult(False, "", f"Cannot read {path}: {e}", {})
 
         if search not in original:
-            self._patch_not_found_counts[path] = self._patch_not_found_counts.get(path, 0) + 1
-            if self._patch_not_found_counts[path] >= 2:
+            # Try whitespace-flexible match before counting as a failure
+            fuzzy_result = self._fuzzy_patch(original, search, replace)
+            if fuzzy_result is not None:
+                print(f"  🔍 Fuzzy patch matched in {path}")
+                new_content = fuzzy_result
+            else:
+                # True failure — track count and give context
+                self._patch_not_found_counts[path] = self._patch_not_found_counts.get(path, 0) + 1
+                # Context hint: find lines containing first token of search
+                first_token = search.strip().split()[0][:30] if search.strip() else ""
+                ctx_lines = [
+                    f"  L{i+1}: {line.rstrip()[:100]}"
+                    for i, line in enumerate(original.split("\n"))
+                    if first_token and first_token in line
+                ][:5]
+                ctx_str = ("\nNearest matching lines:\n" + "\n".join(ctx_lines)) if ctx_lines else ""
+                if self._patch_not_found_counts[path] >= 2:
+                    return ToolResult(
+                        False, "",
+                        f"Search string not found in {path} (2nd failure). "
+                        f"Triggering automatic full-file rewrite.{ctx_str}",
+                        {"trigger_rewrite": True, "path": path},
+                    )
+                # Small-file hint on first failure
+                file_size = len(original)
+                size_hint = (
+                    f" File is only {file_size:,} bytes — consider using create_file to rewrite it entirely."
+                    if file_size < 10_000 else ""
+                )
                 return ToolResult(
                     False, "",
-                    f"Search string not found in {path} (2nd failure). "
-                    f"Triggering automatic full-file rewrite.",
-                    {"trigger_rewrite": True, "path": path},
+                    f"Search string not found in {path}.{size_hint}{ctx_str}",
+                    {},
                 )
-            return ToolResult(False, "", f"Search string not found in {path}", {})
+        else:
+            new_content = original.replace(search, replace, 1)
 
         # Per-file patch counter — block after 5 patches to prevent loops
         self._patch_counts[path] = self._patch_counts.get(path, 0) + 1
@@ -446,9 +489,6 @@ class ToolRegistry:
                 "Use create_file to rewrite the whole file instead.",
                 {"force_rewrite": True},
             )
-
-        # Apply patch (first occurrence only)
-        new_content = original.replace(search, replace, 1)
 
         # No-op detection — catches hallucination loops where search==replace
         if new_content == original:
@@ -524,10 +564,36 @@ class ToolRegistry:
         path = os.path.expanduser(args.get("path", ""))
         if not path:
             return ToolResult(False, "", "No path provided", {})
+        offset = int(args.get("offset", 0))
+        limit  = int(args.get("limit", 200))
         try:
             with open(path, "r") as f:
-                content = f.read()
-            return ToolResult(True, content, "", {"path": path, "size": len(content)})
+                lines = f.readlines()
+            total = len(lines)
+            slice_ = lines[offset : offset + limit]
+            content = "".join(slice_)
+            remaining = total - (offset + limit)
+            if remaining > 0:
+                content += (
+                    f"\n\n[... {remaining} more lines not shown. "
+                    f"Call read_file with offset={offset + limit} to continue reading.]"
+                )
+            # Track no-offset re-reads and inject redirect note at 3rd read
+            if offset == 0:
+                self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
+                count = self._read_file_counts[path]
+                if count >= 3:
+                    content += (
+                        f"\n\n⚠️  You have read {path} from the top {count} times. "
+                        f"If you haven't found what you need:\n"
+                        f"• Use offset= to read a different section\n"
+                        f"• Use execute_command with grep/sed to locate specific content\n"
+                        f"• Proceed with what you already know — re-reading rarely helps"
+                    )
+            return ToolResult(True, content, "", {
+                "path": path, "total_lines": total,
+                "shown_lines": len(slice_), "offset": offset,
+            })
         except FileNotFoundError:
             return ToolResult(False, "", f"File not found: {path}", {})
         except Exception as e:

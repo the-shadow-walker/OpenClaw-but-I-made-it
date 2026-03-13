@@ -178,7 +178,7 @@ TOOL_SCHEMAS: dict = {
     "create_file":      '  create_file      — {{"path": str, "content": str, "description": str}}',
     "patch_file":       '  patch_file       — {{"path": str, "search": str, "replace": str, "description": str}}',
     "web_search":       '  web_search       — {{"query": str}}',
-    "read_file":        '  read_file        — {{"path": str}}',
+    "read_file":        '  read_file        — {{"path": str, "offset": int (opt, default 0), "limit": int (opt, default 200 lines)}}',
     "memory_lookup":    '  memory_lookup    — {{"query": str}}',
     "finish":           '  finish           — {{"summary": str, "success": bool}}',
     "manage_server":    '  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}',
@@ -1734,8 +1734,8 @@ Return JSON only:
             # 12 messages × ~2k chars each ≈ 6k tokens — well inside 16k.
             # Entries being rotated out have their thought/confidence stripped
             # to compress them further before discarding.
-            if len(react_history) > 12:
-                keep_tail = react_history[-11:]
+            if len(react_history) > 10:
+                keep_tail = react_history[-9:]
                 react_history = react_history[:1] + keep_tail
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
@@ -1793,6 +1793,10 @@ Return JSON only:
                             react_history.append({"role": "assistant", "content": rescue_raw})
                             parsed = rescue_parsed
                             _consecutive_json_failures = 0
+                            # Purge corrupted history baggage — keep initial context + rescue response only
+                            if len(react_history) > 4:
+                                react_history = react_history[:1] + react_history[-2:]
+                                print(f"  🧹 History pruned to {len(react_history)} messages after rescue")
                             # Fall through to normal tool dispatch below
                         else:
                             react_history.append({"role": "user", "content": "ERROR: Heavy model rescue also failed. Produce a valid JSON tool call."})
