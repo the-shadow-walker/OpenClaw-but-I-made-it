@@ -863,6 +863,39 @@ def cancel_chain(chain_id: str):
     return jsonify({'message': 'Chain cancelled', 'chain_id': chain_id})
 
 
+@app.route('/api/v1/chains/<chain_id>/restart', methods=['POST'])
+@require_api_key
+def restart_chain(chain_id: str):
+    """Restart a failed/stuck chain from its first non-passed subtask."""
+    try:
+        chain = TaskChain.load(chain_id)
+    except FileNotFoundError:
+        return jsonify({'error': 'Chain not found'}), 404
+
+    data = chain.data
+    subtasks = data.get('subtasks', [])
+
+    # Find the first subtask that isn't done
+    next_index = None
+    for i, st in enumerate(subtasks):
+        if st.get('status') not in ('passed', 'skipped'):
+            next_index = i
+            break
+
+    if next_index is None:
+        chain.update_chain({'status': 'completed', 'completed_at': datetime.now().isoformat()})
+        return jsonify({'message': 'All subtasks already passed — chain marked completed', 'chain_id': chain_id})
+
+    # Reset the target subtask and mark chain running
+    chain.update_subtask(next_index, {'status': 'pending'})
+    chain.update_chain({'status': 'running', 'current_subtask_index': next_index,
+                        'completed_at': None})
+    print(f"🔁 Restarting chain {chain_id[:8]} from subtask {next_index}")
+    _submit_subtask_job(chain_id, chain.data, next_index, 0, None)
+    return jsonify({'message': f'Restarting from subtask {next_index}', 'chain_id': chain_id,
+                    'subtask_index': next_index})
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")

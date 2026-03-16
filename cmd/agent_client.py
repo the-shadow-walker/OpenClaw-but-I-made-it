@@ -128,6 +128,7 @@ Examples:
     parser.add_argument("--chain-status", metavar="CHAIN_ID", help="Show status of a running/completed chain")
     parser.add_argument("--list-chains", action="store_true", help="List all chains")
     parser.add_argument("--list-jobs", action="store_true", help="List recent jobs")
+    parser.add_argument("--restart-chain", metavar="CHAIN_ID", help="Restart a failed chain from its first non-passed subtask")
     parser.add_argument("--budget", type=int, default=200, help="Iteration budget for chains (default: 200)")
     parser.add_argument("--no-stream", action="store_true", help="Poll instead of streaming (fallback)")
 
@@ -178,6 +179,14 @@ Examples:
             status = j.get("status", "?")
             instr = j.get("instruction", "")[:80]
             print(f"  {icon} {jid}  [{status}]  {instr}")
+        sys.exit(0)
+
+    # ── restart chain ─────────────────────────────────────────────────────────
+    if args.restart_chain:
+        resp = client.session.post(f"{client.base_url}/api/v1/chains/{args.restart_chain}/restart")
+        resp.raise_for_status()
+        d = resp.json()
+        print(d.get("message", "Restarted"))
         sys.exit(0)
 
     # ── chain status ──────────────────────────────────────────────────────────

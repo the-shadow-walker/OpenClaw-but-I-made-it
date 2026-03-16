@@ -565,11 +565,12 @@ class SubtaskOrchestrator:
                 # Clear agent history for a fresh minion context
                 self.agent.react_trace = []
 
-                # Run the minion
+                # Run the minion — use subtask's allocated budget (min 15)
+                minion_iters = max(15, subtask.get("max_iterations", 25))
                 result = self.agent.run_react(
                     instruction=prompt,
                     tool_whitelist=tools,
-                    max_iterations=15,
+                    max_iterations=minion_iters,
                 )
 
                 report = {

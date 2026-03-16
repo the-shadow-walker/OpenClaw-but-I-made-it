@@ -217,7 +217,7 @@ class ToolRegistry:
         "pacman", "yay", "paru",           # Arch package managers
         "apt", "apt-get", "dnf", "yum",    # Other Linux PMs
         "pip install", "pip3 install",     # Python packages
-        "npm install", "yarn add",         # Node packages
+        "npm install", "yarn add", "npx",  # Node packages / npx runners
         "cargo build", "cargo install",    # Rust
         "make", "cmake",                   # Build systems
     ]
