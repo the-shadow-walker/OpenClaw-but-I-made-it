@@ -414,6 +414,41 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
     _submit_subtask_job(chain_id, chain.data, next_index, 0, handoff)
 
 
+def _resume_running_chains():
+    """Re-queue any chains that were in-flight when the server last died."""
+    try:
+        chain_summaries = TaskChain.list_all()
+    except Exception:
+        return
+    for summary in chain_summaries:
+        if summary['status'] != 'running':
+            continue
+        chain_id = summary['chain_id']
+        try:
+            chain = TaskChain.load(chain_id)
+            data = chain.data
+            subtasks = data.get('subtasks', [])
+            # Find the first subtask that hasn't finished
+            next_index = None
+            for i, st in enumerate(subtasks):
+                if st.get('status') not in ('passed', 'skipped', 'failed'):
+                    next_index = i
+                    break
+            if next_index is None:
+                # All subtasks done — chain just never got marked completed
+                chain.update_chain({'status': 'completed', 'completed_at': datetime.now().isoformat()})
+                print(f"✅ Chain {chain_id[:8]}: all subtasks done, marking completed on resume")
+                continue
+            # Reset any subtask stuck in "running" back to pending
+            if subtasks[next_index].get('status') == 'running':
+                chain.update_subtask(next_index, {'status': 'pending'})
+            chain.update_chain({'current_subtask_index': next_index})
+            print(f"🔄 Resuming chain {chain_id[:8]} from subtask {next_index}")
+            _submit_subtask_job(chain_id, chain.data, next_index, 0, None)
+        except Exception as e:
+            print(f"⚠️  Could not resume chain {chain_id[:8]}: {e}")
+
+
 def require_api_key(f):
     """Decorator to require API key authentication"""
     def decorated_function(*args, **kwargs):
@@ -854,8 +889,10 @@ if __name__ == '__main__':
     print(f"  DELETE /api/v1/chains/<id>       - Cancel chain")
     print(f"  GET    /health                   - Health check")
     print("=" * 70)
+    print("\nChecking for interrupted chains...")
+    _resume_running_chains()
     print("\nStarting server...")
-    
+
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     except KeyboardInterrupt:
