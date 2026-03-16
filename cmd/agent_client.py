@@ -126,6 +126,8 @@ Examples:
     parser.add_argument("--health", action="store_true", help="Check service health and exit")
     parser.add_argument("--chain", metavar="GOAL", help="Submit as a multi-phase chain instead of single job")
     parser.add_argument("--chain-status", metavar="CHAIN_ID", help="Show status of a running/completed chain")
+    parser.add_argument("--list-chains", action="store_true", help="List all chains")
+    parser.add_argument("--list-jobs", action="store_true", help="List recent jobs")
     parser.add_argument("--budget", type=int, default=200, help="Iteration budget for chains (default: 200)")
     parser.add_argument("--no-stream", action="store_true", help="Poll instead of streaming (fallback)")
 
@@ -143,6 +145,39 @@ Examples:
         print(f"\nFeatures:")
         for f in h.get('features', []):
             print(f"  ▸ {f}")
+        sys.exit(0)
+
+    # ── list chains ───────────────────────────────────────────────────────────
+    if args.list_chains:
+        resp = client.session.get(f"{client.base_url}/api/v1/chains")
+        resp.raise_for_status()
+        chains = resp.json().get("chains", [])
+        STATUS_ICON = {"running": "🔄", "completed": "✅", "failed": "❌", "cancelled": "🚫"}
+        if not chains:
+            print("No chains found.")
+        for c in chains:
+            icon = STATUS_ICON.get(c.get("status", ""), "❓")
+            cid = c.get("chain_id", "")[:8]
+            status = c.get("status", "?").upper()
+            phase = c.get("current_subtask_index", 0)
+            total = c.get("subtask_count", "?")
+            goal = c.get("goal", "")[:80]
+            print(f"  {icon} {cid}  [{status}]  phase {phase}/{total}  {goal}")
+        sys.exit(0)
+
+    # ── list jobs ─────────────────────────────────────────────────────────────
+    if args.list_jobs:
+        data = client.list_jobs()
+        jobs = data.get("jobs", [])
+        STATUS_ICON = {"QUEUED": "⏳", "RUNNING": "🔄", "COMPLETED": "✅", "FAILED": "❌", "CANCELLED": "🚫"}
+        if not jobs:
+            print("No jobs found.")
+        for j in jobs:
+            icon = STATUS_ICON.get(j.get("status", ""), "❓")
+            jid = j.get("job_id", "")[:8]
+            status = j.get("status", "?")
+            instr = j.get("instruction", "")[:80]
+            print(f"  {icon} {jid}  [{status}]  {instr}")
         sys.exit(0)
 
     # ── chain status ──────────────────────────────────────────────────────────
