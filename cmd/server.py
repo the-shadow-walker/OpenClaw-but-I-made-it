@@ -896,6 +896,42 @@ def restart_chain(chain_id: str):
                     'subtask_index': next_index})
 
 
+@app.route('/api/v1/chains/<chain_id>/skip/<int:subtask_index>', methods=['POST'])
+@require_api_key
+def skip_subtask(chain_id: str, subtask_index: int):
+    """Mark a subtask as manually passed and advance the chain to the next one."""
+    try:
+        chain = TaskChain.load(chain_id)
+    except FileNotFoundError:
+        return jsonify({'error': 'Chain not found'}), 404
+
+    data = chain.data
+    subtasks = data.get('subtasks', [])
+    if subtask_index >= len(subtasks):
+        return jsonify({'error': f'Subtask index {subtask_index} out of range'}), 400
+
+    note = request.json.get('note', 'Manually marked passed') if request.json else 'Manually marked passed'
+    chain.update_subtask(subtask_index, {'status': 'passed', 'manually_skipped': True, 'note': note})
+    chain.update_chain({'status': 'running', 'current_subtask_index': subtask_index, 'completed_at': None})
+    print(f"⏭️  Chain {chain_id[:8]}: subtask {subtask_index} manually passed — advancing")
+
+    # Find the next pending subtask
+    next_index = None
+    for i in range(subtask_index + 1, len(subtasks)):
+        if subtasks[i].get('status') not in ('passed', 'skipped'):
+            next_index = i
+            break
+
+    if next_index is None:
+        chain.update_chain({'status': 'completed', 'completed_at': datetime.now().isoformat()})
+        return jsonify({'message': 'All subtasks done — chain completed', 'chain_id': chain_id})
+
+    chain.update_chain({'current_subtask_index': next_index})
+    _submit_subtask_job(chain_id, chain.data, next_index, 0, None)
+    return jsonify({'message': f'Subtask {subtask_index} marked passed, advancing to {next_index}',
+                    'chain_id': chain_id, 'next_subtask_index': next_index})
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
