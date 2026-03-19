@@ -31,6 +31,12 @@ from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskRepla
 import debug_logger
 import webhook_dispatcher
 
+try:
+    from blueteam_agent import get_sentinel as _get_sentinel, get_recent_alerts as _bt_alerts
+    _BLUETEAM_AVAILABLE = True
+except ImportError:
+    _BLUETEAM_AVAILABLE = False
+
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
 
@@ -67,9 +73,10 @@ SERVICE_FEATURES = [
     "Outbound webhooks: AGENT_WEBHOOK_URLS env var (fire-and-forget)",
     "Inbox watcher: drop job/chain JSON into ./agent_inbox/ for pickup",
     "SSE event stream: GET /api/v1/events | State snapshot: GET /api/v1/state",
+    "SENTINEL blue team: /api/v1/blueteam/* (scan, investigate, watch, alerts, status)",
 ]
 
-SERVICE_VERSION = "3.2.0-mesh"
+SERVICE_VERSION = "3.3.0-sentinel"
 
 # Job storage
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -144,7 +151,42 @@ def _inbox_watcher() -> None:
                 except Exception:
                     continue
                 try:
-                    if data.get("goal"):
+                    if data.get("blueteam_scan") and _BLUETEAM_AVAILABLE:
+                        # SENTINEL security scan
+                        focus = data.get("focus", "")
+                        job_id = str(uuid.uuid4())
+                        job = {
+                            'job_id': job_id, 'job_type': 'blueteam_scan',
+                            'instruction': 'SENTINEL security scan (inbox)',
+                            'focus': focus, 'model': 'qwen3-coder:30b',
+                            'searxng_url': 'http://10.0.0.58:8080',
+                            'status': 'queued',
+                            'created_at': datetime.now().isoformat(),
+                            'output': '', 'execution_log': [], 'success': None,
+                        }
+                        jobs[job_id] = job
+                        job_runner.submit_job(job_id)
+                        debug_logger.inbox_job(fname, "blueteam_scan", instruction="SENTINEL scan")
+                        _original_print(f"[inbox] blueteam scan {job_id[:8]} submitted from {fname}")
+                    elif data.get("blueteam_investigate") and _BLUETEAM_AVAILABLE:
+                        # SENTINEL investigation
+                        finding = str(data["blueteam_investigate"])
+                        job_id = str(uuid.uuid4())
+                        job = {
+                            'job_id': job_id, 'job_type': 'blueteam_investigate',
+                            'instruction': f'SENTINEL investigation: {finding[:100]}',
+                            'finding': finding, 'evidence': data.get("evidence", ""),
+                            'model': 'qwen3-coder:30b',
+                            'searxng_url': 'http://10.0.0.58:8080',
+                            'status': 'queued',
+                            'created_at': datetime.now().isoformat(),
+                            'output': '', 'execution_log': [], 'success': None,
+                        }
+                        jobs[job_id] = job
+                        job_runner.submit_job(job_id)
+                        debug_logger.inbox_job(fname, "blueteam_investigate", instruction=finding[:100])
+                        _original_print(f"[inbox] blueteam investigate {job_id[:8]} submitted from {fname}")
+                    elif data.get("goal"):
                         # Chain submission
                         goal = data["goal"]
                         budget = int(data.get("total_budget", 200))
@@ -248,7 +290,26 @@ class JobRunner:
                     # Single jobs bypass the orchestrator and run directly.
                     _original_print(f"[worker] job {job_id[:8]} starting — chain={bool(job.get('chain_id'))} subtask={job.get('subtask_index')}", flush=True)
 
-                    if job.get('chain_id') and job.get('subtask_index') is not None:
+                    if job.get('job_type') in ('blueteam_scan', 'blueteam_investigate'):
+                        # Blue team security job — run via SENTINEL singleton
+                        if not _BLUETEAM_AVAILABLE:
+                            raise RuntimeError("blueteam_agent module not available")
+                        sentinel = _get_sentinel()
+                        sentinel.agent.current_job_id = job_id
+                        if job['job_type'] == 'blueteam_scan':
+                            result = sentinel.scan(focus=job.get('focus', ''))
+                        else:
+                            result = sentinel.investigate(
+                                finding=job.get('finding', job['instruction']),
+                                evidence=job.get('evidence', ''),
+                            )
+                        job['success'] = result.get('success', True)
+                        # Point local agent's log attrs at the result so the shared
+                        # store-results block below still works cleanly.
+                        agent.execution_log = result.get('execution_log', [])
+                        agent.react_trace = result.get('trace', [])
+
+                    elif job.get('chain_id') and job.get('subtask_index') is not None:
                         _original_print(f"[worker] loading chain state for {job['chain_id'][:8]}", flush=True)
                         chain_state = TaskChain.load(job['chain_id'])
                         chain_data = chain_state.data
@@ -1128,6 +1189,135 @@ def get_state():
         return jsonify({'error': 'State file not yet written'}), 503
 
 
+# ── SENTINEL blue team endpoints ──────────────────────────────────────────────
+
+@app.route('/api/v1/blueteam/scan', methods=['POST'])
+@require_api_key
+def blueteam_scan():
+    """Start a full SENTINEL security scan (runs as a background job).
+
+    Optional body: {"focus": "SSH"}
+    Returns: {"job_id": "...", "status": "queued"}
+    """
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    data = request.get_json() or {}
+    focus = data.get('focus', '')
+
+    job_id = str(uuid.uuid4())
+    job = {
+        'job_id': job_id,
+        'job_type': 'blueteam_scan',
+        'instruction': f'SENTINEL security scan{f" (focus: {focus})" if focus else ""}',
+        'focus': focus,
+        'model': 'qwen3-coder:30b',
+        'searxng_url': 'http://10.0.0.58:8080',
+        'status': 'queued',
+        'created_at': datetime.now().isoformat(),
+        'output': '',
+        'execution_log': [],
+        'success': None,
+    }
+    jobs[job_id] = job
+    job_runner.submit_job(job_id)
+    return jsonify({'job_id': job_id, 'status': 'queued',
+                    'created_at': job['created_at']}), 202
+
+
+@app.route('/api/v1/blueteam/investigate', methods=['POST'])
+@require_api_key
+def blueteam_investigate():
+    """Start a targeted SENTINEL investigation (runs as a background job).
+
+    Body: {"finding": "suspicious SSH from 1.2.3.4", "evidence": "..."}
+    Returns: {"job_id": "...", "status": "queued"}
+    """
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    data = request.get_json() or {}
+    finding = data.get('finding', '')
+    if not finding:
+        return jsonify({'error': 'Missing finding'}), 400
+
+    job_id = str(uuid.uuid4())
+    job = {
+        'job_id': job_id,
+        'job_type': 'blueteam_investigate',
+        'instruction': f'SENTINEL investigation: {finding[:100]}',
+        'finding': finding,
+        'evidence': data.get('evidence', ''),
+        'model': 'qwen3-coder:30b',
+        'searxng_url': 'http://10.0.0.58:8080',
+        'status': 'queued',
+        'created_at': datetime.now().isoformat(),
+        'output': '',
+        'execution_log': [],
+        'success': None,
+    }
+    jobs[job_id] = job
+    job_runner.submit_job(job_id)
+    return jsonify({'job_id': job_id, 'status': 'queued',
+                    'created_at': job['created_at']}), 202
+
+
+@app.route('/api/v1/blueteam/watch/start', methods=['POST'])
+@require_api_key
+def blueteam_watch_start():
+    """Start the SENTINEL background anomaly watcher.
+
+    Optional body: {"interval": 60}
+    """
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    data = request.get_json() or {}
+    interval = int(data.get('interval', 60))
+    sentinel = _get_sentinel()
+    sentinel.watch(interval=interval)
+    return jsonify({'message': f'SENTINEL watcher started (interval={interval}s)',
+                    'watching': True})
+
+
+@app.route('/api/v1/blueteam/watch/stop', methods=['POST'])
+@require_api_key
+def blueteam_watch_stop():
+    """Stop the SENTINEL background watcher."""
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    sentinel = _get_sentinel()
+    sentinel.stop_watch()
+    return jsonify({'message': 'SENTINEL watcher stopping', 'watching': False})
+
+
+@app.route('/api/v1/blueteam/alerts', methods=['GET'])
+@require_api_key
+def blueteam_alerts():
+    """Return recent SENTINEL security alerts.
+
+    Query param: ?n=50
+    """
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    n = int(request.args.get('n', 50))
+    alerts = _bt_alerts(n)
+    return jsonify({'alerts': alerts, 'count': len(alerts)})
+
+
+@app.route('/api/v1/blueteam/status', methods=['GET'])
+@require_api_key
+def blueteam_status():
+    """Return SENTINEL watcher status and last scan summary."""
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    sentinel = _get_sentinel()
+    return jsonify(sentinel.status())
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
@@ -1157,6 +1347,12 @@ if __name__ == '__main__':
     print(f"  GET    /api/v1/events            - SSE event stream")
     print(f"  GET    /api/v1/state             - Agent state snapshot")
     print(f"  GET    /health                   - Health check")
+    print(f"  POST   /api/v1/blueteam/scan     - SENTINEL security scan (job)")
+    print(f"  POST   /api/v1/blueteam/investigate - SENTINEL investigation (job)")
+    print(f"  POST   /api/v1/blueteam/watch/start - Start anomaly watcher")
+    print(f"  POST   /api/v1/blueteam/watch/stop  - Stop anomaly watcher")
+    print(f"  GET    /api/v1/blueteam/alerts   - Recent security alerts")
+    print(f"  GET    /api/v1/blueteam/status   - Watcher status + last scan")
     print("=" * 70)
     print("\nChecking for interrupted chains...")
     _resume_running_chains()

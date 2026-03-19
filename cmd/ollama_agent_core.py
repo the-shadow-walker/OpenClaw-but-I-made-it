@@ -1542,6 +1542,7 @@ Return JSON only:
         max_iterations: Optional[int] = None,
         incoming_handoff: Optional[Dict] = None,
         tool_whitelist: Optional[set] = None,
+        system_prompt_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Core ReAct loop: Reason → Act → Observe × N."""
         if confirm_cb is None:
@@ -1575,11 +1576,14 @@ Return JSON only:
         else:
             available_tools_text = _ALL_TOOLS_TEXT
 
-        system_prompt = REACT_SYSTEM_PROMPT_TEMPLATE.format(
-            os_info=self.os_info,
-            max_iterations=max_iter,
-            available_tools=available_tools_text,
-        )
+        if system_prompt_override:
+            system_prompt = system_prompt_override
+        else:
+            system_prompt = REACT_SYSTEM_PROMPT_TEMPLATE.format(
+                os_info=self.os_info,
+                max_iterations=max_iter,
+                available_tools=available_tools_text,
+            )
 
         home_dir = survey.get("home_dir", os.path.expanduser("~"))
         username = survey.get("whoami", "unknown")

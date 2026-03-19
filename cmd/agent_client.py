@@ -132,6 +132,16 @@ Examples:
     parser.add_argument("--skip-subtask", nargs=2, metavar=("CHAIN_ID", "INDEX"), help="Mark a subtask as manually passed and advance the chain")
     parser.add_argument("--budget", type=int, default=200, help="Iteration budget for chains (default: 200)")
     parser.add_argument("--no-stream", action="store_true", help="Poll instead of streaming (fallback)")
+    # SENTINEL blue team
+    parser.add_argument("--blueteam-scan", action="store_true", help="Run a full SENTINEL security scan")
+    parser.add_argument("--blueteam-focus", metavar="AREA", default="", help="Focus area for --blueteam-scan (e.g. 'SSH')")
+    parser.add_argument("--blueteam-investigate", metavar="FINDING", help="Investigate a specific security finding")
+    parser.add_argument("--blueteam-evidence", metavar="EVIDENCE", default="", help="Initial evidence for --blueteam-investigate")
+    parser.add_argument("--blueteam-watch", action="store_true", help="Start SENTINEL continuous anomaly watcher")
+    parser.add_argument("--blueteam-interval", type=int, default=60, help="Watch poll interval in seconds (default: 60)")
+    parser.add_argument("--blueteam-stop", action="store_true", help="Stop SENTINEL watcher")
+    parser.add_argument("--blueteam-alerts", action="store_true", help="Show recent SENTINEL security alerts")
+    parser.add_argument("--blueteam-status", action="store_true", help="Show SENTINEL watcher status")
 
     args = parser.parse_args()
 
@@ -237,6 +247,114 @@ Examples:
             if ac:
                 ac_icon = "✅" if ac.get("passed") else "❌"
                 print(f"       {ac_icon} AC: {ac.get('command','')[:50]}")
+        print()
+        sys.exit(0)
+
+    # ── SENTINEL: scan ────────────────────────────────────────────────────────
+    if args.blueteam_scan:
+        resp = client.session.post(
+            f"{client.base_url}/api/v1/blueteam/scan",
+            json={"focus": args.blueteam_focus},
+        )
+        resp.raise_for_status()
+        job = resp.json()
+        job_id = job["job_id"]
+        print(f"[sentinel] Scan job submitted: {job_id}")
+        print(f"[sentinel] Streaming output...\n")
+        try:
+            for event in client.stream_output(job_id):
+                if event["type"] == "output":
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "complete":
+                    print(f"\n\n[sentinel] Scan done — status: {event.get('status', '?')}")
+                    break
+        except KeyboardInterrupt:
+            print(f"\n[sentinel] Interrupted. Job {job_id} may still be running.")
+        sys.exit(0)
+
+    # ── SENTINEL: investigate ─────────────────────────────────────────────────
+    if args.blueteam_investigate:
+        resp = client.session.post(
+            f"{client.base_url}/api/v1/blueteam/investigate",
+            json={"finding": args.blueteam_investigate, "evidence": args.blueteam_evidence},
+        )
+        resp.raise_for_status()
+        job = resp.json()
+        job_id = job["job_id"]
+        print(f"[sentinel] Investigation job submitted: {job_id}")
+        print(f"[sentinel] Finding: {args.blueteam_investigate}")
+        print(f"[sentinel] Streaming output...\n")
+        try:
+            for event in client.stream_output(job_id):
+                if event["type"] == "output":
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "complete":
+                    print(f"\n\n[sentinel] Investigation done — status: {event.get('status', '?')}")
+                    break
+        except KeyboardInterrupt:
+            print(f"\n[sentinel] Interrupted. Job {job_id} may still be running.")
+        sys.exit(0)
+
+    # ── SENTINEL: watch start ─────────────────────────────────────────────────
+    if args.blueteam_watch:
+        resp = client.session.post(
+            f"{client.base_url}/api/v1/blueteam/watch/start",
+            json={"interval": args.blueteam_interval},
+        )
+        resp.raise_for_status()
+        d = resp.json()
+        print(f"[sentinel] {d.get('message', 'Watcher started')}")
+        sys.exit(0)
+
+    # ── SENTINEL: watch stop ──────────────────────────────────────────────────
+    if args.blueteam_stop:
+        resp = client.session.post(f"{client.base_url}/api/v1/blueteam/watch/stop")
+        resp.raise_for_status()
+        d = resp.json()
+        print(f"[sentinel] {d.get('message', 'Watcher stopping')}")
+        sys.exit(0)
+
+    # ── SENTINEL: alerts ──────────────────────────────────────────────────────
+    if args.blueteam_alerts:
+        resp = client.session.get(f"{client.base_url}/api/v1/blueteam/alerts",
+                                  params={"n": 50})
+        resp.raise_for_status()
+        data = resp.json()
+        alerts = data.get("alerts", [])
+        if not alerts:
+            print("[sentinel] No alerts on record.")
+        else:
+            SEV_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}
+            for a in alerts:
+                ts = a.get("ts", "")[:19]
+                sev = a.get("severity", "?")
+                icon = SEV_ICON.get(sev, "❓")
+                finding = a.get("finding", "")
+                print(f"  {icon} [{ts}] [{sev:8s}] {finding}")
+        sys.exit(0)
+
+    # ── SENTINEL: status ──────────────────────────────────────────────────────
+    if args.blueteam_status:
+        resp = client.session.get(f"{client.base_url}/api/v1/blueteam/status")
+        resp.raise_for_status()
+        d = resp.json()
+        watching = d.get("watching", False)
+        icon = "👁️  ACTIVE" if watching else "  IDLE"
+        print(f"\n[sentinel] Watcher: {icon}")
+        print(f"  Interval:      {d.get('watch_interval', '?')}s")
+        print(f"  Has baseline:  {d.get('has_baseline', False)}")
+        print(f"  Last scan:     {'✅' if d.get('last_scan_success') else '—'}")
+        print(f"  Alert count:   {d.get('recent_alert_count', 0)}")
+        summary = d.get("last_scan_summary", "")
+        if summary:
+            print(f"\n  Last report:   {summary[:200]}")
+        recent = d.get("recent_alerts", [])
+        if recent:
+            print(f"\n  Recent alerts:")
+            SEV_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}
+            for a in recent:
+                sev = a.get("severity", "?")
+                print(f"    {SEV_ICON.get(sev,'❓')} [{sev}] {a.get('finding','')}")
         print()
         sys.exit(0)
 
