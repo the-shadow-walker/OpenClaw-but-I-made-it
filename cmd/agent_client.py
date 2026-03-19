@@ -330,7 +330,14 @@ Examples:
                 sev = a.get("severity", "?")
                 icon = SEV_ICON.get(sev, "❓")
                 finding = a.get("finding", "")
+                evidence = a.get("evidence", "").strip()
+                action = a.get("action_taken", "").strip()
                 print(f"  {icon} [{ts}] [{sev:8s}] {finding}")
+                if evidence:
+                    for line in evidence.splitlines():
+                        print(f"             {line}")
+                if action:
+                    print(f"             → {action}")
         sys.exit(0)
 
     # ── SENTINEL: status ──────────────────────────────────────────────────────
@@ -356,7 +363,12 @@ Examples:
             SEV_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}
             for a in recent:
                 sev = a.get("severity", "?")
-                print(f"    {SEV_ICON.get(sev,'❓')} [{sev}] {a.get('finding','')}")
+                ts = a.get("ts", "")[:19]
+                ev = a.get("evidence", "").strip()
+                print(f"    {SEV_ICON.get(sev,'❓')} [{ts}] [{sev}] {a.get('finding','')}")
+                if ev:
+                    for line in ev.splitlines():
+                        print(f"         {line}")
         print()
         sys.exit(0)
 
