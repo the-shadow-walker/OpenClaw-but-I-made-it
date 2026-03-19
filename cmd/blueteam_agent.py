@@ -330,36 +330,41 @@ Never output plain text. Every response must be a single valid JSON object.
 • Conservative action — read logs BEFORE killing processes or blocking IPs
 
 ━━━ INVESTIGATION SEQUENCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1. OBSERVE   → execute_command / read_file to gather evidence
-  2. ASSESS    → determine threat level: LOW | MEDIUM | HIGH | CRITICAL
-  3. ALERT     → call alert() for every MEDIUM+ finding (required)
-  4. CONTAIN   → kill_process or block_ip ONLY for HIGH/CRITICAL
-  5. ERADICATE → quarantine_file to remove confirmed malicious artifacts
-  6. REPORT    → call finish() with your full structured threat report
+  1. OBSERVE   → run execute_command / read_file to collect hard evidence
+  2. ASSESS    → weigh evidence: is this actually malicious, or normal noise?
+  3. DECIDE:
+       BENIGN  → call finish() with threat_level: LOW. Do NOT call alert().
+       MEDIUM  → call alert(), then dig deeper before acting
+       HIGH    → call alert(), then immediately contain (kill_process / block_ip)
+       CRITICAL→ alert() + contain + eradicate (quarantine_file) + finish()
+  4. CONTAIN   → kill_process or block_ip ONLY when evidence is conclusive
+  5. ERADICATE → quarantine_file to neutralise confirmed malicious artifacts
+  6. REPORT    → call finish() with your complete threat assessment
 
 ━━━ DETECTION PRIORITIES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1. Malicious processes (cryptominers, reverse shells, RATs, exfil tools)
-  2. Unusual outbound connections (unexpected destinations, high data volume)
-  3. Auth anomalies (login spikes, new accounts, sudo abuse, SSH keys)
-  4. Persistence (cron, systemd units, .bashrc/.profile, SUID changes)
-  5. Lateral movement (internal SSH pivoting, ARP spoofing, scanning)
-  6. Data exfiltration (large transfers, cloud destinations, DNS tunneling)
+  2. Unusual outbound connections (unexpected external IPs, high volume)
+  3. Auth anomalies (brute force, new accounts, sudo abuse, SSH key changes)
+  4. Persistence (new cron, systemd units, .bashrc edits, SUID changes)
+  5. Lateral movement (internal SSH pivoting, ARP spoofing, port scanning)
+  6. Data exfiltration (large transfers, cloud destinations, DNS tunnelling)
 
 ━━━ THREAT LEVELS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  LOW      → Unusual but likely benign. Document only. No action required.
-  MEDIUM   → Suspicious. Investigate further. MUST call alert().
-  HIGH     → Confirmed threat. Contain immediately. alert() + action.
-  CRITICAL → Active breach. Contain + eradicate + alert everything.
+  LOW      → Confirmed benign. finish() only. No alert needed.
+  MEDIUM   → Genuinely suspicious with evidence. alert() + keep digging.
+  HIGH     → Confirmed active threat. alert() + contain now.
+  CRITICAL → Active breach. alert() + contain + eradicate immediately.
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1.  Output ONLY valid JSON — never plain text or markdown
-  2.  Call alert() for every MEDIUM+ finding before any action
+  2.  alert() is for CONFIRMED findings only — not for suspicions
   3.  NEVER kill: PID 1, systemd, sshd, ollama-agent (PID {agent_pid})
   4.  NEVER block private ranges: 127.x, 10.x, 192.168.x, 172.16-31.x
   5.  Read /proc/<pid>/cmdline and /proc/<pid>/environ before killing
   6.  Check process ancestry (ps -p PID -o ppid,cmd) before killing
-  7.  confidence < 70 → gather more evidence before acting
-  8.  When unsure → alert(severity=LOW) and continue investigating
+  7.  confidence < 70 → gather more evidence; do not act yet
+  8.  This is a KDE Plasma desktop server — kwin, plasmashell, akonadi,
+      kdeconnect, baloo, konsole, Xorg/Wayland are ALL normal processes
   9.  Use efficient command chains: pipes, grep, awk, head
   10. Call finish() with your full structured threat report when done
   11. BUDGET RULE: If iteration ≥ ({max_iterations} - 5), call finish() IMMEDIATELY
@@ -713,16 +718,21 @@ class BlueteamAgent:
             evidence: Any initial evidence already gathered
         """
         instruction = (
-            f"INVESTIGATION REQUEST\n\n"
-            f"Finding:  {finding}\n"
-            f"Evidence: {evidence or '(none yet — gather it)'}\n\n"
-            "Investigate deeply:\n"
-            "1. Read relevant logs and process state to build evidence\n"
-            "2. Determine threat level: LOW / MEDIUM / HIGH / CRITICAL\n"
-            "3. Call alert() with severity, finding, and all evidence\n"
-            "4. If HIGH+: contain with kill_process or block_ip\n"
-            "5. Call finish() with your full incident report\n\n"
-            "Start gathering evidence now."
+            f"AUTONOMOUS INVESTIGATION\n\n"
+            f"Trigger:  {finding}\n\n"
+            f"Pre-collected evidence (use this first before re-running commands):\n"
+            f"{evidence or '(none — gather it yourself)'}\n\n"
+            "Your job is to determine autonomously whether this is a real threat "
+            "or normal system activity. Follow this decision process:\n\n"
+            "1. Review the pre-collected evidence above\n"
+            "2. Run any additional commands needed to reach a confident conclusion\n"
+            "3. BENIGN (normal activity): call finish() with threat_level: LOW\n"
+            "   — do NOT call alert() for normal server/desktop noise\n"
+            "4. SUSPICIOUS (MEDIUM): call alert() with full evidence, dig deeper\n"
+            "5. CONFIRMED THREAT (HIGH/CRITICAL): alert() + contain "
+            "(kill_process / block_ip) + finish()\n\n"
+            "Be skeptical. Most anomaly detections are benign. Only escalate "
+            "when evidence is conclusive. Start your investigation now."
         )
 
         prompt = _build_blueteam_system_prompt(
@@ -829,25 +839,29 @@ class BlueteamAgent:
                     secs_since_last = now - self._last_investigation_ts
                     if secs_since_last < INVESTIGATION_COOLDOWN:
                         remaining = int((INVESTIGATION_COOLDOWN - secs_since_last) / 60)
-                        print(f"👁️  Cooldown active — skipping investigation ({remaining}m remaining)")
+                        print(f"👁️  Anomalies noted — cooldown active ({remaining}m remaining): {summary}")
                     else:
-                        emit_alert("MEDIUM", "Watch-mode anomalies detected",
-                                   evidence=summary, action="Triggering investigation")
                         self._last_investigation_ts = now
+                        print(f"👁️  Investigating: {summary}")
+                        if _dlog:
+                            _dlog.log("blueteam_investigation_start", {
+                                "anomalies": anomalies,
+                                "summary": summary,
+                            })
 
                         # Build evidence from pre-collected survey data so the
                         # LLM doesn't waste iterations re-gathering the same info.
                         ev_parts: List[str] = [f"DETECTED ANOMALIES:\n{chr(10).join(anomalies)}"]
                         keyword_map = {
-                            "port":     ("listening_ports", "LISTENING PORTS"),
-                            "connect":  ("established_conns", "ESTABLISHED CONNECTIONS"),
+                            "port":     ("listening_ports",  "LISTENING PORTS"),
+                            "connect":  ("established_conns","ESTABLISHED CONNECTIONS"),
                             "outbound": ("outbound_summary", "OUTBOUND SUMMARY"),
-                            "login":    ("failed_logins", "FAILED LOGINS"),
+                            "login":    ("failed_logins",    "FAILED LOGINS"),
                             "tmp":      ("recent_tmp_files", "RECENT TMP FILES"),
-                            "file":     ("home_new_files", "NEW HOME FILES"),
-                            "cpu":      ("high_cpu_procs", "HIGH CPU PROCESSES"),
-                            "cron":     ("cron_jobs", "CRON JOBS"),
-                            "service":  ("failed_services", "FAILED SERVICES"),
+                            "file":     ("home_new_files",   "NEW HOME FILES"),
+                            "cpu":      ("high_cpu_procs",   "HIGH CPU PROCESSES"),
+                            "cron":     ("cron_jobs",        "CRON JOBS"),
+                            "service":  ("failed_services",  "FAILED SERVICES"),
                         }
                         summary_lower = summary.lower()
                         for kw, (survey_key, label) in keyword_map.items():
@@ -856,10 +870,24 @@ class BlueteamAgent:
                                 if val:
                                     ev_parts.append(f"{label}:\n{val[:600]}")
 
-                        self.investigate(
+                        # Run autonomous investigation — the LLM decides whether
+                        # to alert, contain, or dismiss. No pre-emptive alert here.
+                        inv_result = self.investigate(
                             finding=f"Watch-mode anomalies: {summary}",
                             evidence="\n\n".join(ev_parts),
                         )
+
+                        conclusion = inv_result.get("finish_summary", "no conclusion")
+                        m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b', conclusion.upper())
+                        threat = m.group(1) if m else "UNKNOWN"
+                        print(f"👁️  Investigation concluded [{threat}]: {conclusion[:120]}")
+                        if _dlog:
+                            _dlog.log("blueteam_investigation_complete", {
+                                "anomalies": summary,
+                                "threat_level": threat,
+                                "conclusion": conclusion,
+                                "iterations_used": inv_result.get("iterations_used", 0),
+                            })
 
                 self._baseline = current
 
