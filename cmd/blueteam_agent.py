@@ -362,6 +362,8 @@ Never output plain text. Every response must be a single valid JSON object.
   8.  When unsure → alert(severity=LOW) and continue investigating
   9.  Use efficient command chains: pipes, grep, awk, head
   10. Call finish() with your full structured threat report when done
+  11. BUDGET RULE: If iteration ≥ ({max_iterations} - 5), call finish() IMMEDIATELY
+      with whatever you have — a partial report is better than no report
 
 ━━━ finish() REPORT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   summary: "one sentence threat assessment"
@@ -529,6 +531,7 @@ class BlueteamAgent:
         self._watch_interval: int = 300      # quick poll (seconds)
         self._watch_deep_interval: int = 3600  # full LLM scan (seconds)
         self._last_deep_scan_ts: float = 0.0
+        self._last_investigation_ts: float = 0.0  # cooldown tracker
 
     # ── survey ───────────────────────────────────────────────────────────────
 
@@ -573,11 +576,12 @@ class BlueteamAgent:
         if added:
             anomalies.append(f"New listening port(s): {'; '.join(added[:3])}")
 
-        # New established connections (allow natural churn — flag >3 new)
+        # New established connections — only flag significant spikes (>10 new)
+        # Normal server churn (keep-alives, agent traffic, etc.) easily produces 3-5 new
         old_conns = set(self._baseline.get("established_conns", "").splitlines())
         new_conns = set(current.get("established_conns", "").splitlines())
         new_conn_count = len(new_conns - old_conns)
-        if new_conn_count > 3:
+        if new_conn_count > 10:
             anomalies.append(f"{new_conn_count} new established connections")
 
         # Failed login spike (>5 new lines)
@@ -651,14 +655,14 @@ class BlueteamAgent:
         prompt = _build_blueteam_system_prompt(
             os_info=self.agent.os_info,
             agent_pid=os.getpid(),
-            max_iterations=30,
+            max_iterations=40,
             tools=BLUETEAM_TOOLS,
         )
 
         result = self.agent.run_react(
             instruction=instruction,
             tool_whitelist=BLUETEAM_TOOLS,
-            max_iterations=30,
+            max_iterations=40,
             system_prompt_override=prompt,
         )
         self._last_scan = result
@@ -696,14 +700,14 @@ class BlueteamAgent:
         prompt = _build_blueteam_system_prompt(
             os_info=self.agent.os_info,
             agent_pid=os.getpid(),
-            max_iterations=25,
+            max_iterations=35,
             tools=BLUETEAM_TOOLS,
         )
 
         return self.agent.run_react(
             instruction=instruction,
             tool_whitelist=BLUETEAM_TOOLS,
-            max_iterations=25,
+            max_iterations=35,
             system_prompt_override=prompt,
         )
 
@@ -791,12 +795,43 @@ class BlueteamAgent:
                 if anomalies:
                     summary = "; ".join(anomalies[:4])
                     print(f"⚠️  Anomalies detected: {summary}")
-                    emit_alert("MEDIUM", "Watch-mode anomalies detected",
-                               evidence=summary, action="Triggering investigation")
-                    self.investigate(
-                        finding=f"Watch-mode anomalies: {summary}",
-                        evidence="\n".join(anomalies),
-                    )
+
+                    # Cooldown: don't pile up investigations (20-min minimum gap)
+                    INVESTIGATION_COOLDOWN = 1200
+                    secs_since_last = now - self._last_investigation_ts
+                    if secs_since_last < INVESTIGATION_COOLDOWN:
+                        remaining = int((INVESTIGATION_COOLDOWN - secs_since_last) / 60)
+                        print(f"👁️  Cooldown active — skipping investigation ({remaining}m remaining)")
+                    else:
+                        emit_alert("MEDIUM", "Watch-mode anomalies detected",
+                                   evidence=summary, action="Triggering investigation")
+                        self._last_investigation_ts = now
+
+                        # Build evidence from pre-collected survey data so the
+                        # LLM doesn't waste iterations re-gathering the same info.
+                        ev_parts: List[str] = [f"DETECTED ANOMALIES:\n{chr(10).join(anomalies)}"]
+                        keyword_map = {
+                            "port":     ("listening_ports", "LISTENING PORTS"),
+                            "connect":  ("established_conns", "ESTABLISHED CONNECTIONS"),
+                            "outbound": ("outbound_summary", "OUTBOUND SUMMARY"),
+                            "login":    ("failed_logins", "FAILED LOGINS"),
+                            "tmp":      ("recent_tmp_files", "RECENT TMP FILES"),
+                            "file":     ("home_new_files", "NEW HOME FILES"),
+                            "cpu":      ("high_cpu_procs", "HIGH CPU PROCESSES"),
+                            "cron":     ("cron_jobs", "CRON JOBS"),
+                            "service":  ("failed_services", "FAILED SERVICES"),
+                        }
+                        summary_lower = summary.lower()
+                        for kw, (survey_key, label) in keyword_map.items():
+                            if kw in summary_lower:
+                                val = current.get(survey_key, "").strip()
+                                if val:
+                                    ev_parts.append(f"{label}:\n{val[:600]}")
+
+                        self.investigate(
+                            finding=f"Watch-mode anomalies: {summary}",
+                            evidence="\n\n".join(ev_parts),
+                        )
 
                 self._baseline = current
 
