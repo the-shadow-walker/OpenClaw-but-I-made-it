@@ -28,6 +28,8 @@ from ollama_agent_core import OllamaCommandAgent
 from task_chain import (HandoffExtractor, AcceptanceCriteriaRunner, SubtaskReplanner,
                         TaskDecomposer, TaskChain, cleanup_between_phases,
                         SubtaskOrchestrator, ImplementationArtifact)
+import debug_logger
+import webhook_dispatcher
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
@@ -52,7 +54,6 @@ API_KEY = os.environ.get('AGENT_API_KEY', secrets.token_urlsafe(32))
 MAX_CONCURRENT_JOBS = 3
 JOB_TIMEOUT = 3600  # 1 hour max per job
 
-SERVICE_VERSION = "3.1.0-studio"
 SERVICE_FEATURES = [
     "Studio Model Hierarchy (Director → Producer → Minions)",
     "SubtaskOrchestrator: 3-5 Minions per phase, clean context each",
@@ -62,12 +63,124 @@ SERVICE_FEATURES = [
     "Pinned messages: ARCH.md survives history trimming",
     "cleanup_between_phases(): kills zombie dev ports between subtasks",
     "TaskDecomposer: forced Phase-0 ARCH.md, modular layout, DB migration phase",
+    "Dual debug logs: ./logs/agent_debug.jsonl + ./logs/agent_debug.txt",
+    "Outbound webhooks: AGENT_WEBHOOK_URLS env var (fire-and-forget)",
+    "Inbox watcher: drop job/chain JSON into ./agent_inbox/ for pickup",
+    "SSE event stream: GET /api/v1/events | State snapshot: GET /api/v1/state",
 ]
+
+SERVICE_VERSION = "3.2.0-mesh"
 
 # Job storage
 jobs: Dict[str, Dict[str, Any]] = {}
 job_queue = queue.Queue()
 active_jobs = {}
+
+# ── SSE / event mesh ─────────────────────────────────────────────────────────
+# Per-connection queues; debug_logger fans events into all of them.
+_sse_clients: set = set()
+_sse_lock = threading.Lock()
+
+def _sse_fan_out(event_type: str, event: dict) -> None:
+    with _sse_lock:
+        dead = set()
+        for q in _sse_clients:
+            try:
+                q.put_nowait(event)
+            except Exception:
+                dead.add(q)
+        _sse_clients.difference_update(dead)
+
+debug_logger.subscribe(_sse_fan_out)
+
+# ── state file ────────────────────────────────────────────────────────────────
+_STATE_PATH = "./agent_state.json"
+
+def _write_state() -> None:
+    """Atomically refresh agent_state.json for external LLMs to poll."""
+    try:
+        from task_chain import TaskChain as _TC
+        running_chains = [c for c in _TC.list_all() if c["status"] == "running"]
+    except Exception:
+        running_chains = []
+    state = {
+        "updated_at": datetime.now().isoformat(),
+        "service_version": SERVICE_VERSION,
+        "active_jobs": [
+            {
+                "job_id": jid,
+                "instruction": j.get("instruction", "")[:200],
+                "chain_id": j.get("chain_id"),
+                "subtask_index": j.get("subtask_index"),
+                "started_at": j.get("started_at"),
+            }
+            for jid, j in list(active_jobs.items())
+        ],
+        "queued_jobs": job_queue.qsize(),
+        "running_chains": running_chains,
+    }
+    tmp = _STATE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+    os.replace(tmp, _STATE_PATH)
+
+# ── inbox watcher ─────────────────────────────────────────────────────────────
+_INBOX_DIR = "./agent_inbox"
+_INBOX_PROCESSED = "./agent_inbox/processed"
+
+def _inbox_watcher() -> None:
+    """Poll ./agent_inbox/ every 5 s for job files dropped by other LLMs."""
+    os.makedirs(_INBOX_DIR, exist_ok=True)
+    os.makedirs(_INBOX_PROCESSED, exist_ok=True)
+    while True:
+        try:
+            for fname in os.listdir(_INBOX_DIR):
+                if not fname.endswith(".json"):
+                    continue
+                fpath = os.path.join(_INBOX_DIR, fname)
+                try:
+                    with open(fpath) as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                try:
+                    if data.get("goal"):
+                        # Chain submission
+                        goal = data["goal"]
+                        budget = int(data.get("total_budget", 200))
+                        decomposer = TaskDecomposer()
+                        subtasks = decomposer.decompose(goal, budget)
+                        chain = TaskChain.create(goal=goal, subtasks=subtasks)
+                        _submit_subtask_job(chain.chain_id, chain.data, 0, 0, None)
+                        debug_logger.inbox_job(fname, "chain", goal=goal)
+                        _original_print(f"[inbox] chain {chain.chain_id[:8]} submitted from {fname}")
+                    elif data.get("instruction"):
+                        # Single job submission
+                        instr = data["instruction"]
+                        job_id = str(uuid.uuid4())
+                        job = {
+                            "job_id": job_id,
+                            "instruction": instr,
+                            "model": data.get("model", "qwen3-coder:30b"),
+                            "searxng_url": "http://10.0.0.58:8080",
+                            "max_iterations": int(data.get("max_iterations", 25)),
+                            "status": "queued",
+                            "created_at": datetime.now().isoformat(),
+                            "output": "",
+                            "execution_log": [],
+                            "success": None,
+                        }
+                        jobs[job_id] = job
+                        job_queue.put(job_id)
+                        debug_logger.inbox_job(fname, "job", instruction=instr)
+                        _original_print(f"[inbox] job {job_id[:8]} submitted from {fname}")
+                    # Move to processed/
+                    os.replace(fpath, os.path.join(_INBOX_PROCESSED, fname))
+                except Exception as e:
+                    _original_print(f"[inbox] error processing {fname}: {e}")
+        except Exception:
+            pass
+        time.sleep(5)
 
 
 class JobRunner:
@@ -101,12 +214,17 @@ class JobRunner:
                 job['status'] = 'running'
                 job['started_at'] = datetime.now().isoformat()
                 active_jobs[job_id] = job
-                
+                debug_logger.job_start(job_id, job.get('instruction', ''),
+                                       chain_id=job.get('chain_id'),
+                                       subtask_index=job.get('subtask_index'))
+                _write_state()
+
                 # Create agent
                 agent = OllamaCommandAgent(
                     model=job.get('model', 'qwen3-coder:30b'),
                     searxng_url=job.get('searxng_url', 'http://10.0.0.58:8080')
                 )
+                agent.current_job_id = job_id
                 
                 # Capture output — thread-local so concurrent workers don't conflict
                 output_buffer = []
@@ -209,6 +327,26 @@ class JobRunner:
                 job['completed_at'] = datetime.now().isoformat()
                 if job_id in active_jobs:
                     del active_jobs[job_id]
+
+                _react_result = job.get('_react_result') or {}
+                debug_logger.job_end(
+                    job_id,
+                    instruction=job.get('instruction', ''),
+                    status=job.get('status', 'unknown'),
+                    success=bool(job.get('success')),
+                    iterations_used=_react_result.get('iterations_used', 0),
+                    summary=_react_result.get('finish_summary', job.get('error', '')),
+                    chain_id=job.get('chain_id'),
+                )
+                webhook_dispatcher.job_completed(
+                    job_id,
+                    instruction=job.get('instruction', ''),
+                    success=bool(job.get('success')),
+                    summary=_react_result.get('finish_summary', job.get('error', '')),
+                    iterations_used=_react_result.get('iterations_used', 0),
+                    chain_id=job.get('chain_id'),
+                )
+                _write_state()
 
                 # Advance chain if this is a chain sub-task job
                 if job.get('chain_id'):
@@ -340,6 +478,14 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
         "status": subtask_status,
         "completed_at": datetime.now().isoformat(),
     })
+    debug_logger.subtask_event(chain_id, subtask_status, subtask_index,
+                               instruction=subtask.get("instruction", ""),
+                               ac_command=(ac_result or {}).get("command", ""),
+                               ac_passed=passed)
+    webhook_dispatcher.subtask_result(chain_id, subtask_index,
+                                      instruction=subtask.get("instruction", ""),
+                                      ac_passed=passed,
+                                      summary=job.get("_react_result", {}).get("finish_summary", "") if isinstance(job.get("_react_result"), dict) else "")
 
     # 6. Retry if not passed and retries remain
     retry_count = subtask.get("retry_count", 0)
@@ -354,6 +500,9 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
         chain = TaskChain.load(chain_id)
         print(f"❌ Chain {chain_id[:8]}: subtask {subtask_index} failed, chain failed")
         chain.update_chain({"status": "failed", "completed_at": datetime.now().isoformat()})
+        debug_logger.chain_end(chain_id, chain.data.get("goal", ""), "failed")
+        webhook_dispatcher.chain_status_changed(chain_id, chain.data.get("goal", ""),
+                                                "failed", len(chain.data.get("subtasks", [])))
         return
 
     # 8. Find next non-skipped subtask using replanner
@@ -403,6 +552,9 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
         chain = TaskChain.load(chain_id)
         print(f"✅ Chain {chain_id[:8]}: all subtasks done — chain completed")
         chain.update_chain({"status": "completed", "completed_at": datetime.now().isoformat()})
+        debug_logger.chain_end(chain_id, chain.data.get("goal", ""), "completed")
+        webhook_dispatcher.chain_status_changed(chain_id, chain.data.get("goal", ""),
+                                                "completed", len(chain.data.get("subtasks", [])))
         return
 
     # 10. Clean up zombie ports, then submit next subtask
@@ -785,6 +937,7 @@ def create_chain():
     )
 
     # Submit first sub-task
+    debug_logger.chain_start(chain.chain_id, goal, len(subtasks))
     _submit_subtask_job(chain.chain_id, chain.data, 0, 0, None)
 
     return jsonify({
@@ -932,6 +1085,49 @@ def skip_subtask(chain_id: str, subtask_index: int):
                     'chain_id': chain_id, 'next_subtask_index': next_index})
 
 
+@app.route('/api/v1/events', methods=['GET'])
+@require_api_key
+def stream_events():
+    """SSE stream of all agent events (job start/end, chain transitions, react iterations).
+
+    Connect with:  curl -N -H 'X-API-Key: ...' http://host:5000/api/v1/events
+    Each line:     data: <json>\\n\\n
+    """
+    import queue as _qmod
+
+    client_q: _qmod.Queue = _qmod.Queue(maxsize=500)
+    with _sse_lock:
+        _sse_clients.add(client_q)
+
+    def generate():
+        yield "retry: 3000\n\n"  # tell client to reconnect after 3 s on drop
+        try:
+            while True:
+                try:
+                    event = client_q.get(timeout=25)
+                    yield f"data: {json.dumps(event, default=str)}\n\n"
+                except _qmod.Empty:
+                    yield ": heartbeat\n\n"  # keep connection alive
+        finally:
+            with _sse_lock:
+                _sse_clients.discard(client_q)
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/v1/state', methods=['GET'])
+@require_api_key
+def get_state():
+    """Return current agent state as JSON — same data written to agent_state.json."""
+    _write_state()
+    try:
+        with open(_STATE_PATH) as f:
+            return Response(f.read(), mimetype='application/json')
+    except FileNotFoundError:
+        return jsonify({'error': 'State file not yet written'}), 503
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
@@ -956,10 +1152,21 @@ if __name__ == '__main__':
     print(f"  GET    /api/v1/chains/<id>       - Get chain state")
     print(f"  GET    /api/v1/chains            - List all chains")
     print(f"  DELETE /api/v1/chains/<id>       - Cancel chain")
+    print(f"  POST   /api/v1/chains/<id>/restart  - Restart failed chain")
+    print(f"  POST   /api/v1/chains/<id>/skip/<n> - Mark subtask passed")
+    print(f"  GET    /api/v1/events            - SSE event stream")
+    print(f"  GET    /api/v1/state             - Agent state snapshot")
     print(f"  GET    /health                   - Health check")
     print("=" * 70)
     print("\nChecking for interrupted chains...")
     _resume_running_chains()
+
+    # Start inbox watcher (polls ./agent_inbox/ for files from other LLMs)
+    threading.Thread(target=_inbox_watcher, daemon=True, name="InboxWatcher").start()
+    print(f"📥 Inbox watcher started  →  {os.path.abspath(_INBOX_DIR)}")
+    print(f"📝 Debug logs            →  {os.path.abspath('./logs/')}")
+    print(f"📊 State file            →  {os.path.abspath(_STATE_PATH)}")
+
     print("\nStarting server...")
 
     try:

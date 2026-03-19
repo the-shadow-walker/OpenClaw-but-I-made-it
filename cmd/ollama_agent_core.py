@@ -37,6 +37,10 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from react_memory import AgentMemory
 from react_tools import ToolRegistry
+try:
+    import debug_logger as _debug_logger
+except ImportError:
+    _debug_logger = None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +383,7 @@ class OllamaCommandAgent:
         )
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
+        self.current_job_id: Optional[str] = None  # set by server before run()
         # Pinned messages: always injected after system prompt regardless of history trimming
         # (e.g. ARCH.md contents, schema.sql, key model definitions)
         self.pinned_messages: List[Dict] = []
@@ -1933,6 +1938,17 @@ Return JSON only:
                 "args": args,
                 "result": result,
             })
+            if _debug_logger:
+                _debug_logger.react_iter(
+                    job_id=self.current_job_id or "",
+                    iteration=iteration,
+                    max_iter=max_iter,
+                    thought=thought,
+                    tool=tool,
+                    args=args,
+                    result=result,
+                    confidence=confidence,
+                )
 
             # Track forward progress
             if result.success:
