@@ -1267,17 +1267,20 @@ def blueteam_investigate():
 def blueteam_watch_start():
     """Start the SENTINEL background anomaly watcher.
 
-    Optional body: {"interval": 60}
+    Optional body: {"quick_interval": 300, "deep_interval": 3600}
     """
     if not _BLUETEAM_AVAILABLE:
         return jsonify({'error': 'blueteam_agent module not available'}), 503
 
     data = request.get_json() or {}
-    interval = int(data.get('interval', 60))
+    quick = int(data.get('quick_interval', data.get('interval', 300)))
+    deep = int(data.get('deep_interval', 3600))
     sentinel = _get_sentinel()
-    sentinel.watch(interval=interval)
-    return jsonify({'message': f'SENTINEL watcher started (interval={interval}s)',
-                    'watching': True})
+    sentinel.watch(quick_interval=quick, deep_interval=deep)
+    return jsonify({
+        'message': f'SENTINEL watcher started (quick={quick}s, deep={deep}s)',
+        'watching': True, 'quick_interval': quick, 'deep_interval': deep,
+    })
 
 
 @app.route('/api/v1/blueteam/watch/stop', methods=['POST'])
@@ -1362,6 +1365,11 @@ if __name__ == '__main__':
     print(f"📥 Inbox watcher started  →  {os.path.abspath(_INBOX_DIR)}")
     print(f"📝 Debug logs            →  {os.path.abspath('./logs/')}")
     print(f"📊 State file            →  {os.path.abspath(_STATE_PATH)}")
+
+    # Auto-start SENTINEL: quick anomaly diff every 5 min, deep LLM scan every 1 hr
+    if _BLUETEAM_AVAILABLE:
+        _get_sentinel().watch(quick_interval=300, deep_interval=3600)
+        print(f"👁️  SENTINEL auto-started  →  quick=5min  deep=1hr")
 
     print("\nStarting server...")
 

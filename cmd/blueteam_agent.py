@@ -515,8 +515,9 @@ class BlueteamAgent:
         self.agent = OllamaCommandAgent(model=model)
         # Replace the tool registry with the extended blueteam version
         self.agent.tool_registry = BlueteamToolRegistry(
-            memory=self.agent.memory,
             safety_validator=self.agent.safety_validator,
+            search_agent=self.agent.search_agent,
+            memory=self.agent.memory,
             explain_cb=self.agent.explain_command_detailed,
         )
         self.agent.current_job_id = f"blueteam-{os.getpid()}"
@@ -525,7 +526,9 @@ class BlueteamAgent:
         self._last_scan: Optional[Dict[str, Any]] = None
         self._watching: bool = False
         self._watch_thread: Optional[threading.Thread] = None
-        self._watch_interval: int = 60
+        self._watch_interval: int = 300      # quick poll (seconds)
+        self._watch_deep_interval: int = 3600  # full LLM scan (seconds)
+        self._last_deep_scan_ts: float = 0.0
 
     # ── survey ───────────────────────────────────────────────────────────────
 
@@ -704,21 +707,34 @@ class BlueteamAgent:
             system_prompt_override=prompt,
         )
 
-    def watch(self, interval: int = 60) -> None:
-        """Start continuous background monitoring (non-blocking)."""
+    def watch(self, interval: int = None, quick_interval: int = 300,
+              deep_interval: int = 3600) -> None:
+        """Start continuous background monitoring (non-blocking).
+
+        Args:
+            interval:       Legacy alias for quick_interval.
+            quick_interval: Seconds between anomaly-diff polls (default 300 = 5 min).
+            deep_interval:  Seconds between full LLM deep scans (default 3600 = 1 hr).
+        """
         if self._watching:
             print("👁️  Watcher already running")
             return
-        self._watch_interval = interval
+        if interval is not None:
+            quick_interval = interval  # backwards-compat
+        self._watch_interval = quick_interval
+        self._watch_deep_interval = deep_interval
         self._watching = True
         self._watch_thread = threading.Thread(
             target=self._watch_loop,
-            args=(interval,),
+            args=(quick_interval, deep_interval),
             daemon=True,
             name="SentinelWatcher",
         )
         self._watch_thread.start()
-        print(f"👁️  SENTINEL watcher started — polling every {interval}s")
+        print(
+            f"👁️  SENTINEL watcher started — "
+            f"quick poll every {quick_interval}s, deep scan every {deep_interval}s"
+        )
 
     def stop_watch(self) -> None:
         """Stop the background monitoring loop."""
@@ -728,9 +744,15 @@ class BlueteamAgent:
     def status(self) -> Dict[str, Any]:
         """Return current watcher status and last scan summary."""
         last_alerts = get_recent_alerts(10)
+        next_deep = None
+        if self._last_deep_scan_ts > 0:
+            secs_remaining = max(0, self._watch_deep_interval - (time.time() - self._last_deep_scan_ts))
+            next_deep = f"{int(secs_remaining // 60)}m {int(secs_remaining % 60)}s"
         return {
             "watching": self._watching,
-            "watch_interval": self._watch_interval,
+            "quick_interval": self._watch_interval,
+            "deep_interval": self._watch_deep_interval,
+            "next_deep_scan_in": next_deep,
             "has_baseline": self._baseline is not None,
             "last_scan_success": (self._last_scan or {}).get("success"),
             "last_scan_summary": (self._last_scan or {}).get("finish_summary", ""),
@@ -740,20 +762,28 @@ class BlueteamAgent:
 
     # ── watch loop ───────────────────────────────────────────────────────────
 
-    def _watch_loop(self, interval: int) -> None:
-        """Background loop: survey → diff → investigate anomalies."""
+    def _watch_loop(self, quick_interval: int, deep_interval: int) -> None:
+        """Background loop: quick anomaly diff every quick_interval,
+        full LLM deep scan every deep_interval."""
         print("👁️  Building baseline survey...")
         self._baseline = self.security_survey()
         print("👁️  Baseline established. Watching for anomalies...")
 
         if _dlog:
-            _dlog.log("blueteam_watch_start", {"interval": interval})
+            _dlog.log("blueteam_watch_start", {
+                "quick_interval": quick_interval,
+                "deep_interval": deep_interval,
+            })
+
+        # Schedule first deep scan after deep_interval (not immediately)
+        self._last_deep_scan_ts = time.time()
 
         while self._watching:
-            time.sleep(interval)
+            time.sleep(quick_interval)
             if not self._watching:
                 break
 
+            now = time.time()
             try:
                 current = self.security_survey()
                 anomalies = self._detect_anomalies(current)
@@ -772,9 +802,25 @@ class BlueteamAgent:
 
                 if _dlog:
                     _dlog.log("blueteam_watch_tick", {
+                        "kind": "quick",
                         "anomalies": len(anomalies),
                         "timestamp": datetime.now().isoformat(),
                     })
+
+                # Full deep scan on schedule
+                if now - self._last_deep_scan_ts >= deep_interval:
+                    print("👁️  Running scheduled deep scan...")
+                    if _dlog:
+                        _dlog.log("blueteam_deep_scan_start", {
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                    self.scan()
+                    self._last_deep_scan_ts = time.time()
+                    if _dlog:
+                        _dlog.log("blueteam_watch_tick", {
+                            "kind": "deep",
+                            "timestamp": datetime.now().isoformat(),
+                        })
 
             except Exception as e:
                 print(f"👁️  Watch loop error: {e}")

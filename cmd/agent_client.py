@@ -341,7 +341,9 @@ Examples:
         watching = d.get("watching", False)
         icon = "👁️  ACTIVE" if watching else "  IDLE"
         print(f"\n[sentinel] Watcher: {icon}")
-        print(f"  Interval:      {d.get('watch_interval', '?')}s")
+        print(f"  Quick poll:    every {d.get('quick_interval', '?')}s")
+        print(f"  Deep scan:     every {d.get('deep_interval', '?')}s")
+        print(f"  Next deep:     {d.get('next_deep_scan_in', '—')}")
         print(f"  Has baseline:  {d.get('has_baseline', False)}")
         print(f"  Last scan:     {'✅' if d.get('last_scan_success') else '—'}")
         print(f"  Alert count:   {d.get('recent_alert_count', 0)}")
