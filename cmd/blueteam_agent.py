@@ -576,12 +576,13 @@ class BlueteamAgent:
         if added:
             anomalies.append(f"New listening port(s): {'; '.join(added[:3])}")
 
-        # New established connections — only flag significant spikes (>10 new)
-        # Normal server churn (keep-alives, agent traffic, etc.) easily produces 3-5 new
+        # New established connections — only flag significant spikes (>20 new)
+        # This server runs Ollama inference + SSE clients + Flask, which generates
+        # 10-16 new connections per 5-min poll under normal load.
         old_conns = set(self._baseline.get("established_conns", "").splitlines())
         new_conns = set(current.get("established_conns", "").splitlines())
         new_conn_count = len(new_conns - old_conns)
-        if new_conn_count > 10:
+        if new_conn_count > 20:
             anomalies.append(f"{new_conn_count} new established connections")
 
         # Failed login spike (>5 new lines)
@@ -605,10 +606,17 @@ class BlueteamAgent:
         if new_err > old_err + 10:
             anomalies.append(f"System error spike: {new_err - old_err} new errors")
 
-        # High-CPU processes not seen before
+        # High-CPU processes not seen before — exclude processes that are expected
+        # to spike during inference (ollama, python3 agent) to prevent feedback loop
+        # where the investigation itself triggers the next investigation.
+        _EXPECTED_HIGH_CPU = {"ollama", "python3", "python", "kcompactd", "kswapd",
+                              "kworker", "migration", "ksoftirqd"}
         old_cpu = set(self._baseline.get("high_cpu_procs", "").splitlines())
         new_cpu = set(current.get("high_cpu_procs", "").splitlines())
-        new_cpu_procs = [p for p in (new_cpu - old_cpu) if p.strip()]
+        new_cpu_procs = [
+            p for p in (new_cpu - old_cpu)
+            if p.strip() and not any(name in p for name in _EXPECTED_HIGH_CPU)
+        ]
         if new_cpu_procs:
             anomalies.append(f"New high-CPU processes: {len(new_cpu_procs)}")
 
