@@ -576,14 +576,25 @@ class BlueteamAgent:
         if added:
             anomalies.append(f"New listening port(s): {'; '.join(added[:3])}")
 
-        # New established connections — only flag significant spikes (>20 new)
-        # This server runs Ollama inference + SSE clients + Flask, which generates
-        # 10-16 new connections per 5-min poll under normal load.
-        old_conns = set(self._baseline.get("established_conns", "").splitlines())
-        new_conns = set(current.get("established_conns", "").splitlines())
+        # New established connections — only count connections to external IPs.
+        # Internal traffic (localhost, Ollama at 127.x, KDE desktop at 10.x LAN)
+        # churns constantly and is not useful as an anomaly signal.
+        _INTERNAL_PREFIXES = ("127.", "::1", "0.0.0.0", "[::1]", "[::ffff:127")
+        def _is_external(line: str) -> bool:
+            parts = line.split()
+            for part in parts:
+                # ss output has peer address in 5th column (index 4)
+                if any(part.startswith(p) for p in _INTERNAL_PREFIXES):
+                    return False
+            return True
+
+        old_conns = {l for l in self._baseline.get("established_conns", "").splitlines()
+                     if l.strip() and _is_external(l)}
+        new_conns = {l for l in current.get("established_conns", "").splitlines()
+                     if l.strip() and _is_external(l)}
         new_conn_count = len(new_conns - old_conns)
-        if new_conn_count > 20:
-            anomalies.append(f"{new_conn_count} new established connections")
+        if new_conn_count > 5:
+            anomalies.append(f"{new_conn_count} new external connections")
 
         # Failed login spike (>5 new lines)
         old_fails = len(self._baseline.get("failed_logins", "").splitlines())
@@ -606,11 +617,20 @@ class BlueteamAgent:
         if new_err > old_err + 10:
             anomalies.append(f"System error spike: {new_err - old_err} new errors")
 
-        # High-CPU processes not seen before — exclude processes that are expected
-        # to spike during inference (ollama, python3 agent) to prevent feedback loop
-        # where the investigation itself triggers the next investigation.
-        _EXPECTED_HIGH_CPU = {"ollama", "python3", "python", "kcompactd", "kswapd",
-                              "kworker", "migration", "ksoftirqd"}
+        # High-CPU processes not seen before — exclude inference engine, agent,
+        # kernel threads, and KDE desktop processes (this host runs KDE Plasma).
+        _EXPECTED_HIGH_CPU = {
+            # Inference / agent
+            "ollama", "python3", "python",
+            # Kernel
+            "kcompactd", "kswapd", "kworker", "migration", "ksoftirqd",
+            # KDE Plasma desktop stack
+            "plasmashell", "kwin", "kwin_wayland", "Xorg", "Xwayland",
+            "kded", "kded6", "ksmserver", "knotificationd",
+            "akonadi", "baloo", "baloorunner", "kio", "kioslave",
+            "kdeconnect", "kdeconnectd", "ksecretd", "kwalletd", "kwalletd6",
+            "konsole", "dolphin", "plasma", "kaccess",
+        }
         old_cpu = set(self._baseline.get("high_cpu_procs", "").splitlines())
         new_cpu = set(current.get("high_cpu_procs", "").splitlines())
         new_cpu_procs = [
