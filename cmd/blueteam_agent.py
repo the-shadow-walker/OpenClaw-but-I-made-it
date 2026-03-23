@@ -82,6 +82,27 @@ _ARCH_AUDIT_WARNED: bool = False
 # persistent report path
 _REPORT_PATH = Path("~/.agent_bin/sentinel_report.md").expanduser()
 
+# debug log
+_DBG_LOG_PATH = Path("~/.agent_bin/sentinel_debug.log").expanduser()
+_DBG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+_dbg_lock = threading.Lock()
+
+
+def _dbg(tag: str, msg: str = "") -> None:
+    """Append a timestamped debug entry to sentinel_debug.log (max 5 MB, then rotate)."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [{tag}] {msg}\n"
+    try:
+        with _dbg_lock:
+            if _DBG_LOG_PATH.exists() and _DBG_LOG_PATH.stat().st_size > 5 * 1024 * 1024:
+                _DBG_LOG_PATH.rename(_DBG_LOG_PATH.with_suffix(".log.1"))
+            with open(_DBG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        pass
+    # also print so it shows up in journalctl
+    print(f"🔵 [{tag}] {msg}")
+
 
 # ─────────────────────────── wall broadcast ──────────────────────────────────
 
@@ -137,6 +158,7 @@ def emit_alert(severity: str, finding: str,
         _webhook.dispatch("security_alert", entry)
 
     print(f"🚨 [{severity.upper()}] {finding}")
+    _dbg("ALERT", f"[{severity.upper()}] {finding[:120]}")
 
     # Broadcast HIGH/CRITICAL to all terminals
     if severity.upper() in _WALL_SEVERITIES:
@@ -727,19 +749,26 @@ class BlueteamAgent:
                 capture_output=True, text=True, timeout=30,
             )
             if r.returncode != 0 and not r.stdout.strip():
+                _dbg("ARCH-AUDIT", f"returned non-zero ({r.returncode}) with no output")
                 return []
-            return json.loads(r.stdout)
+            cves = json.loads(r.stdout)
+            _dbg("ARCH-AUDIT", f"found {len(cves)} vulnerable packages")
+            return cves
         except FileNotFoundError:
             if not _ARCH_AUDIT_WARNED:
                 _ARCH_AUDIT_WARNED = True
+                _dbg("ARCH-AUDIT", "not installed — CVE scanning disabled (yay -S arch-audit)")
                 print("WARNING: arch-audit not found — CVE scanning disabled "
                       "(install with: yay -S arch-audit)")
             return []
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as e:
+            _dbg("ARCH-AUDIT", f"JSON parse error: {e}")
             return []
         except subprocess.TimeoutExpired:
+            _dbg("ARCH-AUDIT", "timed out after 30s")
             return []
-        except Exception:
+        except Exception as e:
+            _dbg("ARCH-AUDIT", f"error: {e}")
             return []
 
     def _format_arch_audit(self, cves: List[Dict]) -> str:
@@ -799,6 +828,7 @@ class BlueteamAgent:
                 input=content, capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0:
+                _dbg("MOTD", f"written to /etc/motd  threat={threat_level}")
                 return
         except Exception:
             pass
@@ -806,8 +836,9 @@ class BlueteamAgent:
         # Fallback: user's ~/.motd_sentinel
         try:
             _MOTD_FALLBACK.write_text(content, encoding="utf-8")
-        except Exception:
-            pass
+            _dbg("MOTD", f"written to ~/.motd_sentinel  threat={threat_level}")
+        except Exception as e:
+            _dbg("MOTD", f"write failed: {e}")
 
     # ── report file (Feature 5) ──────────────────────────────────────────────
 
@@ -855,7 +886,10 @@ class BlueteamAgent:
 
             with self._report_lock:
                 _REPORT_PATH.write_text(content, encoding="utf-8")
+            _dbg("REPORT", f"written  threat={self._current_threat_level}  "
+                           f"quick={self._scan_count_quick}  deep={self._scan_count_deep}")
         except Exception as e:
+            _dbg("REPORT", f"write failed: {e}")
             print(f"👁️  Report write error: {e}")
 
     # ── journal tailer (Feature 2) ───────────────────────────────────────────
@@ -874,6 +908,7 @@ class BlueteamAgent:
             ['journalctl', '-f', '-u', 'sshd', '--no-pager'],
             ['journalctl', '-f', '-p', 'warning', '--no-pager'],
         ]
+        _dbg("JOURNAL", f"starting {len(cmds)} journal streams")
         for cmd in cmds:
             try:
                 p = subprocess.Popen(
@@ -884,10 +919,13 @@ class BlueteamAgent:
                     bufsize=1,
                 )
                 procs.append(p)
+                _dbg("JOURNAL", f"stream started: {' '.join(cmd[1:])}")
             except Exception as e:
+                _dbg("JOURNAL", f"failed to start {cmd[2:4]}: {e}")
                 print(f"👁️  Journal tailer: failed to start {cmd[2:4]}: {e}")
 
         if not procs:
+            _dbg("JOURNAL", "no streams available — tailer exiting")
             print("👁️  Journal tailer: no journal streams available, exiting")
             return
 
@@ -912,12 +950,15 @@ class BlueteamAgent:
                     line_lower = line.lower()
                     if any(kw in line_lower for kw in self._JOURNAL_TRIGGER_KEYWORDS):
                         self._journal_investigate_buffer.append(line)
+                        _dbg("JOURNAL", f"trigger line [{len(self._journal_investigate_buffer)} buffered]: {line[:100]}")
 
                 now = time.time()
                 buf_len = len(self._journal_investigate_buffer)
                 time_elapsed = now - self._journal_last_flush_ts
 
                 if buf_len >= 20 or (buf_len > 0 and time_elapsed >= 30.0):
+                    reason = "20-line cap" if buf_len >= 20 else "30s timer"
+                    _dbg("JOURNAL", f"flushing {buf_len} trigger lines to LLM ({reason})")
                     lines_to_send = list(self._journal_investigate_buffer)
                     self._journal_investigate_buffer = []
                     self._journal_last_flush_ts = now
@@ -940,9 +981,12 @@ class BlueteamAgent:
         """Called in a daemon thread to hand buffered journal lines to the LLM."""
         JOURNAL_INVESTIGATE_COOLDOWN = 300  # 5 minutes
         now = time.time()
-        if now - self._journal_last_investigate_ts < JOURNAL_INVESTIGATE_COOLDOWN:
+        secs_since = now - self._journal_last_investigate_ts
+        if secs_since < JOURNAL_INVESTIGATE_COOLDOWN:
+            _dbg("JOURNAL", f"investigation cooldown active ({int(JOURNAL_INVESTIGATE_COOLDOWN - secs_since)}s left) — skipping")
             return
         self._journal_last_investigate_ts = now
+        _dbg("JOURNAL", f"sending {len(lines)} lines to LLM for investigation")
 
         evidence = "RECENT JOURNAL EVENTS:\n" + "\n".join(lines)
         try:
@@ -951,6 +995,7 @@ class BlueteamAgent:
                 evidence=evidence,
             )
         except Exception as e:
+            _dbg("JOURNAL", f"investigation error: {e}")
             print(f"👁️  Journal investigation error: {e}")
 
     # ── public API ───────────────────────────────────────────────────────────
@@ -962,6 +1007,7 @@ class BlueteamAgent:
         Args:
             focus: Optional area to focus on (e.g. "SSH", "network connections")
         """
+        _dbg("SCAN", f"starting  focus={focus[:60]!r}" if focus else "starting")
         survey = self.security_survey()
         survey_text = self._format_survey(survey)
 
@@ -993,6 +1039,8 @@ class BlueteamAgent:
             system_prompt_override=prompt,
         )
         self._last_scan = result
+        _dbg("SCAN", f"done  iters={result.get('iterations_used',0)}  "
+                     f"success={result.get('success')}")
 
         # Extract threat level and recommendations from LLM finish summary
         m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b',
@@ -1030,6 +1078,7 @@ class BlueteamAgent:
             finding: Description of what's suspicious
             evidence: Any initial evidence already gathered
         """
+        _dbg("INVESTIGATE", f"trigger={finding[:100]!r}")
         instruction = (
             f"AUTONOMOUS INVESTIGATION\n\n"
             f"Trigger:  {finding}\n\n"
@@ -1061,6 +1110,10 @@ class BlueteamAgent:
             max_iterations=35,
             system_prompt_override=prompt,
         )
+
+        _dbg("INVESTIGATE", f"done  iters={result.get('iterations_used',0)}  "
+                            f"success={result.get('success')}  "
+                            f"summary={result.get('finish_summary','')[:80]!r}")
 
         # Update MOTD and report after investigation
         alert_count_24h = len([
@@ -1110,6 +1163,7 @@ class BlueteamAgent:
         )
         self._journal_thread.start()
         print("👁️  Journal tailer started — watching journal streams in real-time")
+        _dbg("WATCH", f"started  quick={quick_interval}s  deep={deep_interval}s")
 
     def stop_watch(self) -> None:
         """Stop the background monitoring loop."""
@@ -1143,9 +1197,11 @@ class BlueteamAgent:
     def _watch_loop(self, quick_interval: int, deep_interval: int) -> None:
         """Background loop: quick anomaly diff every quick_interval,
         full LLM deep scan every deep_interval."""
+        _dbg("WATCH-LOOP", "building baseline survey")
         print("👁️  Building baseline survey...")
         self._baseline = self.security_survey()
         print("👁️  Baseline established. Watching for anomalies...")
+        _dbg("WATCH-LOOP", "baseline established")
 
         if _dlog:
             _dlog.log("blueteam_watch_start", {
@@ -1163,8 +1219,11 @@ class BlueteamAgent:
 
             now = time.time()
             try:
+                _dbg("WATCH-LOOP", f"poll #{self._scan_count_quick + 1} starting")
                 current = self.security_survey()
                 anomalies = self._detect_anomalies(current)
+                _dbg("WATCH-LOOP", f"survey done  anomalies={len(anomalies)}"
+                     + (f": {'; '.join(anomalies[:3])}" if anomalies else ""))
 
                 if anomalies:
                     summary = "; ".join(anomalies[:4])
@@ -1175,9 +1234,11 @@ class BlueteamAgent:
                     secs_since_last = now - self._last_investigation_ts
                     if secs_since_last < INVESTIGATION_COOLDOWN:
                         remaining = int((INVESTIGATION_COOLDOWN - secs_since_last) / 60)
+                        _dbg("WATCH-LOOP", f"cooldown active ({remaining}m left) — skipping investigation")
                         print(f"👁️  Anomalies noted — cooldown active ({remaining}m remaining): {summary}")
                     else:
                         self._last_investigation_ts = now
+                        _dbg("WATCH-LOOP", f"triggering investigation: {summary[:100]}")
                         print(f"👁️  Investigating: {summary}")
                         if _dlog:
                             _dlog.log("blueteam_investigation_start", {
@@ -1216,6 +1277,8 @@ class BlueteamAgent:
                         conclusion = inv_result.get("finish_summary", "no conclusion")
                         m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b', conclusion.upper())
                         threat = m.group(1) if m else "UNKNOWN"
+                        _dbg("WATCH-LOOP", f"investigation done  threat={threat}  "
+                             f"conclusion={conclusion[:80]!r}")
                         print(f"👁️  Investigation concluded [{threat}]: {conclusion[:120]}")
                         if _dlog:
                             _dlog.log("blueteam_investigation_complete", {
@@ -1227,6 +1290,7 @@ class BlueteamAgent:
 
                 self._baseline = current
                 self._scan_count_quick += 1
+                _dbg("WATCH-LOOP", f"quick poll #{self._scan_count_quick} done")
 
                 if _dlog:
                     _dlog.log("blueteam_watch_tick", {
@@ -1247,6 +1311,7 @@ class BlueteamAgent:
 
                 # Full deep scan on schedule
                 if now - self._last_deep_scan_ts >= deep_interval:
+                    _dbg("WATCH-LOOP", "deep scan triggered")
                     print("👁️  Running scheduled deep scan...")
                     if _dlog:
                         _dlog.log("blueteam_deep_scan_start", {
@@ -1255,6 +1320,7 @@ class BlueteamAgent:
 
                     # Run arch-audit before deep scan (Feature 1)
                     cves = self._run_arch_audit()
+                    _dbg("ARCH-AUDIT", f"deep scan: {len(cves)} vulnerable packages total")
                     if cves:
                         self._last_cve_list = cves
                         critical_cves = [
@@ -1276,6 +1342,7 @@ class BlueteamAgent:
                     self.scan(focus=cve_focus)
                     self._scan_count_deep += 1
                     self._last_deep_scan_ts = time.time()
+                    _dbg("WATCH-LOOP", f"deep scan #{self._scan_count_deep} done")
 
                     if _dlog:
                         _dlog.log("blueteam_watch_tick", {
