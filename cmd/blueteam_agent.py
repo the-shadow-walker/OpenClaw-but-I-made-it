@@ -899,6 +899,26 @@ class BlueteamAgent:
         "invalid", "segfault", "timeout", "unauthorized",
     })
 
+    # Known-benign patterns for this KDE Plasma host — lines matching any of
+    # these are silently dropped before they reach the LLM buffer.
+    # Add more here as new noise sources are identified in sentinel_debug.log.
+    _JOURNAL_NOISE_PATTERNS = frozenset({
+        # KDE Baloo file indexer — constantly fails DBus host portal registration
+        "baloo_file_extractor",
+        "failed to register with host portal",
+        # systemd transient workers — expected to fail on process exit
+        "(sd-worker)",
+        "failed to start worker process",
+        # KDE Akonadi / PIM stack — noisy but benign
+        "akonadi_control",
+        "akonadiserverrunner",
+        # KDE notification daemon restarts
+        "knotificationd",
+        # Xorg / Wayland session errors that are always present
+        "cannot connect to x server",
+        "qt: session management error",
+    })
+
     def _journal_tailer(self) -> None:
         """Background thread: tail journal streams and batch suspicious lines for LLM."""
         # Start three journalctl streams
@@ -949,8 +969,11 @@ class BlueteamAgent:
                     self._journal_buffer.append(line)
                     line_lower = line.lower()
                     if any(kw in line_lower for kw in self._JOURNAL_TRIGGER_KEYWORDS):
-                        self._journal_investigate_buffer.append(line)
-                        _dbg("JOURNAL", f"trigger line [{len(self._journal_investigate_buffer)} buffered]: {line[:100]}")
+                        if any(pat in line_lower for pat in self._JOURNAL_NOISE_PATTERNS):
+                            _dbg("JOURNAL-NOISE", f"filtered: {line[:100]}")
+                        else:
+                            self._journal_investigate_buffer.append(line)
+                            _dbg("JOURNAL", f"trigger line [{len(self._journal_investigate_buffer)} buffered]: {line[:100]}")
 
                 now = time.time()
                 buf_len = len(self._journal_investigate_buffer)
