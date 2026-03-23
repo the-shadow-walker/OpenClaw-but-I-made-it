@@ -592,6 +592,7 @@ class BlueteamAgent:
 
         self._baseline: Optional[Dict[str, str]] = None
         self._last_scan: Optional[Dict[str, Any]] = None
+        self._last_investigation: Optional[Dict[str, Any]] = None
         self._watching: bool = False
         self._watch_thread: Optional[threading.Thread] = None
         self._watch_interval: int = 300      # quick poll (seconds)
@@ -861,9 +862,13 @@ class BlueteamAgent:
                 finding = a.get("finding", "")
                 alert_lines.append(f"- `[{ts}]` **{sev}**: {finding}")
 
-            last_inv_summary = ""
-            if self._last_scan:
-                last_inv_summary = self._last_scan.get("finish_summary", "")
+            def _result_block(result: Optional[Dict], label: str) -> str:
+                if not result:
+                    return f"_No {label} yet._"
+                summary = result.get("finish_summary", "(no summary)")
+                iters = result.get("iterations_used", "?")
+                success = "✓ finished" if result.get("success") else "⚠ hit iteration cap"
+                return f"{summary}\n\n_{success}, {iters} iterations_"
 
             rec_lines = "\n".join(
                 f"- {r}" for r in self._last_recommendations
@@ -878,8 +883,10 @@ class BlueteamAgent:
                 f"{self._scan_count_deep} deep\n\n"
                 f"## Recent Alerts (last 10)\n\n"
                 + ("\n".join(alert_lines) if alert_lines else "- No alerts on record.")
+                + f"\n\n## Last Deep Scan\n\n"
+                + _result_block(self._last_scan, "deep scan")
                 + f"\n\n## Last Investigation\n\n"
-                + (last_inv_summary or "_No scans completed yet._")
+                + _result_block(self._last_investigation, "investigation")
                 + f"\n\n## Recommendations\n\n{rec_lines}\n"
             )
 
@@ -998,7 +1005,7 @@ class BlueteamAgent:
             "Call finish() within 3-5 iterations with your verdict."
         )
         try:
-            self.investigate(finding=finding, evidence=evidence, max_iterations=12)
+            self.investigate(finding=finding, evidence=evidence, max_iterations=15)
         except Exception as e:
             _dbg("JOURNAL", f"batch LLM error: {e}")
             print(f"👁️  Journal batch error: {e}")
@@ -1118,16 +1125,27 @@ class BlueteamAgent:
             system_prompt_override=prompt,
         )
 
+        summary = result.get('finish_summary', '')
         _dbg("INVESTIGATE", f"done  iters={result.get('iterations_used',0)}  "
                             f"success={result.get('success')}  "
-                            f"summary={result.get('finish_summary','')[:80]!r}")
+                            f"summary={summary[:100]!r}")
 
-        # Extract threat level from this investigation result and update state
-        m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b',
-                      result.get('finish_summary', '').upper())
-        if m:
-            self._current_threat_level = m.group(1)
-            _dbg("INVESTIGATE", f"threat level → {self._current_threat_level}")
+        self._last_investigation = result
+
+        # Only extract threat level when the LLM properly called finish().
+        # success=False means it hit the iteration cap — the partial summary is
+        # unreliable and often contains words like "high-CPU" that falsely match.
+        if result.get('success'):
+            m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b', summary.upper())
+            if m:
+                self._current_threat_level = m.group(1)
+                _dbg("INVESTIGATE", f"threat level → {self._current_threat_level}")
+            else:
+                # LLM finished but didn't state a level — treat as clean
+                self._current_threat_level = "LOW"
+                _dbg("INVESTIGATE", "finished with no threat level stated → LOW")
+        else:
+            _dbg("INVESTIGATE", f"incomplete (hit iteration cap) — threat level unchanged ({self._current_threat_level})")
 
         # Update MOTD and report after investigation
         alert_count_24h = len([
