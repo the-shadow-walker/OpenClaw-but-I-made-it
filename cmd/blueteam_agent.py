@@ -31,10 +31,12 @@ Inbox drop (works with existing inbox watcher)
 import json
 import os
 import re
+import selectors
 import signal as _signal
 import subprocess
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +67,39 @@ _PROTECTED_NAMES = frozenset({
 
 # Private IP prefixes that must never be blocked
 _PRIVATE_PREFIXES = ("127.", "10.", "192.168.", "::1", "fe80")
+
+# MOTD paths
+_MOTD_SYSTEM   = Path("/etc/motd")
+_MOTD_FALLBACK = Path("~/.motd_sentinel").expanduser()
+
+# wall alert config
+_WALL_SEVERITIES = frozenset({"HIGH", "CRITICAL"})
+_WALL_WARNED: bool = False
+
+# arch-audit warning gate
+_ARCH_AUDIT_WARNED: bool = False
+
+# persistent report path
+_REPORT_PATH = Path("~/.agent_bin/sentinel_report.md").expanduser()
+
+
+# ─────────────────────────── wall broadcast ──────────────────────────────────
+
+def _wall_alert(severity: str, finding: str) -> None:
+    """Broadcast a HIGH/CRITICAL alert to all logged-in users via wall(1)."""
+    global _WALL_WARNED
+    msg = (
+        f"[SENTINEL ALERT] {severity}: {finding[:100]} "
+        f"— run: ./agent_client.py --blueteam-alerts"
+    )
+    try:
+        subprocess.run(['wall', msg], capture_output=True, timeout=5)
+    except FileNotFoundError:
+        if not _WALL_WARNED:
+            _WALL_WARNED = True
+            print("WARNING: 'wall' not found — broadcast alerts disabled")
+    except Exception:
+        pass
 
 
 # ─────────────────────────── alert emission ──────────────────────────────────
@@ -102,6 +137,10 @@ def emit_alert(severity: str, finding: str,
         _webhook.dispatch("security_alert", entry)
 
     print(f"🚨 [{severity.upper()}] {finding}")
+
+    # Broadcast HIGH/CRITICAL to all terminals
+    if severity.upper() in _WALL_SEVERITIES:
+        _wall_alert(severity.upper(), finding)
 
 
 def get_recent_alerts(n: int = 50) -> List[Dict]:
@@ -538,6 +577,24 @@ class BlueteamAgent:
         self._last_deep_scan_ts: float = 0.0
         self._last_investigation_ts: float = 0.0  # cooldown tracker
 
+        # Feature 1: arch-audit CVE state
+        self._last_cve_list: List[Dict] = []
+
+        # Feature 2: journal tailer state
+        self._journal_thread: Optional[threading.Thread] = None
+        self._journal_buffer: deque = deque(maxlen=50)
+        self._journal_investigate_buffer: List[str] = []
+        self._journal_last_investigate_ts: float = 0.0
+        self._journal_last_flush_ts: float = 0.0
+
+        # Feature 5: report / metrics state
+        self._start_time: datetime = datetime.now()
+        self._scan_count_quick: int = 0
+        self._scan_count_deep: int = 0
+        self._current_threat_level: str = "UNKNOWN"
+        self._last_recommendations: List[str] = []
+        self._report_lock: threading.Lock = threading.Lock()
+
     # ── survey ───────────────────────────────────────────────────────────────
 
     def security_survey(self) -> Dict[str, str]:
@@ -659,6 +716,243 @@ class BlueteamAgent:
 
         return anomalies
 
+    # ── arch-audit CVE integration (Feature 1) ───────────────────────────────
+
+    def _run_arch_audit(self) -> List[Dict]:
+        """Run arch-audit --json and return parsed CVE list. Returns [] on error."""
+        global _ARCH_AUDIT_WARNED
+        try:
+            r = subprocess.run(
+                ['arch-audit', '--json'],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0 and not r.stdout.strip():
+                return []
+            return json.loads(r.stdout)
+        except FileNotFoundError:
+            if not _ARCH_AUDIT_WARNED:
+                _ARCH_AUDIT_WARNED = True
+                print("WARNING: arch-audit not found — CVE scanning disabled "
+                      "(install with: yay -S arch-audit)")
+            return []
+        except (json.JSONDecodeError, ValueError):
+            return []
+        except subprocess.TimeoutExpired:
+            return []
+        except Exception:
+            return []
+
+    def _format_arch_audit(self, cves: List[Dict]) -> str:
+        """Group CVEs by severity and format for LLM consumption (max 3000 chars)."""
+        if not cves:
+            return "(no CVEs found)"
+        by_sev: Dict[str, List[Dict]] = {}
+        for c in cves:
+            sev = c.get('severity', 'UNKNOWN').upper()
+            by_sev.setdefault(sev, []).append(c)
+
+        lines = []
+        for sev in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'):
+            items = by_sev.get(sev, [])
+            if not items:
+                continue
+            lines.append(f"=== {sev} ({len(items)}) ===")
+            for item in items[:10]:  # cap per severity
+                pkg = item.get('pkg', item.get('name', '?'))
+                cve_ids = item.get('cves', item.get('issues', []))
+                if isinstance(cve_ids, list):
+                    cve_str = ', '.join(str(c) for c in cve_ids[:3])
+                else:
+                    cve_str = str(cve_ids)
+                lines.append(f"  {pkg}: {cve_str}")
+
+        result = '\n'.join(lines)
+        return result[:3000]
+
+    # ── MOTD updates (Feature 3) ─────────────────────────────────────────────
+
+    def update_motd(self, threat_level: str, last_scan: datetime,
+                    alert_count: int) -> None:
+        """Write SENTINEL status banner to /etc/motd (or ~/.motd_sentinel)."""
+        ts = last_scan.strftime("%Y-%m-%d %H:%M")
+        width = 34
+        inner = width - 2  # space between the box walls
+
+        def _row(text: str) -> str:
+            return f"║ {text:<{inner}} ║"
+
+        content = "\n".join([
+            f"╔{'═' * (width - 2)}╗",
+            _row(f"  SENTINEL  v3.3.0"),
+            f"╠{'═' * (width - 2)}╣",
+            _row(f"Last scan:     {ts}"),
+            _row(f"Threat level:  {threat_level}"),
+            _row(f"Alerts (24h):  {alert_count}"),
+            f"╚{'═' * (width - 2)}╝",
+            "",
+        ])
+
+        # Try system-wide MOTD first (requires passwordless sudo tee)
+        try:
+            r = subprocess.run(
+                ['sudo', '-n', 'tee', str(_MOTD_SYSTEM)],
+                input=content, capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                return
+        except Exception:
+            pass
+
+        # Fallback: user's ~/.motd_sentinel
+        try:
+            _MOTD_FALLBACK.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
+
+    # ── report file (Feature 5) ──────────────────────────────────────────────
+
+    def _write_report(self) -> None:
+        """Write ~/.agent_bin/sentinel_report.md with current SENTINEL state."""
+        try:
+            _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            uptime_secs = int((datetime.now() - self._start_time).total_seconds())
+            uptime_str = (
+                f"{uptime_secs // 3600}h "
+                f"{(uptime_secs % 3600) // 60}m "
+                f"{uptime_secs % 60}s"
+            )
+
+            recent = get_recent_alerts(10)
+            alert_lines = []
+            for a in recent[-10:]:
+                ts = a.get("ts", "")[:19]
+                sev = a.get("severity", "?")
+                finding = a.get("finding", "")
+                alert_lines.append(f"- `[{ts}]` **{sev}**: {finding}")
+
+            last_inv_summary = ""
+            if self._last_scan:
+                last_inv_summary = self._last_scan.get("finish_summary", "")
+
+            rec_lines = "\n".join(
+                f"- {r}" for r in self._last_recommendations
+            ) if self._last_recommendations else "- No recommendations yet."
+
+            content = (
+                f"# SENTINEL Report — {now_str}\n\n"
+                f"**Threat Level:** {self._current_threat_level}\n"
+                f"**Uptime:** Running since "
+                f"{self._start_time.strftime('%Y-%m-%d %H:%M:%S')} ({uptime_str})\n"
+                f"**Scans completed:** {self._scan_count_quick} quick, "
+                f"{self._scan_count_deep} deep\n\n"
+                f"## Recent Alerts (last 10)\n\n"
+                + ("\n".join(alert_lines) if alert_lines else "- No alerts on record.")
+                + f"\n\n## Last Investigation\n\n"
+                + (last_inv_summary or "_No scans completed yet._")
+                + f"\n\n## Recommendations\n\n{rec_lines}\n"
+            )
+
+            with self._report_lock:
+                _REPORT_PATH.write_text(content, encoding="utf-8")
+        except Exception as e:
+            print(f"👁️  Report write error: {e}")
+
+    # ── journal tailer (Feature 2) ───────────────────────────────────────────
+
+    _JOURNAL_TRIGGER_KEYWORDS = frozenset({
+        "failed", "error", "denied", "killed", "crash",
+        "invalid", "segfault", "timeout", "unauthorized",
+    })
+
+    def _journal_tailer(self) -> None:
+        """Background thread: tail journal streams and batch suspicious lines for LLM."""
+        # Start three journalctl streams
+        procs = []
+        cmds = [
+            ['journalctl', '-f', '--no-pager', '-p', 'err'],
+            ['journalctl', '-f', '-u', 'sshd', '--no-pager'],
+            ['journalctl', '-f', '-p', 'warning', '--no-pager'],
+        ]
+        for cmd in cmds:
+            try:
+                p = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                procs.append(p)
+            except Exception as e:
+                print(f"👁️  Journal tailer: failed to start {cmd[2:4]}: {e}")
+
+        if not procs:
+            print("👁️  Journal tailer: no journal streams available, exiting")
+            return
+
+        sel = selectors.DefaultSelector()
+        for p in procs:
+            if p.stdout:
+                sel.register(p.stdout, selectors.EVENT_READ)
+
+        self._journal_last_flush_ts = time.time()
+
+        try:
+            while self._watching:
+                events = sel.select(timeout=2.0)
+                for key, _ in events:
+                    line = key.fileobj.readline()
+                    if not line:
+                        # EOF — journald restart; brief pause before continuing
+                        time.sleep(1.0)
+                        continue
+                    line = line.rstrip()
+                    self._journal_buffer.append(line)
+                    line_lower = line.lower()
+                    if any(kw in line_lower for kw in self._JOURNAL_TRIGGER_KEYWORDS):
+                        self._journal_investigate_buffer.append(line)
+
+                now = time.time()
+                buf_len = len(self._journal_investigate_buffer)
+                time_elapsed = now - self._journal_last_flush_ts
+
+                if buf_len >= 20 or (buf_len > 0 and time_elapsed >= 30.0):
+                    lines_to_send = list(self._journal_investigate_buffer)
+                    self._journal_investigate_buffer = []
+                    self._journal_last_flush_ts = now
+                    t = threading.Thread(
+                        target=self._trigger_investigation,
+                        args=(lines_to_send,),
+                        daemon=True,
+                        name="SentinelJournalInvestigate",
+                    )
+                    t.start()
+        finally:
+            sel.close()
+            for p in procs:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+    def _trigger_investigation(self, lines: List[str]) -> None:
+        """Called in a daemon thread to hand buffered journal lines to the LLM."""
+        JOURNAL_INVESTIGATE_COOLDOWN = 300  # 5 minutes
+        now = time.time()
+        if now - self._journal_last_investigate_ts < JOURNAL_INVESTIGATE_COOLDOWN:
+            return
+        self._journal_last_investigate_ts = now
+
+        evidence = "RECENT JOURNAL EVENTS:\n" + "\n".join(lines)
+        try:
+            self.investigate(
+                finding="Real-time journal events require analysis",
+                evidence=evidence,
+            )
+        except Exception as e:
+            print(f"👁️  Journal investigation error: {e}")
+
     # ── public API ───────────────────────────────────────────────────────────
 
     def scan(self, focus: str = "") -> Dict[str, Any]:
@@ -700,12 +994,31 @@ class BlueteamAgent:
         )
         self._last_scan = result
 
+        # Extract threat level and recommendations from LLM finish summary
+        m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b',
+                      result.get('finish_summary', '').upper())
+        self._current_threat_level = m.group(1) if m else "UNKNOWN"
+        self._last_recommendations = []
+        for t in result.get('trace', []):
+            if t.get('tool') == 'finish':
+                self._last_recommendations = t.get('args', {}).get('recommendations', [])
+                break
+
         if _dlog:
             _dlog.log("blueteam_scan_complete", {
                 "success": result.get("success"),
                 "iterations_used": result.get("iterations_used"),
                 "focus": focus,
             })
+
+        # Update MOTD and report
+        alert_count_24h = len([
+            a for a in get_recent_alerts(500)
+            if (datetime.now() - datetime.fromisoformat(a.get("ts", datetime.now().isoformat())))
+               .total_seconds() < 86400
+        ])
+        self.update_motd(self._current_threat_level, datetime.now(), alert_count_24h)
+        self._write_report()
 
         return result
 
@@ -742,12 +1055,23 @@ class BlueteamAgent:
             tools=BLUETEAM_TOOLS,
         )
 
-        return self.agent.run_react(
+        result = self.agent.run_react(
             instruction=instruction,
             tool_whitelist=BLUETEAM_TOOLS,
             max_iterations=35,
             system_prompt_override=prompt,
         )
+
+        # Update MOTD and report after investigation
+        alert_count_24h = len([
+            a for a in get_recent_alerts(500)
+            if (datetime.now() - datetime.fromisoformat(a.get("ts", datetime.now().isoformat())))
+               .total_seconds() < 86400
+        ])
+        self.update_motd(self._current_threat_level, datetime.now(), alert_count_24h)
+        self._write_report()
+
+        return result
 
     def watch(self, interval: int = None, quick_interval: int = 300,
               deep_interval: int = 3600) -> None:
@@ -778,6 +1102,15 @@ class BlueteamAgent:
             f"quick poll every {quick_interval}s, deep scan every {deep_interval}s"
         )
 
+        # Start real-time journal tailer (Feature 2)
+        self._journal_thread = threading.Thread(
+            target=self._journal_tailer,
+            daemon=True,
+            name="SentinelJournalTailer",
+        )
+        self._journal_thread.start()
+        print("👁️  Journal tailer started — watching journal streams in real-time")
+
     def stop_watch(self) -> None:
         """Stop the background monitoring loop."""
         self._watching = False
@@ -800,6 +1133,9 @@ class BlueteamAgent:
             "last_scan_summary": (self._last_scan or {}).get("finish_summary", ""),
             "recent_alert_count": len(last_alerts),
             "recent_alerts": last_alerts[-5:],
+            "threat_level": self._current_threat_level,
+            "scan_count_quick": self._scan_count_quick,
+            "scan_count_deep": self._scan_count_deep,
         }
 
     # ── watch loop ───────────────────────────────────────────────────────────
@@ -890,6 +1226,7 @@ class BlueteamAgent:
                             })
 
                 self._baseline = current
+                self._scan_count_quick += 1
 
                 if _dlog:
                     _dlog.log("blueteam_watch_tick", {
@@ -898,6 +1235,16 @@ class BlueteamAgent:
                         "timestamp": datetime.now().isoformat(),
                     })
 
+                # Update MOTD and report after each quick poll
+                alert_count_24h = len([
+                    a for a in get_recent_alerts(500)
+                    if (datetime.now() - datetime.fromisoformat(
+                        a.get("ts", datetime.now().isoformat()))
+                    ).total_seconds() < 86400
+                ])
+                self.update_motd(self._current_threat_level, datetime.now(), alert_count_24h)
+                self._write_report()
+
                 # Full deep scan on schedule
                 if now - self._last_deep_scan_ts >= deep_interval:
                     print("👁️  Running scheduled deep scan...")
@@ -905,8 +1252,31 @@ class BlueteamAgent:
                         _dlog.log("blueteam_deep_scan_start", {
                             "timestamp": datetime.now().isoformat(),
                         })
-                    self.scan()
+
+                    # Run arch-audit before deep scan (Feature 1)
+                    cves = self._run_arch_audit()
+                    if cves:
+                        self._last_cve_list = cves
+                        critical_cves = [
+                            c for c in cves
+                            if c.get('severity', '').upper() == 'CRITICAL'
+                        ]
+                        if critical_cves:
+                            emit_alert(
+                                "CRITICAL",
+                                f"arch-audit: {len(critical_cves)} CRITICAL CVEs",
+                                evidence=self._format_arch_audit(critical_cves)[:500],
+                                action="sudo pacman -Syu to update",
+                            )
+
+                    cve_focus = (
+                        f"\n\nARCH-AUDIT CVE REPORT:\n{self._format_arch_audit(self._last_cve_list)}"
+                        if self._last_cve_list else ""
+                    )
+                    self.scan(focus=cve_focus)
+                    self._scan_count_deep += 1
                     self._last_deep_scan_ts = time.time()
+
                     if _dlog:
                         _dlog.log("blueteam_watch_tick", {
                             "kind": "deep",
