@@ -604,10 +604,9 @@ class BlueteamAgent:
 
         # Feature 2: journal tailer state
         self._journal_thread: Optional[threading.Thread] = None
-        self._journal_buffer: deque = deque(maxlen=50)
-        self._journal_investigate_buffer: List[str] = []
-        self._journal_last_investigate_ts: float = 0.0
-        self._journal_last_flush_ts: float = 0.0
+        self._journal_buffer: deque = deque(maxlen=300)  # rolling ~5-min window
+        self._journal_last_batch_ts: float = 0.0
+        self._journal_batch_thread: Optional[threading.Thread] = None
 
         # Feature 5: report / metrics state
         self._start_time: datetime = datetime.now()
@@ -894,41 +893,21 @@ class BlueteamAgent:
 
     # ── journal tailer (Feature 2) ───────────────────────────────────────────
 
-    _JOURNAL_TRIGGER_KEYWORDS = frozenset({
-        "failed", "error", "denied", "killed", "crash",
-        "invalid", "segfault", "timeout", "unauthorized",
-    })
-
-    # Known-benign patterns for this KDE Plasma host — lines matching any of
-    # these are silently dropped before they reach the LLM buffer.
-    # Add more here as new noise sources are identified in sentinel_debug.log.
-    _JOURNAL_NOISE_PATTERNS = frozenset({
-        # KDE Baloo file indexer — constantly fails DBus host portal registration
-        "baloo_file_extractor",
-        "failed to register with host portal",
-        # systemd transient workers — expected to fail on process exit
-        "(sd-worker)",
-        "failed to start worker process",
-        # KDE Akonadi / PIM stack — noisy but benign
-        "akonadi_control",
-        "akonadiserverrunner",
-        # KDE notification daemon restarts
-        "knotificationd",
-        # Xorg / Wayland session errors that are always present
-        "cannot connect to x server",
-        "qt: session management error",
-    })
+    # How many lines to collect per 5-minute window (rolling buffer)
+    _JOURNAL_BATCH_LINES = 200
+    # How often to send a batch to the LLM (seconds)
+    _JOURNAL_BATCH_INTERVAL = 300
 
     def _journal_tailer(self) -> None:
-        """Background thread: tail journal streams and batch suspicious lines for LLM."""
-        # Start three journalctl streams
-        procs = []
+        """Background thread: collect all journal lines, send full batch to LLM every
+        5 minutes for SOC-style analysis.  No pre-filtering — the LLM reads everything
+        and decides what matters."""
         cmds = [
-            ['journalctl', '-f', '--no-pager', '-p', 'err'],
-            ['journalctl', '-f', '-u', 'sshd', '--no-pager'],
-            ['journalctl', '-f', '-p', 'warning', '--no-pager'],
+            ['journalctl', '-f', '--no-pager', '-p', 'warning'],  # warning + err + crit
+            ['journalctl', '-f', '-u', 'sshd', '--no-pager'],     # all SSH events
         ]
-        _dbg("JOURNAL", f"starting {len(cmds)} journal streams")
+        procs = []
+        _dbg("JOURNAL", f"starting {len(cmds)} journal streams (no pre-filter)")
         for cmd in cmds:
             try:
                 p = subprocess.Popen(
@@ -941,8 +920,8 @@ class BlueteamAgent:
                 procs.append(p)
                 _dbg("JOURNAL", f"stream started: {' '.join(cmd[1:])}")
             except Exception as e:
-                _dbg("JOURNAL", f"failed to start {cmd[2:4]}: {e}")
-                print(f"👁️  Journal tailer: failed to start {cmd[2:4]}: {e}")
+                _dbg("JOURNAL", f"failed to start {' '.join(cmd[1:])}: {e}")
+                print(f"👁️  Journal tailer: failed to start stream: {e}")
 
         if not procs:
             _dbg("JOURNAL", "no streams available — tailer exiting")
@@ -954,7 +933,7 @@ class BlueteamAgent:
             if p.stdout:
                 sel.register(p.stdout, selectors.EVENT_READ)
 
-        self._journal_last_flush_ts = time.time()
+        self._journal_last_batch_ts = time.time()
 
         try:
             while self._watching:
@@ -962,36 +941,28 @@ class BlueteamAgent:
                 for key, _ in events:
                     line = key.fileobj.readline()
                     if not line:
-                        # EOF — journald restart; brief pause before continuing
                         time.sleep(1.0)
                         continue
-                    line = line.rstrip()
-                    self._journal_buffer.append(line)
-                    line_lower = line.lower()
-                    if any(kw in line_lower for kw in self._JOURNAL_TRIGGER_KEYWORDS):
-                        if any(pat in line_lower for pat in self._JOURNAL_NOISE_PATTERNS):
-                            _dbg("JOURNAL-NOISE", f"filtered: {line[:100]}")
-                        else:
-                            self._journal_investigate_buffer.append(line)
-                            _dbg("JOURNAL", f"trigger line [{len(self._journal_investigate_buffer)} buffered]: {line[:100]}")
+                    self._journal_buffer.append(line.rstrip())
 
                 now = time.time()
-                buf_len = len(self._journal_investigate_buffer)
-                time_elapsed = now - self._journal_last_flush_ts
-
-                if buf_len >= 20 or (buf_len > 0 and time_elapsed >= 30.0):
-                    reason = "20-line cap" if buf_len >= 20 else "30s timer"
-                    _dbg("JOURNAL", f"flushing {buf_len} trigger lines to LLM ({reason})")
-                    lines_to_send = list(self._journal_investigate_buffer)
-                    self._journal_investigate_buffer = []
-                    self._journal_last_flush_ts = now
-                    t = threading.Thread(
-                        target=self._trigger_investigation,
-                        args=(lines_to_send,),
+                if now - self._journal_last_batch_ts >= self._JOURNAL_BATCH_INTERVAL:
+                    self._journal_last_batch_ts = now
+                    batch = list(self._journal_buffer)
+                    if not batch:
+                        _dbg("JOURNAL", "batch interval reached — buffer empty, skipping")
+                        continue
+                    if self._journal_batch_thread and self._journal_batch_thread.is_alive():
+                        _dbg("JOURNAL", f"batch interval reached — previous LLM call still running, skipping ({len(batch)} lines dropped)")
+                        continue
+                    _dbg("JOURNAL", f"batch interval reached — dispatching {len(batch)} lines to LLM")
+                    self._journal_batch_thread = threading.Thread(
+                        target=self._run_journal_batch,
+                        args=(batch,),
                         daemon=True,
-                        name="SentinelJournalInvestigate",
+                        name="SentinelJournalBatch",
                     )
-                    t.start()
+                    self._journal_batch_thread.start()
         finally:
             sel.close()
             for p in procs:
@@ -1000,26 +971,32 @@ class BlueteamAgent:
                 except Exception:
                     pass
 
-    def _trigger_investigation(self, lines: List[str]) -> None:
-        """Called in a daemon thread to hand buffered journal lines to the LLM."""
-        JOURNAL_INVESTIGATE_COOLDOWN = 300  # 5 minutes
-        now = time.time()
-        secs_since = now - self._journal_last_investigate_ts
-        if secs_since < JOURNAL_INVESTIGATE_COOLDOWN:
-            _dbg("JOURNAL", f"investigation cooldown active ({int(JOURNAL_INVESTIGATE_COOLDOWN - secs_since)}s left) — skipping")
-            return
-        self._journal_last_investigate_ts = now
-        _dbg("JOURNAL", f"sending {len(lines)} lines to LLM for investigation")
+    def _run_journal_batch(self, lines: List[str]) -> None:
+        """Send a 5-minute journal batch to the LLM for SOC-analyst review."""
+        # Send the most recent lines if the batch is large
+        lines_for_llm = lines[-self._JOURNAL_BATCH_LINES:]
+        total = len(lines)
+        sent = len(lines_for_llm)
+        _dbg("JOURNAL", f"sending {sent} lines (of {total} collected) to LLM")
 
-        evidence = "RECENT JOURNAL EVENTS:\n" + "\n".join(lines)
+        evidence = (
+            f"JOURNAL LOG BATCH — last {self._JOURNAL_BATCH_INTERVAL}s "
+            f"({sent} of {total} lines shown):\n\n"
+            + "\n".join(lines_for_llm)
+        )
+        finding = (
+            "Scheduled journal log review. Read these logs as a professional SOC analyst "
+            "at a large company would: look for service crashes, auth failures, brute-force "
+            "patterns, privilege escalation, unexpected process behaviour, repeated errors "
+            "that indicate a failing service, or anything that would warrant a ticket. "
+            "Benign desktop noise (baloo, KDE, DBus registration failures) is LOW — "
+            "do NOT alert on it. Only escalate if you see something genuinely suspicious."
+        )
         try:
-            self.investigate(
-                finding="Real-time journal events require analysis",
-                evidence=evidence,
-            )
+            self.investigate(finding=finding, evidence=evidence)
         except Exception as e:
-            _dbg("JOURNAL", f"investigation error: {e}")
-            print(f"👁️  Journal investigation error: {e}")
+            _dbg("JOURNAL", f"batch LLM error: {e}")
+            print(f"👁️  Journal batch error: {e}")
 
     # ── public API ───────────────────────────────────────────────────────────
 
