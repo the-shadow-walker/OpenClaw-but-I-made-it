@@ -804,7 +804,7 @@ class BlueteamAgent:
         """Write SENTINEL status banner to /etc/motd (or ~/.motd_sentinel)."""
         ts = last_scan.strftime("%Y-%m-%d %H:%M")
         width = 34
-        inner = width - 2  # space between the box walls
+        inner = width - 4  # ║ + space + content + space + ║ = content + 4
 
         def _row(text: str) -> str:
             return f"║ {text:<{inner}} ║"
@@ -972,8 +972,11 @@ class BlueteamAgent:
                     pass
 
     def _run_journal_batch(self, lines: List[str]) -> None:
-        """Send a 5-minute journal batch to the LLM for SOC-analyst review."""
-        # Send the most recent lines if the batch is large
+        """Send a 5-minute journal batch to the LLM for SOC-analyst review.
+
+        Uses a small iteration budget — the logs are already provided, so the
+        LLM should read and classify without running many extra commands.
+        """
         lines_for_llm = lines[-self._JOURNAL_BATCH_LINES:]
         total = len(lines)
         sent = len(lines_for_llm)
@@ -985,15 +988,17 @@ class BlueteamAgent:
             + "\n".join(lines_for_llm)
         )
         finding = (
-            "Scheduled journal log review. Read these logs as a professional SOC analyst "
-            "at a large company would: look for service crashes, auth failures, brute-force "
-            "patterns, privilege escalation, unexpected process behaviour, repeated errors "
-            "that indicate a failing service, or anything that would warrant a ticket. "
-            "Benign desktop noise (baloo, KDE, DBus registration failures) is LOW — "
-            "do NOT alert on it. Only escalate if you see something genuinely suspicious."
+            "Scheduled 5-minute journal log review. "
+            "The logs above are your primary source — do NOT run extra commands unless "
+            "you spot a CRITICAL threat that demands immediate evidence. "
+            "Read these logs as a professional SOC analyst: look for service crashes, "
+            "auth failures, brute-force SSH patterns, privilege escalation, repeated "
+            "errors indicating a failing service, or anything that would open a ticket. "
+            "KDE/baloo/DBus/Akonadi noise is always LOW. "
+            "Call finish() within 3-5 iterations with your verdict."
         )
         try:
-            self.investigate(finding=finding, evidence=evidence)
+            self.investigate(finding=finding, evidence=evidence, max_iterations=12)
         except Exception as e:
             _dbg("JOURNAL", f"batch LLM error: {e}")
             print(f"👁️  Journal batch error: {e}")
@@ -1070,15 +1075,17 @@ class BlueteamAgent:
 
         return result
 
-    def investigate(self, finding: str, evidence: str = "") -> Dict[str, Any]:
+    def investigate(self, finding: str, evidence: str = "",
+                    max_iterations: int = 35) -> Dict[str, Any]:
         """
         Targeted investigation of a specific finding.
 
         Args:
             finding: Description of what's suspicious
             evidence: Any initial evidence already gathered
+            max_iterations: ReAct iteration budget (lower for routine log reviews)
         """
-        _dbg("INVESTIGATE", f"trigger={finding[:100]!r}")
+        _dbg("INVESTIGATE", f"trigger={finding[:100]!r}  max_iters={max_iterations}")
         instruction = (
             f"AUTONOMOUS INVESTIGATION\n\n"
             f"Trigger:  {finding}\n\n"
@@ -1100,20 +1107,27 @@ class BlueteamAgent:
         prompt = _build_blueteam_system_prompt(
             os_info=self.agent.os_info,
             agent_pid=os.getpid(),
-            max_iterations=35,
+            max_iterations=max_iterations,
             tools=BLUETEAM_TOOLS,
         )
 
         result = self.agent.run_react(
             instruction=instruction,
             tool_whitelist=BLUETEAM_TOOLS,
-            max_iterations=35,
+            max_iterations=max_iterations,
             system_prompt_override=prompt,
         )
 
         _dbg("INVESTIGATE", f"done  iters={result.get('iterations_used',0)}  "
                             f"success={result.get('success')}  "
                             f"summary={result.get('finish_summary','')[:80]!r}")
+
+        # Extract threat level from this investigation result and update state
+        m = re.search(r'\b(CRITICAL|HIGH|MEDIUM|LOW)\b',
+                      result.get('finish_summary', '').upper())
+        if m:
+            self._current_threat_level = m.group(1)
+            _dbg("INVESTIGATE", f"threat level → {self._current_threat_level}")
 
         # Update MOTD and report after investigation
         alert_count_24h = len([
