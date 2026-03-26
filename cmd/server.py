@@ -663,20 +663,8 @@ def _resume_running_chains():
 
 
 def require_api_key(f):
-    """Decorator to require API key authentication"""
-    def decorated_function(*args, **kwargs):
-        provided_key = request.headers.get('X-API-Key')
-        
-        if not provided_key:
-            return jsonify({'error': 'API key required', 'message': 'Provide X-API-Key header'}), 401
-        
-        if provided_key != API_KEY:
-            return jsonify({'error': 'Invalid API key'}), 403
-        
-        return f(*args, **kwargs)
-    
-    decorated_function.__name__ = f.__name__
-    return decorated_function
+    """Auth disabled — local-network deployment, no API key required."""
+    return f
 
 
 @app.route('/health', methods=['GET'])
@@ -1321,6 +1309,37 @@ def blueteam_status():
     return jsonify(sentinel.status())
 
 
+@app.route('/api/v1/blueteam/report', methods=['GET'])
+def blueteam_report():
+    """Return the current SENTINEL daily report as markdown (or JSON).
+
+    Query params:
+        format=md   (default) — returns raw markdown with Content-Type text/markdown
+        format=json           — returns {"report": "...", "archived": [...]}
+    """
+    from pathlib import Path
+    report_path = Path("~/.agent_bin/sentinel_report.md").expanduser()
+    archive_dir = Path("~/.agent_bin/sentinel_archive").expanduser()
+
+    if not report_path.exists():
+        return jsonify({'error': 'No report available yet — run a blueteam scan first'}), 404
+
+    content = report_path.read_text(encoding='utf-8')
+    fmt = request.args.get('format', 'md')
+
+    if fmt == 'json':
+        archived = sorted(
+            [p.name for p in archive_dir.glob("sentinel_report_*.md")]
+        ) if archive_dir.exists() else []
+        return jsonify({
+            'report': content,
+            'report_path': str(report_path),
+            'archived_reports': archived,
+        })
+
+    return content, 200, {'Content-Type': 'text/markdown; charset=utf-8'}
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
@@ -1333,7 +1352,7 @@ if __name__ == '__main__':
         print(f"  ▸ {feat}")
     print()
     print("=" * 70)
-    print(f"API Key: {API_KEY}")
+    print(f"Auth: DISABLED (local-network mode)")
     print(f"Port: 5000  |  Max Concurrent Jobs: {MAX_CONCURRENT_JOBS}")
     print(f"Endpoints:")
     print(f"  POST   /api/v1/execute           - Execute command")
@@ -1354,6 +1373,7 @@ if __name__ == '__main__':
     print(f"  POST   /api/v1/blueteam/investigate - SENTINEL investigation (job)")
     print(f"  POST   /api/v1/blueteam/watch/start - Start anomaly watcher")
     print(f"  POST   /api/v1/blueteam/watch/stop  - Stop anomaly watcher")
+    print(f"  GET    /api/v1/blueteam/report   - Current SENTINEL daily report (.md)")
     print(f"  GET    /api/v1/blueteam/alerts   - Recent security alerts")
     print(f"  GET    /api/v1/blueteam/status   - Watcher status + last scan")
     print("=" * 70)
@@ -1366,10 +1386,11 @@ if __name__ == '__main__':
     print(f"📝 Debug logs            →  {os.path.abspath('./logs/')}")
     print(f"📊 State file            →  {os.path.abspath(_STATE_PATH)}")
 
-    # Auto-start SENTINEL: quick anomaly diff every 5 min, deep LLM scan every 1 hr
-    if _BLUETEAM_AVAILABLE:
-        _get_sentinel().watch(quick_interval=300, deep_interval=3600)
-        print(f"👁️  SENTINEL auto-started  →  quick=5min  deep=1hr")
+    # SENTINEL auto-watch disabled — triggered externally (cron at 3 AM)
+    # To re-enable: POST /api/v1/blueteam/watch/start or uncomment below
+    # if _BLUETEAM_AVAILABLE:
+    #     _get_sentinel().watch(quick_interval=300, deep_interval=3600)
+    #     print(f"👁️  SENTINEL auto-started  →  quick=5min  deep=1hr")
 
     print("\nStarting server...")
 
