@@ -554,6 +554,30 @@ class JarvisServer:
         except Exception as e:
             logger.warning(f"Failed to load stored notes: {e}")
 
+        # PERSONALITY ADAPTATIONS (learned from interactions via PersonalityLearner)
+        try:
+            pref_data = getattr(self.personality, 'data', {}).get('preferences', {})
+            if pref_data:
+                context_parts.append("\nLEARNED PERSONALITY ADAPTATIONS:")
+                style = pref_data.get('communication_style')
+                if style:
+                    context_parts.append(f"- Communication style: {style}")
+                verbosity = pref_data.get('verbosity')
+                if verbosity:
+                    context_parts.append(f"- Preferred verbosity: {verbosity}")
+                humor = pref_data.get('humor_level')
+                if humor:
+                    context_parts.append(f"- Humor level: {humor}")
+                formality = pref_data.get('formality')
+                if formality:
+                    context_parts.append(f"- Formality: {formality}")
+                skip = {'communication_style', 'verbosity', 'humor_level', 'formality'}
+                for k, v in list(pref_data.items())[:5]:
+                    if k not in skip and v:
+                        context_parts.append(f"- {k.replace('_', ' ').title()}: {v}")
+        except Exception as _pe:
+            logger.debug(f"Personality context injection failed: {_pe}")
+
         # EMAIL SUMMARY (brief - use [READ_RECENT_EMAILS] for full details)
         if email_summary:
             context_parts.append("\nRECENT EMAILS:")
@@ -734,7 +758,7 @@ class JarvisServer:
         logger.info(f"[Actions] Tags present - REMEMBER:{has_remember}, SEARCH:{has_search}, MEMORY:{has_memory}")
 
         # [REMEMBER: fact]
-        match = re.search(r'\[REMEMBER:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[REMEMBER:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             fact = match.group(1).strip()
             try:
@@ -749,7 +773,7 @@ class JarvisServer:
                 logger.error(f"[Action] Failed to remember: {e}")
 
         # [SEARCH_MEMORY: topic]
-        match = re.search(r'\[SEARCH_MEMORY:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[SEARCH_MEMORY:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             topic = match.group(1).strip()
             try:
@@ -774,7 +798,7 @@ class JarvisServer:
                 logger.error(f"[Action] Failed to show memory: {e}")
 
         # [MEMORY_SHOW_ABOUT: topic]
-        match = re.search(r'\[MEMORY_SHOW_ABOUT:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[MEMORY_SHOW_ABOUT:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             topic = match.group(1).strip()
             try:
@@ -816,7 +840,7 @@ class JarvisServer:
                 logger.error(f"[Action] Failed to show profile: {e}")
 
         # [MEMORY_FORGET: topic]
-        match = re.search(r'\[MEMORY_FORGET:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[MEMORY_FORGET:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             topic = match.group(1).strip()
             try:
@@ -828,7 +852,7 @@ class JarvisServer:
                 logger.error(f"[Action] Failed to forget: {e}")
 
         # [MEMORY_STORE_PREF: category|key|value]
-        match = re.search(r'\[MEMORY_STORE_PREF:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[MEMORY_STORE_PREF:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             pref_str = match.group(1).strip()
             parts = pref_str.split('|')
@@ -841,13 +865,13 @@ class JarvisServer:
                     logger.error(f"[Action] Failed to store preference: {e}")
 
         # [EXECUTE: command] - Log only, don't execute for security
-        match = re.search(r'\[EXECUTE:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[EXECUTE:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             command = match.group(1).strip()
             logger.warning(f"[Action] EXECUTE tag found (not executed for security): {command}")
 
         # [SEND_EMAIL: to|subject|body]
-        match = re.search(r'\[SEND_EMAIL:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[SEND_EMAIL:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match and self.email_agent:
             email_str = match.group(1).strip()
             try:
@@ -871,7 +895,7 @@ class JarvisServer:
                 logger.error(f"[Action] Failed to send email: {e}")
 
         # [DRAFT_EMAIL: to|subject|body]
-        match = re.search(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[DRAFT_EMAIL:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match and self.email_agent:
             email_str = match.group(1).strip()
             try:
@@ -931,7 +955,7 @@ class JarvisServer:
         # [DEEP_SEARCH: query] - Start async deep search
         logger.info(f"[DEBUG] Checking for DEEP_SEARCH tag in response ({len(response)} chars)")
         logger.info(f"[DEBUG] Response contains '[DEEP_SEARCH': {'[DEEP_SEARCH' in response.upper()}")
-        match = re.search(r'\[DEEP_SEARCH:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[DEEP_SEARCH:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         logger.info(f"[DEBUG] DEEP_SEARCH regex match result: {match is not None}")
         if match:
             query = match.group(1).strip()
@@ -966,16 +990,14 @@ class JarvisServer:
                     response = response.replace(match.group(0), status_msg)
                     logger.info(f"[Action] Deep search job created: {job_id}")
                 else:
-                    response = response.replace(match.group(0), "\n❌ Failed to start deep search (no job ID)")
+                    response = response.replace(match.group(0), "")
                     logger.error(f"[Action] Deep search failed: no job_id in response")
 
             except requests.exceptions.RequestException as e:
-                error_msg = f"\n❌ Deep search unavailable: {e}"
-                response = response.replace(match.group(0), error_msg)
-                logger.error(f"[Action] Deep search connection error: {e}")
+                response = response.replace(match.group(0), "")
+                logger.error(f"[Action] Deep search unavailable: {e}")
             except Exception as e:
-                error_msg = f"\n❌ Deep search error: {e}"
-                response = response.replace(match.group(0), error_msg)
+                response = response.replace(match.group(0), "")
                 logger.error(f"[Action] Deep search error: {e}")
 
         # [GET_DEEP_SEARCH_RESULT: job_id] or [GET_DEEP_SEARCH_RESULT] (latest)
@@ -1043,17 +1065,15 @@ class JarvisServer:
                         logger.info(f"[Action] Deep search status: {status}")
 
             except requests.exceptions.RequestException as e:
-                error_msg = f"\n❌ Could not fetch search result: {e}"
-                response = response.replace(match.group(0), error_msg)
+                response = response.replace(match.group(0), "")
                 logger.error(f"[Action] Failed to fetch deep search result: {e}")
             except Exception as e:
-                error_msg = f"\n❌ Error fetching result: {e}"
-                response = response.replace(match.group(0), error_msg)
+                response = response.replace(match.group(0), "")
                 logger.error(f"[Action] Error in GET_DEEP_SEARCH_RESULT: {e}")
 
 
         # [RUN_AGENT: instruction] - Dispatch to ollama-cmd single job
-        match = re.search(r'\[RUN_AGENT:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[RUN_AGENT:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             instruction = match.group(1).strip()
             try:
@@ -1079,7 +1099,7 @@ class JarvisServer:
                 logger.error(f"[Action] RUN_AGENT error: {e}")
 
         # [RUN_CHAIN: goal] - Dispatch to ollama-cmd multi-phase chain
-        match = re.search(r'\[RUN_CHAIN:\s*([^\]]+)\]', response, re.IGNORECASE)
+        match = re.search(r'\[RUN_CHAIN:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
         if match:
             goal = match.group(1).strip()
             try:

@@ -43,6 +43,7 @@ class BackgroundWorker(threading.Thread):
         self._last_refine_time = 0.0
         self._last_user_interaction = time.time()
         self._running = True
+        self._work_lock = threading.Lock()
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,8 @@ class BackgroundWorker(threading.Thread):
         return elapsed >= self.IDLE_THRESHOLD
 
     def _cooldown_done(self) -> bool:
-        return (time.time() - self._last_work_at) >= self.WORK_COOLDOWN
+        with self._work_lock:
+            return (time.time() - self._last_work_at) >= self.WORK_COOLDOWN
 
     def _first_unchecked_todo(self, md_text: str) -> Optional[str]:
         """Return the first unchecked checkbox line, or None"""
@@ -105,7 +107,8 @@ class BackgroundWorker(threading.Thread):
             print(f"\n🤖 [BG] No todos for '{project_name}'. Generating plan...")
             self._generate_todo_list(project_name, md_text)
 
-        self._last_work_at = time.time()
+        with self._work_lock:
+            self._last_work_at = time.time()
 
     # ── Email Self-Refinement ──────────────────────────────────────────────────
 
@@ -435,12 +438,22 @@ Respond with ONLY the todo list items, like:
 
     def run(self):
         """Main background worker loop"""
+        _last_session_cleanup = 0.0
         while self._running:
             try:
                 if self._is_idle() and self._cooldown_done():
                     self.autonomous_mode()
             except Exception as e:
                 print(f"   ⚠️  [BG] Worker error: {e}")
+
+            # Periodic session cleanup every 30 minutes
+            if time.time() - _last_session_cleanup > 1800:
+                try:
+                    self.server.sessions.cleanup_expired_sessions()
+                    _last_session_cleanup = time.time()
+                except Exception as _ce:
+                    pass
+
             time.sleep(self.POLL_INTERVAL)
 
     def stop(self):
