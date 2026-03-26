@@ -1,0 +1,18 @@
+[Unit]
+Description=Swarm 3.0 Ollama Question-Answering API
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=Grindlewalt
+WorkingDirectory=/mnt/storage/NAS/Jarvis/swarm
+Environment=PYTHONPATH=/mnt/storage/NAS/Jarvis/swarm:/mnt/storage/NAS/Jarvis/swarm/core:/mnt/storage/NAS/Jarvis/swarm/math:/mnt/storage/NAS/Jarvis/swarm/server:/mnt/storage/NAS/Jarvis/swarm/engineer
+ExecStart=/mnt/storage/NAS/Jarvis/swarm/.venv/bin/python3 /mnt/storage/NAS/Jarvis/swarm/server/swarm_api_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

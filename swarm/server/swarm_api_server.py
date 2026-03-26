@@ -1,4 +1,14 @@
-import _paths  # noqa: F401
+import sys as _sys, os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_ROOT = _os.path.dirname(_HERE)
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+try:
+    import _paths  # noqa: F401
+except ImportError:
+    for _d in [_os.path.join(_ROOT, d) for d in ('core', 'math', 'server', 'engineer')]:
+        if _os.path.isdir(_d) and _d not in _sys.path:
+            _sys.path.insert(0, _d)
 """
 Swarm 3.0 REST API Wrapper
 ==========================
