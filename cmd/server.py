@@ -17,11 +17,14 @@ from typing import Dict, Any, Optional
 import secrets
 import sys
 
-# When running from the Jarvis root (~/cmd = /mnt/storage/NAS/Jarvis), modules
-# live in the cmd/ subdirectory. Add it to the path so imports work correctly.
+# Modules live in cmd/ and its subpackages. Add all of them to sys.path so
+# existing flat imports (from ollama_agent_core import X, etc.) keep working
+# without any changes inside the module files themselves.
 _CMD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cmd")
-if os.path.isdir(_CMD_DIR) and _CMD_DIR not in sys.path:
-    sys.path.insert(0, _CMD_DIR)
+for _sub in ("", "core", "chain", "blueteam", "infra"):
+    _d = os.path.join(_CMD_DIR, _sub) if _sub else _CMD_DIR
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.insert(0, _d)
 
 # Import the agent (assumes ollama_agent.py is in same directory or cmd/)
 from ollama_agent_core import OllamaCommandAgent

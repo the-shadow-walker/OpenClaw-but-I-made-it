@@ -1,0 +1,180 @@
+{
+  "lipo": {
+    "level": "HIGH",
+    "warnings": [
+      "LiPo batteries can catch fire or explode if overcharged, over-discharged, punctured, or short-circuited.",
+      "Always use a dedicated LiPo charger with balancing — never charge with a generic charger.",
+      "Never leave charging LiPo batteries unattended.",
+      "Store in a fireproof LiPo bag at 3.7–3.85V per cell (storage voltage).",
+      "Inspect for swelling before each use — discard any puffy pack immediately.",
+      "Never discharge below 3.0V per cell; use a low-voltage cutoff (LVC) circuit.",
+      "Keep away from flammable materials and extreme heat."
+    ]
+  },
+  "li-ion": {
+    "level": "HIGH",
+    "warnings": [
+      "Li-Ion cells require a protection circuit module (PCM/BMS) to prevent overcharge and over-discharge.",
+      "Never short-circuit Li-Ion cells — thermal runaway risk.",
+      "Use only chargers rated for Li-Ion chemistry at the correct voltage.",
+      "Inspect for damage, dents, or leaking electrolyte before use."
+    ]
+  },
+  "lithium": {
+    "level": "HIGH",
+    "warnings": [
+      "Lithium-based batteries are flammable and require proper charging and handling.",
+      "Use the correct charger for your specific lithium chemistry (LiPo, Li-Ion, LiFePO4).",
+      "Never puncture, crush, or expose to water."
+    ]
+  },
+  "laser": {
+    "level": "HIGH",
+    "warnings": [
+      "Laser diodes >5mW can cause permanent eye damage in milliseconds — never look into the beam.",
+      "Always wear appropriate laser safety goggles rated for the wavelength and power level.",
+      "Post hazard signs and enclose the beam path where possible.",
+      "Class 3B/4 lasers require a key switch and emission indicator.",
+      "Be aware of reflective surfaces that can redirect the beam unexpectedly."
+    ]
+  },
+  "mains": {
+    "level": "CRITICAL",
+    "warnings": [
+      "MAINS VOLTAGE (120V/240V AC) IS LETHAL — a single contact can cause fatal electrocution.",
+      "ALL mains wiring must be performed by a qualified electrician and comply with local electrical codes.",
+      "Use properly rated enclosures, breakers, and insulated terminals rated for mains voltage.",
+      "Double-insulate or earth-ground all metal enclosures.",
+      "Install a ground-fault circuit interrupter (GFCI/RCD) for any mains-connected project.",
+      "Verify isolation from mains before touching any component."
+    ]
+  },
+  "ac": {
+    "level": "CRITICAL",
+    "warnings": [
+      "AC mains wiring is lethal. Do not work on live circuits.",
+      "Use properly rated components and follow local electrical codes.",
+      "Always isolate and verify dead before touching conductors."
+    ]
+  },
+  "high voltage": {
+    "level": "CRITICAL",
+    "warnings": [
+      "High-voltage circuits are potentially lethal even when powered off due to stored charge in capacitors.",
+      "Discharge capacitors with a bleeder resistor before handling.",
+      "Maintain safe creepage and clearance distances on PCB layouts.",
+      "Use appropriate personal protective equipment (PPE)."
+    ]
+  },
+  "resin": {
+    "level": "MEDIUM",
+    "warnings": [
+      "UV/SLA resin is a skin and eye irritant — wear nitrile gloves and safety glasses.",
+      "Work in a well-ventilated area; resin fumes can cause respiratory irritation.",
+      "Uncured resin is hazardous waste — cure all waste resin before disposal.",
+      "Isopropyl alcohol (IPA) used for washing is flammable — keep away from heat sources.",
+      "Wash hands thoroughly after handling even with gloves."
+    ]
+  },
+  "fdm": {
+    "level": "LOW",
+    "warnings": [
+      "FDM printer hotends reach 200–280°C — do not touch during or immediately after printing.",
+      "Some filaments (ABS, ASA) emit fumes that may be irritating — print in a ventilated area or enclosure with filtration.",
+      "Keep flammable materials away from heated bed and hotend."
+    ]
+  },
+  "abs": {
+    "level": "LOW",
+    "warnings": [
+      "ABS filament emits styrene fumes during printing — use adequate ventilation or an enclosure with activated carbon filter.",
+      "Hotend temperatures required (230–250°C) can cause burns on contact."
+    ]
+  },
+  "mosfet": {
+    "level": "LOW",
+    "warnings": [
+      "MOSFETs switching inductive loads (motors, solenoids) require a flyback diode to prevent voltage spikes that can destroy the device.",
+      "Ensure gate drive voltage is appropriate for the selected MOSFET (logic-level vs standard).",
+      "Add a gate resistor (10–100Ω) to reduce EMI and ringing."
+    ]
+  },
+  "motor": {
+    "level": "LOW",
+    "warnings": [
+      "Motors are inductive loads — always use a flyback diode or motor driver with built-in protection.",
+      "Mechanical moving parts create pinch and entanglement hazards — add guards where appropriate.",
+      "Motor stall current can be 5–10× running current — size fuses and drivers accordingly."
+    ]
+  },
+  "servo": {
+    "level": "LOW",
+    "warnings": [
+      "Servo motors can exert significant torque — keep fingers clear of linkages during testing.",
+      "Ensure servo power supply can handle peak stall current without browning out the MCU."
+    ]
+  },
+  "capacitor": {
+    "level": "LOW",
+    "warnings": [
+      "Electrolytic capacitors are polarized — reverse connection causes venting or rupture.",
+      "Large capacitors store significant charge — discharge before handling in powered-down circuits.",
+      "Check voltage rating — always use capacitors rated at least 20% above circuit voltage."
+    ]
+  },
+  "relay": {
+    "level": "MEDIUM",
+    "warnings": [
+      "Relays switching AC or high DC voltages require safe isolation between coil and contact sides.",
+      "Use a flyback diode across the relay coil to protect the driving transistor/MCU.",
+      "Ensure contact current rating exceeds the load by at least 20%."
+    ]
+  },
+  "soldering": {
+    "level": "LOW",
+    "warnings": [
+      "Soldering iron tips reach 300–450°C — risk of burns and fire.",
+      "Solder flux fumes are respiratory irritants — solder in a ventilated area or use a fume extractor.",
+      "Lead solder requires hand washing after handling; consider lead-free alternatives."
+    ]
+  },
+  "battery": {
+    "level": "LOW",
+    "warnings": [
+      "Even low-voltage batteries can deliver high short-circuit currents capable of causing burns or fires.",
+      "Fuse battery outputs appropriately for the circuit.",
+      "Dispose of batteries according to local regulations — do not dispose of in general waste."
+    ]
+  },
+  "18650": {
+    "level": "HIGH",
+    "warnings": [
+      "18650 Li-Ion cells without integrated protection can deliver >20A short-circuit current.",
+      "Use cells with built-in protection circuit or add external BMS/protection board.",
+      "Never short-circuit bare 18650 cells — fire and explosion risk.",
+      "Verify cell polarity before insertion into holders."
+    ]
+  },
+  "pwm": {
+    "level": "LOW",
+    "warnings": [
+      "High-frequency PWM signals on long wires can cause EMI — use decoupling capacitors near loads.",
+      "Ensure PWM frequency does not interfere with I2C or other communication buses on shared grounds."
+    ]
+  },
+  "high current": {
+    "level": "MEDIUM",
+    "warnings": [
+      "High-current traces and wires generate heat — size conductors appropriately for the load.",
+      "Use terminal blocks or XT connectors rated for the current; do not use pin headers for >2A.",
+      "Add a fuse or resettable polyfuse at the power input."
+    ]
+  },
+  "hot glue": {
+    "level": "LOW",
+    "warnings": [
+      "Hot glue gun tip and nozzle reach ~200°C — risk of burns.",
+      "Hot glue is not rated for high-temperature environments — do not use near motors or power components that generate significant heat."
+    ]
+  }
+}

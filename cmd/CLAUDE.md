@@ -1,119 +1,79 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
+
+## Key Rules
+- **Always edit locally on Mac** (`/Users/grant/cmd/`), then SCP to remote. Never edit on remote directly.
+- **Never push to `~/swarm3`** — swarm lives at `/mnt/storage/NAS/Jarvis/swarm/`
+- **Git root** is `/mnt/storage/NAS/Jarvis/` — commit from there
+- **Service name** is `ollama-cmd` (systemd unit: `ollama-cmd.service`)
+
+## Directory Structure
+
+```
+/mnt/storage/NAS/Jarvis/
+  server.py          ← root-level entry point (root-owned, deploy via /tmp/)
+  cmd/
+    core/            ollama_agent_core.py, react_tools.py, react_memory.py
+    chain/           task_chain.py
+    blueteam/        blueteam_agent.py
+    infra/           debug_logger.py, webhook_dispatcher.py, watchdog, sysinfo
+    DOCS/            integration_guide.md, EVENT_MESH.md
+    run_me.py        single client entry point
+    README.md
+  swarm/             AI agent swarm (moved from ~/swarm3)
+  agent_inbox/       drop JSON files here for inbox watcher
+  logs/
+```
 
 ## Running the Service
 
 ```bash
-# Activate the virtual environment first
+# Service management
+sudo systemctl status ollama-cmd
+sudo systemctl restart ollama-cmd
+sudo journalctl -u ollama-cmd -f
+
+# Run directly (dev)
 source .venv/bin/activate
-
-# Start the REST API server (port 5000)
 python server.py
-
-# Run the agent directly (interactive mode)
-python ollama_agent_core.py
-
-# Use the client library from a Python script
-python agent_client.py
 ```
 
-**Dependencies:** Flask, Flask-CORS, requests — all installed in `.venv`.
-
-**External requirements:**
-- Ollama running locally at `http://localhost:11434` with model `qwen3-coder:30b`
-- SearXNG instance at `http://10.0.0.58:8080` (optional, for web search)
-- Set `AGENT_API_KEY` env var or a random key is generated on startup
-
-## Architecture
-
-This is a Python-based AI agent service that accepts natural language instructions, uses a local LLM (via Ollama) to plan and execute shell commands, with safety validation at each step.
-
-### Three-tier structure
-
-```
-agent_client.py       → HTTP client library to interact with the service
-server.py             → Flask REST API; async job queue with 3 worker threads
-ollama_agent_core.py  → Core agent: LLM-driven planning, command execution, safety validation
-agent_service.py      → Older/alternative version of server.py (mostly superseded)
-```
-
-### Job lifecycle
-
-Jobs move through states: `QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED`. Jobs are stored in memory — they are lost on restart.
-
-### Execution flow
-
-1. Client POSTs instruction to `/api/v1/execute`, gets back a `job_id`
-2. A worker thread picks up the job and calls `OllamaCommandAgent.run()`
-3. Agent calls Ollama to analyze the task and create a step-by-step plan
-4. Each step is validated by `CommandSafetyValidator` before execution
-5. On failure, agent asks LLM to analyze and retry (up to 3x)
-6. Client polls `/api/v1/jobs/<job_id>` or streams via SSE at `/api/v1/jobs/<job_id>/stream`
-
-### Safety validation (`CommandSafetyValidator` in `ollama_agent_core.py`)
-
-All commands are assigned a risk level before execution:
-- **Blocked**: Rejected outright (fork bombs, `rm -rf /`, writing to `/dev/sd*`, `mkfs`, etc.)
-- **High/Medium**: Requires user confirmation and LLM-generated explanation
-- **Low/Safe**: Executed directly
-
-Protected paths (writes blocked): `/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/proc`, `/root`, `/sbin`, `/sys`, `/usr`
-
-### Key classes
-
-- `OllamaCommandAgent` — orchestrates LLM calls, plan creation, step execution, and retry/recovery
-- `CommandSafetyValidator` — validates commands against risk patterns before execution
-- `FlexibleSearchAgent` — web search via SearXNG
-- `JobRunner` (server.py) — thread pool managing up to 3 concurrent jobs
-- `OutputCapture` (server.py) — captures stdout/stderr during job execution
-- `AgentClient` (agent_client.py) — HTTP client wrapping all API endpoints
-
-## Deployment to Remote Server (mcssh)
-
-**After making any changes, always SCP the modified files to the remote server.**
-
-The remote server is accessed via the `mcssh` alias (`mcshell.atomos.network`).
-Project lives at `/mnt/storage/NAS/Jarvis/` with a symlink `~/cmd → /mnt/storage/NAS/Jarvis`.
-Git remote: `http://10.0.0.58:3000/Grindlewalt/Jarvis.git`
-
-Only `server.py` is root-owned — it must be staged via `/tmp/` then `sudo cp`'d. All other files can be SCP'd directly to `~/cmd/`.
+## SSH / Deployment
 
 ```bash
-SCP_OPTS="-i ~/.ssh/mcssh -o 'ProxyCommand=cloudflared access ssh --hostname mcshell.atomos.network'"
+# SSH alias
+mcssh   =   ssh -i ~/.ssh/mcssh -o 'ProxyCommand=cloudflared access ssh --hostname ssh.atomos.network' Grindlewalt@mcshell.atomos.network
 
-# server.py only — stage via /tmp/
+SCP_OPTS="-i ~/.ssh/mcssh -o 'ProxyCommand=cloudflared access ssh --hostname ssh.atomos.network'"
+
+# server.py — root-owned, must stage via /tmp/
 scp $SCP_OPTS server.py Grindlewalt@mcshell.atomos.network:/tmp/
-mcssh "sudo cp /tmp/server.py ~/cmd/"
+mcssh "sudo cp /tmp/server.py /mnt/storage/NAS/Jarvis/server.py && sudo cp /tmp/server.py /mnt/storage/NAS/Jarvis/cmd/server.py"
 
-# All other files — copy directly
-scp $SCP_OPTS ollama_agent_core.py react_tools.py task_chain.py Grindlewalt@mcshell.atomos.network:~/cmd/
+# All other cmd/ files — SCP directly to subpackage paths
+scp $SCP_OPTS cmd/core/ollama_agent_core.py Grindlewalt@mcshell.atomos.network:/mnt/storage/NAS/Jarvis/cmd/core/
+scp $SCP_OPTS cmd/core/react_tools.py Grindlewalt@mcshell.atomos.network:/mnt/storage/NAS/Jarvis/cmd/core/
+scp $SCP_OPTS cmd/chain/task_chain.py Grindlewalt@mcshell.atomos.network:/mnt/storage/NAS/Jarvis/cmd/chain/
+scp $SCP_OPTS cmd/blueteam/blueteam_agent.py Grindlewalt@mcshell.atomos.network:/mnt/storage/NAS/Jarvis/cmd/blueteam/
 ```
 
 ## Git Workflow
 
 ```bash
-# On the server (~/cmd is symlinked to /mnt/storage/NAS/Jarvis)
-cd ~/cmd
-git add ollama_agent_core.py react_tools.py   # or specific files
-git commit -m "description of change"
-git push
+# Commit from the Jarvis root (git root is there)
+mcssh "cd /mnt/storage/NAS/Jarvis && git add -A && git commit -m 'description' && git push"
+
+# server.py is now user-owned after sudo cp — git add works without sudo
 ```
 
-Note: `server.py` is root-owned so `git add server.py` must be run as root or the file needs to be chowned first.
+Git remote: `http://10.0.0.58:3000/Grindlewalt/Jarvis.git`
 
-## REST API Endpoints
+## Architecture Notes
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/health` | Service health check |
-| POST | `/api/v1/execute` | Submit a job (`{"instruction": "..."}`) |
-| GET | `/api/v1/jobs/<job_id>` | Get job status and output |
-| GET | `/api/v1/jobs/<job_id>/stream` | Stream output via SSE |
-| GET | `/api/v1/jobs` | List all jobs |
-| DELETE | `/api/v1/jobs/<job_id>` | Cancel a job |
-| GET | `/api/v1/config` | Get service configuration |
-| POST | `/api/v1/chains` | Decompose + run a multi-phase goal (`{"goal": "...", "total_budget": 200}`) |
-| GET | `/api/v1/chains/<chain_id>` | Full chain state + subtask statuses |
-| GET | `/api/v1/chains` | List all chains |
-| DELETE | `/api/v1/chains/<chain_id>` | Cancel a chain |
+- `server.py` adds `cmd/`, `cmd/core/`, `cmd/chain/`, `cmd/blueteam/`, `cmd/infra/` to sys.path — all flat imports inside modules continue working without changes
+- Fast model: `qwen2.5-coder:14b` (ReAct loop, 60s timeout)
+- Heavy model: `qwen3-coder:30b` (create_file/patch_file content, 300s timeout)
+- Service port: `5000`, no auth (local network)
+- SENTINEL auto-watch: disabled at boot, triggered by cron at 3 AM daily
+- Daily report: `~/.agent_bin/sentinel_report.md`, archives in `~/.agent_bin/sentinel_archive/`

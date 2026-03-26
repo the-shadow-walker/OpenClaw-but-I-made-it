@@ -1,0 +1,466 @@
+openapi: 3.0.3
+info:
+  title: Swarm 3 API
+  description: |
+    Multi-agent AI research and computation system.
+    Answers complex questions via parallel web search, deterministic math, and validated synthesis.
+
+    **Auth:** Set `SWARM_API_KEY` env var on the server to enable Bearer token auth.
+    Protected endpoints require `Authorization: Bearer <token>`.
+    Leave unset for no auth (dev/local).
+  version: 2.1.0
+  contact:
+    name: Swarm 3
+
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+
+security: []   # default: no auth (overridden per-endpoint when key is set)
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+
+  schemas:
+    # ── Jobs ──────────────────────────────────────────────────────────────────
+    Job:
+      type: object
+      properties:
+        question:      { type: string }
+        status:        { type: string, enum: [pending, processing, completed, failed] }
+        answer:        { type: string, nullable: true }
+        progress:      { type: string }
+        error:         { type: string, nullable: true }
+        created_at:    { type: string, format: date-time }
+        completed_at:  { type: string, format: date-time, nullable: true }
+        callback_url:  { type: string, nullable: true }
+
+    JobResult:
+      allOf:
+        - $ref: '#/components/schemas/Job'
+        - type: object
+          properties:
+            job_id: { type: string }
+
+    # ── Project session ───────────────────────────────────────────────────────
+    QAResponse:
+      type: object
+      required: [session_id, state, question, type]
+      properties:
+        session_id:      { type: string }
+        state:           { type: string, enum: [qa] }
+        qa_count:        { type: integer }
+        question:        { type: string }
+        type:            { type: string, enum: [text, choice, multi] }
+        options:         { type: array, items: { type: string } }
+        recommendation:  { type: string }
+        key:             { type: string }
+
+    DoneResponse:
+      type: object
+      required: [session_id, state, result_markdown]
+      properties:
+        session_id:       { type: string }
+        state:            { type: string, enum: [done] }
+        result_markdown:  { type: string }
+        requirements:
+          type: object
+          nullable: true
+          properties:
+            requirements:          { type: object, additionalProperties: { type: string } }
+            component_categories:  { type: array, items: { type: string } }
+            engineering_decisions: { type: object, additionalProperties: { type: string } }
+            safety_factor:         { type: number }
+            notes:                 { type: string }
+
+    ProjectSessionFull:
+      type: object
+      properties:
+        session_id:       { type: string }
+        state:            { type: string, enum: [qa, done] }
+        specs:            { type: object }
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              question: { type: string }
+              answer:   { type: string }
+        pending_question: { type: object, nullable: true }
+        qa_count:         { type: integer }
+        result_markdown:  { type: string, nullable: true }
+        requirements:     { type: object, nullable: true }
+        created_at:       { type: number }
+        updated_at:       { type: number }
+
+    # ── Errors ────────────────────────────────────────────────────────────────
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    BusyError:
+      type: object
+      required: [error, retry_after]
+      properties:
+        error:       { type: string, example: Server busy }
+        retry_after: { type: integer, example: 30 }
+
+
+paths:
+  # ── Health / Status (open) ──────────────────────────────────────────────────
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      tags: [Monitoring]
+      responses:
+        '200':
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:                 { type: string, example: healthy }
+                  timestamp:              { type: string, format: date-time }
+                  orchestrator_available: { type: boolean }
+                  auth_enabled:           { type: boolean }
+
+  /status:
+    get:
+      summary: Server status and job counts
+      operationId: getStatus
+      tags: [Monitoring]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:       { type: string }
+                  orchestrator: { type: boolean }
+                  jobs:
+                    type: object
+                    properties:
+                      pending:    { type: integer }
+                      processing: { type: integer }
+                      completed:  { type: integer }
+                      failed:     { type: integer }
+                      running:    { type: integer }
+                  config:
+                    type: object
+                    properties:
+                      max_concurrent: { type: integer }
+                      searxng:        { type: boolean }
+                      auth_enabled:   { type: boolean }
+
+  /jobs:
+    get:
+      summary: List all jobs
+      operationId: listJobs
+      tags: [Jobs]
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  jobs:
+                    type: array
+                    items: { $ref: '#/components/schemas/Job' }
+
+  /result/{job_id}:
+    get:
+      summary: Get async job result
+      operationId: getResult
+      tags: [Jobs]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+          example: a1b2c3d4
+      responses:
+        '200':
+          description: Job found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobResult' }
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /project/session/{session_id}:
+    get:
+      summary: Get full project session state
+      operationId: getProjectSession
+      tags: [Project]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectSessionFull' }
+        '404':
+          description: Session not found or expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: project_session.py not installed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ── Protected endpoints ─────────────────────────────────────────────────────
+  /query:
+    post:
+      summary: Synchronous query (blocking)
+      operationId: querySynchronous
+      tags: [Query]
+      security:
+        - BearerAuth: []
+        - {}        # also allow unauthenticated when SWARM_API_KEY not set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  example: What is the specific impulse of Raptor 2?
+                since:
+                  type: string
+                  enum: [day, week, month, year]
+                  description: Optional date filter for search results
+            example:
+              question: What is the specific impulse of Raptor 2?
+              since: month
+      responses:
+        '200':
+          description: Answer ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question:  { type: string }
+                  answer:    { type: string }
+                  timestamp: { type: string, format: date-time }
+        '400':
+          description: No question provided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Missing/malformed auth header
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Server busy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BusyError' }
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /query_async:
+    post:
+      summary: Asynchronous query (returns job_id immediately)
+      operationId: queryAsync
+      tags: [Query]
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  example: Explain quantum entanglement
+                since:
+                  type: string
+                  enum: [day, week, month, year]
+                callback_url:
+                  type: string
+                  format: uri
+                  description: Optional URL to POST the result when the job completes
+                  example: https://your-server/webhook
+            example:
+              question: Explain quantum entanglement
+              callback_url: https://your-server/webhook
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:       { type: string }
+                  question:     { type: string }
+                  status:       { type: string, enum: [pending] }
+                  timestamp:    { type: string, format: date-time }
+                  callback_url: { type: string, nullable: true }
+        '400':
+          description: No question provided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Missing/malformed auth header
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Server busy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BusyError' }
+
+  /project/start:
+    post:
+      summary: Start a new project Q&A session
+      operationId: projectStart
+      tags: [Project]
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description]
+              properties:
+                description:
+                  type: string
+                  example: a GPS weather station with solar charging
+            example:
+              description: a GPS weather station with solar charging
+      responses:
+        '201':
+          description: Session created — first question returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QAResponse' }
+        '400':
+          description: No description provided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Missing/malformed auth header
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: project_session.py not available
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /project/respond:
+    post:
+      summary: Answer the current pending project question
+      operationId: projectRespond
+      tags: [Project]
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, answer]
+              properties:
+                session_id:
+                  type: string
+                  example: abc123def456
+                answer:
+                  type: string
+                  example: Outdoor field monitoring
+            example:
+              session_id: abc123def456
+              answer: Outdoor field monitoring
+      responses:
+        '200':
+          description: Next question or completion
+          content:
+            application/json:
+              oneOf:
+                - $ref: '#/components/schemas/QAResponse'
+                - $ref: '#/components/schemas/DoneResponse'
+        '400':
+          description: No session_id provided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Missing/malformed auth header
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Session not found or expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: project_session.py not available
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+tags:
+  - name: Monitoring
+    description: Health and status endpoints
+  - name: Jobs
+    description: Async job management
+  - name: Query
+    description: Research query endpoints
+  - name: Project
+    description: Interactive project assistant sessions
