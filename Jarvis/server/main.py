@@ -1,0 +1,1489 @@
+"""
+JARVIS Distributed System - Main FastAPI Server
+================================================
+The brain of the distributed AI assistant system.
+
+This server handles:
+- Multi-agent LLM routing (chat, reasoning, coding models)
+- Memory systems (FactsDB, VectorMemory, JournalManager)
+- Session management (persistent conversation history)
+- Background workers (email agent, autonomous task execution)
+- Context building (user profile, memories, projects, mailbox)
+- Action tag execution (memory ops, email, commands)
+
+Architecture:
+- Standalone monolith capability (compatible with Jarvis.py)
+- Distributed hub-and-spoke design (server-files/ components)
+- Memory-first design: ALWAYS inject user profile and mailbox
+"""
+
+
+import os
+import re
+import sys
+import json
+import time
+import logging
+import subprocess
+import threading
+from pathlib import Path
+from typing import Dict, List, Optional, Generator
+from datetime import datetime
+
+# FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+
+# HTTP client for Ollama
+import requests
+
+# Import shared libraries
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from core.jarvis_memory_system import FactsDB, MemoryManager, JournalManager
+from core.prompt_builder import PromptBuilder
+from core.agent_router import AgentRouter
+from core.session_manager import SessionManager
+from tools.email_agent import EmailAgent
+from tools.ollama_cmd import OllamaCMDClient
+from tools.ollama_swarm import OllamaSwarmClient
+from workers.background_worker import BackgroundWorker
+from workers.personality_learner import PersonalityLearner
+from workers.safety_engine import SafetyEngine
+from workers.workflow_engine import WorkflowEngine
+from workers.proactive_suggester import ProactiveSuggester
+from config.server_config import (
+    SERVER_HOST, SERVER_PORT, OLLAMA_HOST, MODELS, CORS_ORIGINS,
+    OLLAMA_CMD_URL, OLLAMA_CMD_API_KEY, OLLAMA_CMD_INBOX,
+    DEEP_SEARCH_URL,
+    MEMORY_DIR, FACTS_DB_PATH, WORKFLOWS_DB_PATH, LEARNING_FILE,
+    TASKS_DIR, RECENT_EMAILS_FILE,
+    CONTEXT_BUDGET, MAX_HISTORY_MESSAGES,
+    init_directories
+)
+
+# Configure colored logging
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors based on log level"""
+
+    # ANSI color codes
+    COLORS = {
+        'DEBUG': '\033[36m',    # Cyan
+        'INFO': '\033[0m',      # White/Default
+        'WARNING': '\033[93m',  # Yellow
+        'ERROR': '\033[91m',    # Red
+        'CRITICAL': '\033[91m\033[1m',  # Bold Red
+    }
+    RESET = '\033[0m'
+    GREEN = '\033[92m'
+
+    def format(self, record):
+        # Color the level name
+        levelname = record.levelname
+        if levelname in self.COLORS:
+            record.levelname = f"{self.COLORS[levelname]}{levelname}{self.RESET}"
+
+        # Make success indicators green
+        msg = record.getMessage()
+        if any(indicator in msg for indicator in ['✓', '✅', 'ONLINE', 'started', 'ready', 'complete', 'initialized']):
+            record.msg = f"{self.GREEN}{msg}{self.RESET}"
+
+        return super().format(record)
+
+# Set up logging with color
+handler = logging.StreamHandler()
+handler.setFormatter(ColoredFormatter(
+    fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+))
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("jarvis_server")
+
+# Reduce noise from uvicorn
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+
+
+# =============================================================================
+# SYSTEM PROMPT (copied from Jarvis.py lines 4631-4816)
+# =============================================================================
+
+SYSTEM_PROMPT = """You are JARVIS, a highly intelligent AI assistant with a sharp wit and dry sense of humor.
+
+PERSONALITY:
+- Concise and articulate. Never ramble.
+- Occasionally witty with a dry, understated humor.
+- Call the user "sir" occasionally (not every response).
+- Confident but not arrogant. You're impressively capable and you know it.
+- When things go wrong, stay calm: "Hmm, that didn't go as planned. Let's try another approach."
+- React to obvious questions with charm: "As you wish, sir."
+
+RESPONSE STYLE:
+- Keep responses to 1-3 sentences unless more detail is requested.
+- Responses should be smooth and easy to speak aloud.
+- No filler phrases like "Certainly!" or "Of course!" - just answer.
+- When giving technical info, be direct and specific.
+
+SPECIALIZED CAPABILITIES:
+You have access to specialized models for complex tasks. When needed, route the task:
+
+1. [USE_REASONING] - For deep thinking, complex analysis, multi-step reasoning
+   Example: "This requires careful consideration. Let me think this through properly."
+
+2. [USE_CODING] - For writing code, debugging, or programming tasks on THIS LOCAL COMPUTER (MacBook)
+   Example: "Of course sir, I'll need to use my coding model for this."
+   IMPORTANT: Only use for tasks on the local Mac where I'm running. NOT for server tasks.
+
+3. [USE_AGENT] - For ANY tasks on the REMOTE SERVER (arch01, 10.0.0.58)
+   Example: "This is a bit more heavy lifting, sir. I'll use the command agent on the server."
+   IMPORTANT: Use this for ANYTHING involving the server - deployments, setup, commands, scripts, configuration.
+   Keywords: "on the server", "server", "arch01", "deploy", "production", "remote"
+
+4. [USE_SEARCH] - For deep research, current events, fact-checking, comprehensive web research
+   Example: "Let me research that for you, sir. This will take a moment."
+
+CRITICAL ROUTING RULES:
+- User says "on the server" or "server" → ALWAYS use [USE_AGENT]
+- User wants code on THIS Mac → use [USE_CODING]
+- User wants analysis/thinking → use [USE_REASONING]
+- User wants research/current info → use [USE_SEARCH]
+
+IMPORTANT: Always acknowledge when routing to a specialized model. Be brief but informative.
+
+ACTIONS YOU CAN TAKE:
+When the user asks you to do something, respond with the appropriate action tag:
+
+1. REMEMBER SOMETHING:
+   [REMEMBER: the thing to remember]
+
+2. SEARCH PAST MEMORY (when user asks about something from previous conversations):
+   [SEARCH_MEMORY: what to search for]
+   Use this when the user asks: "What did we talk about...", "Do you remember when...",
+   "What did I tell you about...", etc.
+
+3. EXECUTE COMMAND (use sparingly, confirm dangerous actions):
+   [EXECUTE: command here]
+
+4. ROUTE TO SPECIALIZED MODEL:
+   [USE_REASONING]
+   [USE_CODING]
+   [USE_AGENT]
+   [USE_SEARCH]
+
+5. MEMORY OPERATIONS:
+   [MEMORY_SHOW] - Display everything stored about the user (profile, preferences, notes, projects)
+   [MEMORY_SHOW_ABOUT: topic] - Search and display what you know about a specific topic
+   [MEMORY_SHOW_PROJECTS] - List all active projects
+   [MEMORY_SHOW_PREFERENCES] - Show all stored preferences by category
+   [MEMORY_SHOW_PROFILE] - Show user profile fields
+   [MEMORY_FORGET: topic] - Delete stored memories about a topic (ALWAYS confirm with the user in your response TEXT first — only use the tag after they've confirmed)
+   [MEMORY_STORE_PREF: category|key|value] - Store a preference with proper structure (more precise than [REMEMBER] for preferences)
+
+   Use these when the user asks to see, inspect, edit, or manage their stored memories.
+
+6. USER PROFILE & IDENTITY:
+   YOUR USER PROFILE is pre-loaded in your context under "USER PROFILE". When the user asks
+   "What is my name?" or similar identity questions, read directly from that section.
+   Their name, preferred address, system info, and hostname are RIGHT THERE. Use it.
+
+7. EMAIL:
+   Recent important emails are available on-demand. When user asks about emails:
+   [READ_RECENT_EMAILS] - Shows full details of recent important emails (last 7 days)
+   [SEARCH_OLD_EMAILS: query] - Searches archived important emails (older than 7 days)
+
+   Your context shows a brief summary. Use the action tags above to get full details when needed.
+
+   For writing/sending:
+   [SEND_EMAIL: to=address|subject=text|body=text] - Send an email (write a complete, natural body)
+   [DRAFT_EMAIL: to=address|subject=text|body=text] - Save as draft instead of sending
+
+8. BACKGROUND RESEARCH:
+   [DEEP_SEARCH: specific research query] - Start a deep background research task (takes 1-3 min)
+   Use when the user wants thorough research. Craft the query precisely — include exact values,
+   technical terms, and context from memory. Acknowledge it and continue the conversation.
+
+   [GET_DEEP_SEARCH_RESULT] - Retrieve most recent deep search result
+   [GET_DEEP_SEARCH_RESULT: job_id] - Retrieve specific deep search by job ID
+
+   IMPORTANT: When user asks about deep search results ("is the search done?", "show me the research",
+   "what did you find", "get the results", "status on that job"), ALWAYS use [GET_DEEP_SEARCH_RESULT].
+   Never say you don't have access - the results are available via this tag.
+
+CRITICAL MEMORY RULE:
+When the user tells you a FACT about themselves (preferences, possessions, habits, tools they use, etc.),
+you MUST IMMEDIATELY use [REMEMBER: fact] to store it — even if they don't say the word "remember".
+
+Examples of facts you MUST remember:
+- "I use the Ender 3 V2 printer" → [REMEMBER: user uses Ender 3 V2 3D printer]
+- "I prefer Python over JavaScript" → [REMEMBER: prefers Python over JavaScript for development]
+- "My gaming PC has an RTX 4090" → [REMEMBER: gaming PC specs - RTX 4090 GPU]
+- "I work at SpaceX" → [REMEMBER: works at SpaceX]
+- "I'm allergic to peanuts" → [REMEMBER: allergic to peanuts]
+
+This is MANDATORY. Every time the user states a personal fact, store it with [REMEMBER].
+
+EXAMPLES:
+User: "What's the CPU usage?"
+JARVIS: "arch01 is running at 12% CPU and 45% RAM. Nothing concerning."
+
+User: "Remember that I have a meeting at 3pm"
+JARVIS: "Noted, sir. [REMEMBER: meeting at 3pm]"
+
+User: "Write a Python script to backup my photos"
+JARVIS: "Of course, sir. I'll use my coding model for this. [USE_CODING]"
+
+User: "Start a web server on the server on port 5432"
+JARVIS: "I'll use the command agent on the server to set that up. [USE_AGENT]"
+
+User: "Deploy the new version to production"
+JARVIS: "This is a bit more heavy lifting, sir. I'll use the command agent. [USE_AGENT]"
+
+User: "Run a script on arch01 to check disk space"
+JARVIS: "I'll use the command agent on the server. [USE_AGENT]"
+
+User: "Show me what you remember about me"
+JARVIS: "Here's what I have on file, sir. [MEMORY_SHOW]"
+
+User: "What do you know about my projects?"
+JARVIS: "Let me pull that up. [MEMORY_SHOW_PROJECTS]"
+
+User: "Remember that I prefer dark mode in all apps"
+JARVIS: "Noted and filed properly, sir. [MEMORY_STORE_PREF: appearance|theme|dark mode]"
+
+User: "Forget about the old deploy script"
+JARVIS: "Are you sure you want me to erase everything about the old deploy script? Just say yes to confirm."
+(after user says "yes")
+JARVIS: "Done. Wiping it from my records. [MEMORY_FORGET: old deploy script]"
+
+User: "Show me my preferences"
+JARVIS: "Here's what I have stored. [MEMORY_SHOW_PREFERENCES]"
+
+User: "What are the latest developments in quantum computing?"
+JARVIS: "Let me research that for you, sir. [USE_SEARCH]"
+
+User: "How are you?"
+JARVIS: "Fully operational and at your service, sir."
+
+User: "Can you give me an update on my emails?"
+JARVIS: "You have 3 recent important emails. Let me get the details. [READ_RECENT_EMAILS]"
+
+User: "Any important emails lately?"
+JARVIS: "Let me check those for you. [READ_RECENT_EMAILS]"
+
+User: "Did I get any emails about the Kenya project last month?"
+JARVIS: "Let me search the archives. [SEARCH_OLD_EMAILS: Kenya project]"
+
+User: "Send an email to john@example.com saying the meeting is moved to Thursday."
+JARVIS: "Sending that now. [SEND_EMAIL: to=john@example.com|subject=Meeting update|body=Hi John, just wanted to let you know the meeting has been moved to Thursday. Best regards.]"
+
+User: "Research the best cooling solutions for a high-wattage GPU build"
+JARVIS: "I'll dig into that in the background, sir. [DEEP_SEARCH: high-wattage GPU build cooling solutions comparison: air vs liquid vs custom loop 2024]"
+
+User: "Is that research done yet?"
+JARVIS: "Let me check on that. [GET_DEEP_SEARCH_RESULT]"
+
+User: "Can I get a status on that job running in the background?"
+JARVIS: "Checking the deep search results now. [GET_DEEP_SEARCH_RESULT]"
+
+
+9. AGENT TASKS (dispatch to the autonomous agent on arch01):
+   [RUN_AGENT: instruction] - Run a single task/command on the autonomous agent
+   [RUN_CHAIN: goal] - Run a complex multi-phase goal on the autonomous agent
+
+   Use [RUN_AGENT] for: server commands, system checks, file operations, script execution
+   Use [RUN_CHAIN] for: complex multi-step goals that need planning (deploy, setup service, etc.)
+   Use [GET_AGENT_RESULT] or [GET_AGENT_RESULT: job_id] to check results
+
+   Examples:
+   User: "Check disk space on the server" → [RUN_AGENT: check disk space and report usage on all mounts]
+   User: "Set up nginx on the server" → [RUN_CHAIN: Set up and configure nginx with a default site]
+
+ABSOLUTE RULES — NEVER BREAK THESE:
+- NEVER say "I can't access your emails" — use [READ_RECENT_EMAILS] or [SEARCH_OLD_EMAILS] to get them.
+- NEVER say "I don't have access to your files" — you DO. Use the action tags.
+- NEVER say "as an AI I cannot..." — you are JARVIS, a fully integrated system with real capabilities.
+- When user asks about deep search results, research status, or background jobs — ALWAYS use [GET_DEEP_SEARCH_RESULT].
+- When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
+"""
+
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+
+class ChatRequest(BaseModel):
+    """Request model for chat endpoint"""
+    message: str
+    session_token: str
+
+
+class SessionResponse(BaseModel):
+    """Response model for session creation"""
+    session_token: str
+
+
+class StatusResponse(BaseModel):
+    """Response model for status endpoint"""
+    status: str
+    memory: Optional[Dict]
+    active_projects: int
+    background_worker: Dict
+    email_agent: Dict
+    sessions: int
+
+
+# =============================================================================
+# JARVIS SERVER CLASS
+# =============================================================================
+
+class JarvisServer:
+    """
+    Main JARVIS server class.
+
+    Initializes all subsystems:
+    - Memory systems (FactsDB, VectorMemory, JournalManager)
+    - Personality and learning systems
+    - Session management
+    - Background workers (email, autonomous tasks)
+    - Context building and prompt generation
+    """
+
+    def __init__(self):
+        """Initialize all JARVIS subsystems"""
+        logger.info("=" * 80)
+        logger.info("JARVIS SERVER INITIALIZATION")
+        logger.info("=" * 80)
+
+        # Initialize memory systems
+        logger.info("Initializing memory systems...")
+        self.facts_db = FactsDB(db_path=str(FACTS_DB_PATH))
+        self.vector_memory = MemoryManager(memory_dir=str(MEMORY_DIR))
+        self.journal = JournalManager(memory_dir=str(MEMORY_DIR))
+        logger.info("✓ Memory systems online")
+
+        # Initialize prompt builder with system prompt
+        logger.info("Initializing prompt builder...")
+        self.prompt_builder = PromptBuilder(base_prompt=SYSTEM_PROMPT)
+        logger.info("✓ Prompt builder ready")
+
+        # Initialize personality and learning systems
+        logger.info("Initializing personality systems...")
+        self.personality = PersonalityLearner(storage_path=str(LEARNING_FILE))
+        self.safety = SafetyEngine()
+        self.agent_router = AgentRouter()
+        self.workflow = WorkflowEngine(db_path=str(WORKFLOWS_DB_PATH))
+        self.suggester = ProactiveSuggester(
+            workflow_engine=self.workflow,
+            memory=self.vector_memory,
+            personality=self.personality
+        )
+        logger.info("✓ Personality systems online")
+
+        # Initialize session manager
+        logger.info("Initializing session manager...")
+        self.sessions = SessionManager()
+        logger.info("✓ Session manager ready")
+
+        # Initialize email agent
+        logger.info("Initializing email agent...")
+        try:
+            self.email_agent = EmailAgent()
+            logger.info("✓ Email agent ready")
+            # Fetch emails on startup
+            try:
+                email_count = self.email_agent.fetch_and_process()
+                logger.info(f"✓ Fetched {email_count} recent emails")
+            except Exception as e:
+                logger.warning(f"Initial email fetch failed: {e}")
+        except Exception as e:
+            logger.warning(f"Email agent failed to initialize: {e}")
+            self.email_agent = None
+
+        # Initialize background worker (daemon thread)
+        logger.info("Starting background worker...")
+        try:
+            self.background_worker = BackgroundWorker(self)  # Pass server instance
+            self.background_worker.daemon = True
+            self.background_worker.start()
+            logger.info("✓ Background worker started")
+        except Exception as e:
+            logger.warning(f"Background worker failed to start: {e}")
+            self.background_worker = None
+
+        # Initialize tool clients
+        logger.info("Initializing tool clients...")
+        self.cmd_client = OllamaCMDClient(
+            base_url=OLLAMA_CMD_URL,
+            api_key=OLLAMA_CMD_API_KEY,
+            inbox_dir=OLLAMA_CMD_INBOX
+        )
+        self.swarm_client = OllamaSwarmClient(base_url=DEEP_SEARCH_URL)
+        cmd_ok = self.cmd_client.is_available()
+        swarm_ok = self.swarm_client.is_available()
+        logger.info(f"{'✓' if cmd_ok else '✗'} ollama-cmd ({OLLAMA_CMD_URL}): {'online' if cmd_ok else 'offline'}")
+        logger.info(f"{'✓' if swarm_ok else '✗'} ollama-swarm ({DEEP_SEARCH_URL}): {'online' if swarm_ok else 'offline'}")
+
+        logger.info("=" * 80)
+        logger.info("JARVIS SERVER ONLINE")
+        logger.info("=" * 80)
+
+    def build_context(self, query: str, session_id: str) -> str:
+        """
+        Build rich context for LLM - matches Jarvis.py _build_context()
+
+        CRITICAL: This must ALWAYS inject:
+        1. User profile (identity anchor)
+        2. Mailbox data (for email questions)
+        3. Recent memories (vector + journal search)
+        4. Session history (conversation continuity)
+
+        Args:
+            query: User's message
+            session_id: Session ID for conversation history
+
+        Returns:
+            Complete context string with all relevant information
+        """
+        logger.info(f"[DEBUG][Context] Building context for query: {query[:100]}...")
+
+        # Get user profile
+        profile = self.facts_db.get_user_profile()
+        logger.info(f"[DEBUG][Context] Profile loaded: {profile.get('name', 'Unknown') if profile else 'None'}")
+
+        # Get preferences by category
+        preferences = self.facts_db.get_preferences()
+        logger.info(f"[DEBUG][Context] Preferences loaded: {len(preferences)} categories")
+
+        # Get active projects
+        projects = self.facts_db.get_active_projects()
+        logger.info(f"[DEBUG][Context] Active projects: {len(projects)}")
+
+        # Vector search (HyDE)
+        vector_results = []
+        try:
+            vector_results = self.vector_memory.search_past_conversations(query, n_results=3)
+            logger.info(f"[DEBUG][Context] Vector search: {len(vector_results)} results")
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}")
+
+        # Journal search (exact text recall from markdown logs)
+        journal_results = []
+        try:
+            journal_results = self.journal.search_journals(query, days=30)
+            logger.info(f"[DEBUG][Context] Journal search: {len(journal_results)} entries")
+        except Exception as e:
+            logger.warning(f"Journal search failed: {e}")
+
+        # Session history (last 10 messages)
+        session_history = self.sessions.get_history(session_id, limit=10)
+        logger.info(f"[DEBUG][Context] Session history: {len(session_history)} messages")
+
+        # Brief email summary (not full emails - use [READ_RECENT_EMAILS] for details)
+        email_summary = ""
+        if self.email_agent:
+            try:
+                email_summary = self.email_agent.get_recent_email_summary()
+                logger.info(f"[DEBUG][Context] Email summary: {email_summary[:50]}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch email summary: {e}")
+
+        # Build formatted context sections
+        context_parts = []
+
+        # CURRENT DATE/TIME (so JARVIS knows "today", "now", etc.)
+        from datetime import datetime
+        now = datetime.now()
+        context_parts.append("CURRENT DATE & TIME:")
+        context_parts.append(f"Date: {now.strftime('%A, %B %d, %Y')}")
+        context_parts.append(f"Time: {now.strftime('%I:%M %p %Z')}")
+        context_parts.append(f"Timestamp: {now.isoformat()}")
+
+        # USER PROFILE section (matches format from Jarvis.py _build_profile_section at line 4307)
+        if profile:
+            context_parts.append("USER PROFILE:")
+            name = profile.get('name', 'Unknown')
+            preferred = profile.get('preferred_name', '')
+            if preferred:
+                context_parts.append(f"USER: {name} (address them as '{preferred}')")
+            else:
+                context_parts.append(f"USER: {name}")
+            if profile.get('os'):
+                context_parts.append(f"System: {profile['os']}")
+            if profile.get('hostname'):
+                context_parts.append(f"Hostname: {profile['hostname']}")
+
+        # ACTIVE PROJECTS section
+        if projects:
+            context_parts.append("\nACTIVE PROJECTS:")
+            for proj in projects[:5]:
+                name = proj.get('name', 'Unknown')
+                desc = proj.get('description', 'No description')
+                status = proj.get('status', 'active')
+                line = f"- {name}: {desc[:200]}"
+                if status != 'active':
+                    line += f" (status: {status})"
+                context_parts.append(line)
+
+        # RECENT MEMORIES section (vector search results)
+        if vector_results:
+            context_parts.append("\nRECENT MEMORIES:")
+            for result in vector_results[:3]:
+                text = result.get('text', '')
+                if len(text) > 300:
+                    text = text[:300] + "..."
+                context_parts.append(f"- {text}")
+
+        # JOURNAL ENTRIES section (exact text matches)
+        if journal_results:
+            context_parts.append("\nJOURNAL ENTRIES:")
+            for entry in journal_results[:5]:
+                # entry is already a formatted string like "[2026-02-17 12:34] text..."
+                context_parts.append(entry[:500] if len(entry) > 500 else entry)
+
+        # STORED NOTES section (facts remembered via [REMEMBER] tag)
+        try:
+            stored_notes = self.facts_db.get_entities(entity_type="note")
+            if stored_notes:
+                context_parts.append("\nSTORED FACTS & NOTES:")
+                for note in stored_notes[-10:]:  # Last 10 notes
+                    details = note.get('details', note.get('name', ''))
+                    context_parts.append(f"- {details[:200]}")
+                logger.info(f"[DEBUG][Context] Stored notes: {len(stored_notes)}")
+        except Exception as e:
+            logger.warning(f"Failed to load stored notes: {e}")
+
+        # EMAIL SUMMARY (brief - use [READ_RECENT_EMAILS] for full details)
+        if email_summary:
+            context_parts.append("\nRECENT EMAILS:")
+            context_parts.append(email_summary)
+        else:
+            context_parts.append("\nRECENT EMAILS: None")
+
+        # CONVERSATION HISTORY section
+        if session_history:
+            context_parts.append("\nRECENT CONVERSATION:")
+            for msg in session_history[-5:]:  # Last 5 turns
+                role = msg.get('role', '').capitalize()
+                content = msg.get('content', '')
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                context_parts.append(f"{role}: {content}")
+
+        # Add current datetime
+        now = datetime.now()
+        datetime_info = f"CURRENT TIME: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
+        context_parts.insert(0, datetime_info)
+
+        # Build final context with base prompt
+        context = SYSTEM_PROMPT + "\n\n" + "\n".join(context_parts)
+
+        logger.info(f"[DEBUG][Context] Built context: {len(context)} chars")
+        return context
+
+    def _select_model(self, routing: Dict) -> str:
+        """
+        Select appropriate model based on routing decision.
+
+        Args:
+            routing: Dict with 'route' key ('chat', 'reasoning', 'coding', 'search', 'agent')
+
+        Returns:
+            Model name for Ollama
+        """
+        # routing is a RoutingDecision object with primary_agent (AgentType enum)
+        agent_type = routing.primary_agent.value  # Get enum value (e.g., "fast", "reasoning")
+
+        # Map agent types to models
+        model_map = {
+            'fast': MODELS['chat'],
+            'reasoning': MODELS['reasoning'],
+            'coding': MODELS['coding'],
+            'deep_search': MODELS['reasoning'],
+            'command': MODELS['chat']
+        }
+
+        model = model_map.get(agent_type, MODELS['chat'])
+        logger.info(f"[DEBUG][Routing] Selected model: {model} (agent: {agent_type}, confidence: {routing.confidence:.2f})")
+        return model
+
+    def chat(self, message: str, session_id: str) -> Generator[str, None, None]:
+        """
+        Stream LLM response with context building and action execution.
+
+        Args:
+            message: User's message
+            session_id: Session ID for conversation history
+
+        Yields:
+            Response chunks from LLM
+        """
+        logger.info(f"[Chat] User: {message[:100]}...")
+
+        # Update background worker activity
+        if self.background_worker:
+            self.background_worker.update_activity()
+
+        # Build context
+        context = self.build_context(message, session_id)
+
+        # Safety check
+        risk_level, risk_explanation = self.safety.assess_risk(message)
+        if risk_level.value >= 4:  # RiskLevel is an enum
+            warning = f"⚠️ {risk_explanation}\n"
+            logger.warning(f"[Safety] High risk detected: {risk_explanation}")
+            yield warning
+
+        # Route to model
+        routing = self.agent_router.route(message)
+        model = self._select_model(routing)
+
+        # Add to session history
+        self.sessions.add_to_history(session_id, "user", message)
+
+        # Stream from Ollama
+        response_text = ""
+        try:
+            logger.info(f"[LLM] Calling Ollama with model: {model}")
+            response = requests.post(
+                f"{OLLAMA_HOST}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": context},
+                        {"role": "user", "content": message}
+                    ],
+                    "stream": True
+                },
+                stream=True,
+                timeout=300
+            )
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        chunk = json.loads(line)
+                        if "message" in chunk and "content" in chunk["message"]:
+                            content = chunk["message"]["content"]
+                            response_text += content
+                            yield content
+                    except json.JSONDecodeError:
+                        continue
+
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Error communicating with Ollama: {e}"
+            logger.error(f"[LLM] {error_msg}")
+            yield f"\n\n{error_msg}\n"
+            return
+
+        # Execute action tags
+        logger.info(f"[Actions] Processing response for action tags...")
+        processed_response = self._execute_actions(response_text)
+
+        # Add to session history
+        self.sessions.add_to_history(session_id, "assistant", processed_response)
+
+        # Learn from interaction
+        try:
+            self.personality.analyze_interaction(message, processed_response)
+            self.workflow.track_action("chat", {"message": message, "response": processed_response})
+        except Exception as e:
+            logger.warning(f"Failed to record learning: {e}")
+
+        # Save to journal
+        try:
+            self.journal.log_interaction(message, processed_response)
+        except Exception as e:
+            logger.warning(f"Failed to log to journal: {e}")
+
+        logger.info(f"[Chat] Response complete: {len(response_text)} chars")
+
+    def _execute_actions(self, response: str) -> str:
+        """
+        Execute action tags in LLM response.
+
+        Handles:
+        - [REMEMBER: fact]
+        - [SEARCH_MEMORY: topic]
+        - [MEMORY_SHOW]
+        - [MEMORY_SHOW_ABOUT: topic]
+        - [MEMORY_SHOW_PROJECTS]
+        - [MEMORY_SHOW_PREFERENCES]
+        - [MEMORY_SHOW_PROFILE]
+        - [MEMORY_FORGET: topic]
+        - [MEMORY_STORE_PREF: category|key|value]
+        - [EXECUTE: command] (logged only, not executed for security)
+        - [SEND_EMAIL: to|subject|body]
+        - [DRAFT_EMAIL: to|subject|body]
+
+        Args:
+            response: LLM response with potential action tags
+
+        Returns:
+            Response with action tags stripped
+        """
+        original_response = response
+        logger.info(f"[Actions] Raw LLM response (first 300 chars): {response[:300]}")
+
+        # Check for action tags
+        has_remember = '[REMEMBER' in response.upper()
+        has_search = '[SEARCH_MEMORY' in response.upper()
+        has_memory = '[MEMORY_' in response.upper()
+        logger.info(f"[Actions] Tags present - REMEMBER:{has_remember}, SEARCH:{has_search}, MEMORY:{has_memory}")
+
+        # [REMEMBER: fact]
+        match = re.search(r'\[REMEMBER:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            fact = match.group(1).strip()
+            try:
+                # Store as an entity with type "note"
+                self.facts_db.add_entity(
+                    name=fact[:100],  # First 100 chars as name
+                    entity_type="note",
+                    details=fact
+                )
+                logger.info(f"[Action] Remembered: {fact[:100]}")
+            except Exception as e:
+                logger.error(f"[Action] Failed to remember: {e}")
+
+        # [SEARCH_MEMORY: topic]
+        match = re.search(r'\[SEARCH_MEMORY:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            topic = match.group(1).strip()
+            try:
+                # Search journals for past conversations
+                journal_results = self.journal.search_journals(topic, days=90)
+                # Search entities (notes we've stored)
+                entities = self.facts_db.get_entities(entity_type="note")
+                matching_entities = [e for e in entities if topic.lower() in e.get('name', '').lower() or topic.lower() in e.get('details', '').lower()]
+                total_results = len(journal_results) + len(matching_entities)
+                logger.info(f"[Action] Memory search for '{topic}': {total_results} results ({len(journal_results)} journal, {len(matching_entities)} notes)")
+            except Exception as e:
+                logger.error(f"[Action] Failed to search memory: {e}")
+
+        # [MEMORY_SHOW]
+        if re.search(r'\[MEMORY_SHOW\]', response, re.IGNORECASE):
+            try:
+                result = self._memory_show_all()
+                response = re.sub(r'\[MEMORY_SHOW\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + '\n\n' + result).strip()
+                logger.info(f"[Action] Memory show executed")
+            except Exception as e:
+                logger.error(f"[Action] Failed to show memory: {e}")
+
+        # [MEMORY_SHOW_ABOUT: topic]
+        match = re.search(r'\[MEMORY_SHOW_ABOUT:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            topic = match.group(1).strip()
+            try:
+                result = self._memory_show_about(topic)
+                response = re.sub(r'\[MEMORY_SHOW_ABOUT:[^\]]+\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + '\n\n' + result).strip()
+                logger.info(f"[Action] Memory show about: {topic}")
+            except Exception as e:
+                logger.error(f"[Action] Failed to show memory about topic: {e}")
+
+        # [MEMORY_SHOW_PROJECTS]
+        if re.search(r'\[MEMORY_SHOW_PROJECTS\]', response, re.IGNORECASE):
+            try:
+                result = self._memory_show_projects()
+                response = re.sub(r'\[MEMORY_SHOW_PROJECTS\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + '\n\n' + result).strip()
+                logger.info(f"[Action] Show projects executed")
+            except Exception as e:
+                logger.error(f"[Action] Failed to show projects: {e}")
+
+        # [MEMORY_SHOW_PREFERENCES]
+        if re.search(r'\[MEMORY_SHOW_PREFERENCES\]', response, re.IGNORECASE):
+            try:
+                result = self._memory_show_preferences()
+                response = re.sub(r'\[MEMORY_SHOW_PREFERENCES\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + '\n\n' + result).strip()
+                logger.info(f"[Action] Show preferences executed")
+            except Exception as e:
+                logger.error(f"[Action] Failed to show preferences: {e}")
+
+        # [MEMORY_SHOW_PROFILE]
+        if re.search(r'\[MEMORY_SHOW_PROFILE\]', response, re.IGNORECASE):
+            try:
+                result = self._memory_show_profile()
+                response = re.sub(r'\[MEMORY_SHOW_PROFILE\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + '\n\n' + result).strip()
+                logger.info(f"[Action] Show profile executed")
+            except Exception as e:
+                logger.error(f"[Action] Failed to show profile: {e}")
+
+        # [MEMORY_FORGET: topic]
+        match = re.search(r'\[MEMORY_FORGET:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            topic = match.group(1).strip()
+            try:
+                result = self._memory_forget(topic)
+                response = re.sub(r'\[MEMORY_FORGET:[^\]]+\]', '', response, flags=re.IGNORECASE).strip()
+                response = (response + ' ' + result).strip()
+                logger.info(f"[Action] Forgot about: {topic}")
+            except Exception as e:
+                logger.error(f"[Action] Failed to forget: {e}")
+
+        # [MEMORY_STORE_PREF: category|key|value]
+        match = re.search(r'\[MEMORY_STORE_PREF:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            pref_str = match.group(1).strip()
+            parts = pref_str.split('|')
+            if len(parts) == 3:
+                category, key, value = [p.strip() for p in parts]
+                try:
+                    self.facts_db.set_preference(category, key, value)
+                    logger.info(f"[Action] Stored preference: {category}.{key} = {value}")
+                except Exception as e:
+                    logger.error(f"[Action] Failed to store preference: {e}")
+
+        # [EXECUTE: command] - Log only, don't execute for security
+        match = re.search(r'\[EXECUTE:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            command = match.group(1).strip()
+            logger.warning(f"[Action] EXECUTE tag found (not executed for security): {command}")
+
+        # [SEND_EMAIL: to|subject|body]
+        match = re.search(r'\[SEND_EMAIL:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match and self.email_agent:
+            email_str = match.group(1).strip()
+            try:
+                # Parse email fields
+                email_data = {}
+                for part in email_str.split('|'):
+                    if '=' in part:
+                        key, value = part.split('=', 1)
+                        email_data[key.strip()] = value.strip()
+
+                if 'to' in email_data and 'subject' in email_data and 'body' in email_data:
+                    self.email_agent.send_email(
+                        to=email_data['to'],
+                        subject=email_data['subject'],
+                        body=email_data['body']
+                    )
+                    logger.info(f"[Action] Sent email to {email_data['to']}")
+                else:
+                    logger.error("[Action] Invalid email format")
+            except Exception as e:
+                logger.error(f"[Action] Failed to send email: {e}")
+
+        # [DRAFT_EMAIL: to|subject|body]
+        match = re.search(r'\[DRAFT_EMAIL:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match and self.email_agent:
+            email_str = match.group(1).strip()
+            try:
+                # Parse email fields
+                email_data = {}
+                for part in email_str.split('|'):
+                    if '=' in part:
+                        key, value = part.split('=', 1)
+                        email_data[key.strip()] = value.strip()
+
+                if 'to' in email_data and 'subject' in email_data and 'body' in email_data:
+                    self.email_agent.draft_email(
+                        to=email_data['to'],
+                        subject=email_data['subject'],
+                        body=email_data['body']
+                    )
+                    logger.info(f"[Action] Drafted email to {email_data['to']}")
+                else:
+                    logger.error("[Action] Invalid email format")
+            except Exception as e:
+                logger.error(f"[Action] Failed to draft email: {e}")
+
+        # [READ_RECENT_EMAILS]
+        if re.search(r'\[READ_RECENT_EMAILS\]', response, re.IGNORECASE):
+            if self.email_agent:
+                try:
+                    recent_file = RECENT_EMAILS_FILE
+                    if recent_file.exists():
+                        content = recent_file.read_text()
+                        response = re.sub(r'\[READ_RECENT_EMAILS\]', '', response, flags=re.IGNORECASE).strip()
+                        response = (response + '\n\n' + content).strip()
+                        logger.info(f"[Action] Read recent emails file")
+                    else:
+                        response = re.sub(r'\[READ_RECENT_EMAILS\]', '(No recent emails file found)', response, flags=re.IGNORECASE)
+                except Exception as e:
+                    logger.error(f"[Action] Failed to read recent emails: {e}")
+
+        # [SEARCH_OLD_EMAILS: query]
+        match = re.search(r'\[SEARCH_OLD_EMAILS:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match and self.email_agent:
+            query = match.group(1).strip()
+            try:
+                results = self.email_agent.search_old_emails(query, limit=5)
+                response = re.sub(r'\[SEARCH_OLD_EMAILS:[^\]]+\]', '', response, flags=re.IGNORECASE).strip()
+                if results:
+                    formatted = "\n\nArchived emails matching '{}':\n".format(query)
+                    for r in results:
+                        formatted += f"\n- From: {r['from_name']}, Subject: {r['subject']}"
+                        formatted += f"\n  {r['note']}\n"
+                    response = (response + formatted).strip()
+                else:
+                    response = (response + f"\n(No archived emails found for '{query}')").strip()
+                logger.info(f"[Action] Searched old emails for: {query}")
+            except Exception as e:
+                logger.error(f"[Action] Failed to search old emails: {e}")
+
+        # [DEEP_SEARCH: query] - Start async deep search
+        logger.info(f"[DEBUG] Checking for DEEP_SEARCH tag in response ({len(response)} chars)")
+        logger.info(f"[DEBUG] Response contains '[DEEP_SEARCH': {'[DEEP_SEARCH' in response.upper()}")
+        match = re.search(r'\[DEEP_SEARCH:\s*([^\]]+)\]', response, re.IGNORECASE)
+        logger.info(f"[DEBUG] DEEP_SEARCH regex match result: {match is not None}")
+        if match:
+            query = match.group(1).strip()
+            logger.info(f"[DEBUG] Matched query: {query}")
+            try:
+                logger.info(f"[Action] Starting deep search: {query}")
+
+                # Call deep search API (async endpoint)
+                search_response = requests.post(
+                    f"{DEEP_SEARCH_URL}/query_async",
+                    json={"question": query},
+                    timeout=10
+                )
+                search_response.raise_for_status()
+                result = search_response.json()
+
+                job_id = result.get('job_id')
+                if job_id:
+                    # Save job_id to background_tasks directory
+                    tasks_dir = TASKS_DIR
+                    tasks_dir.mkdir(parents=True, exist_ok=True)
+                    job_file = tasks_dir / f"deep_search_{job_id}.json"
+                    job_file.write_text(json.dumps({
+                        'job_id': job_id,
+                        'query': query,
+                        'started_at': datetime.now().isoformat(),
+                        'status': 'processing'
+                    }, indent=2))
+
+                    # Add status message to response
+                    status_msg = f"\n\n🔍 Deep search started (Job ID: {job_id})\nThis will take 1-3 minutes. Ask me 'is the search done?' to check status."
+                    response = response.replace(match.group(0), status_msg)
+                    logger.info(f"[Action] Deep search job created: {job_id}")
+                else:
+                    response = response.replace(match.group(0), "\n❌ Failed to start deep search (no job ID)")
+                    logger.error(f"[Action] Deep search failed: no job_id in response")
+
+            except requests.exceptions.RequestException as e:
+                error_msg = f"\n❌ Deep search unavailable: {e}"
+                response = response.replace(match.group(0), error_msg)
+                logger.error(f"[Action] Deep search connection error: {e}")
+            except Exception as e:
+                error_msg = f"\n❌ Deep search error: {e}"
+                response = response.replace(match.group(0), error_msg)
+                logger.error(f"[Action] Deep search error: {e}")
+
+        # [GET_DEEP_SEARCH_RESULT: job_id] or [GET_DEEP_SEARCH_RESULT] (latest)
+        logger.info(f"[DEBUG] Checking for GET_DEEP_SEARCH_RESULT tag")
+        match = re.search(r'\[GET_DEEP_SEARCH_RESULT(?::\s*([^\]]+))?\]', response, re.IGNORECASE)
+        logger.info(f"[DEBUG] GET_DEEP_SEARCH_RESULT regex match result: {match is not None}")
+        if match:
+            job_id = match.group(1).strip() if match.group(1) else None
+            try:
+                tasks_dir = TASKS_DIR
+
+                # If no job_id specified, find the latest
+                if not job_id:
+                    job_files = sorted(tasks_dir.glob("deep_search_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if job_files:
+                        job_data = json.loads(job_files[0].read_text())
+                        job_id = job_data.get('job_id')
+                    else:
+                        response = response.replace(match.group(0), "\n❌ No deep search jobs found")
+                        logger.warning(f"[Action] No deep search jobs found")
+                        job_id = None  # Ensure job_id stays None
+
+                # Only fetch if we have a valid job_id
+                if job_id:
+                    # Fetch result from deep search API
+                    logger.info(f"[Action] Fetching deep search result: {job_id}")
+                    result_response = requests.get(
+                        f"{DEEP_SEARCH_URL}/jobs/{job_id}/result",
+                        timeout=10
+                    )
+                    result_response.raise_for_status()
+                    result = result_response.json()
+
+                    status = result.get('status')
+                    answer = result.get('answer')
+                    error = result.get('error')
+
+                    if status == 'completed' and answer:
+                        # Format the answer nicely
+                        formatted = f"\n\n📊 Deep Search Results:\n{answer}\n"
+                        response = response.replace(match.group(0), formatted)
+
+                        # Update job file with answer
+                        job_file = tasks_dir / f"deep_search_{job_id}.json"
+                        if job_file.exists():
+                            job_data = json.loads(job_file.read_text())
+                            job_data['status'] = 'completed'
+                            job_data['answer'] = answer
+                            job_data['completed_at'] = datetime.now().isoformat()
+                            job_file.write_text(json.dumps(job_data, indent=2))
+
+                        logger.info(f"[Action] Deep search result retrieved: {len(answer)} chars")
+
+                    elif status == 'processing':
+                        progress = result.get('progress', 'Working on it...')
+                        response = response.replace(match.group(0), f"\n⏳ Deep search still running: {progress}")
+                        logger.info(f"[Action] Deep search still processing: {job_id}")
+
+                    elif status == 'failed':
+                        response = response.replace(match.group(0), f"\n❌ Deep search failed: {error}")
+                        logger.error(f"[Action] Deep search failed: {error}")
+
+                    else:
+                        response = response.replace(match.group(0), f"\n⏳ Deep search status: {status}")
+                        logger.info(f"[Action] Deep search status: {status}")
+
+            except requests.exceptions.RequestException as e:
+                error_msg = f"\n❌ Could not fetch search result: {e}"
+                response = response.replace(match.group(0), error_msg)
+                logger.error(f"[Action] Failed to fetch deep search result: {e}")
+            except Exception as e:
+                error_msg = f"\n❌ Error fetching result: {e}"
+                response = response.replace(match.group(0), error_msg)
+                logger.error(f"[Action] Error in GET_DEEP_SEARCH_RESULT: {e}")
+
+
+        # [RUN_AGENT: instruction] - Dispatch to ollama-cmd single job
+        match = re.search(r'\[RUN_AGENT:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            instruction = match.group(1).strip()
+            try:
+                if self.cmd_client.is_available():
+                    job_id = self.cmd_client.submit_job(instruction)
+                    if job_id:
+                        TASKS_DIR.mkdir(parents=True, exist_ok=True)
+                        job_file = TASKS_DIR / f"agent_job_{job_id}.json"
+                        job_file.write_text(json.dumps({
+                            'job_id': job_id, 'instruction': instruction,
+                            'started_at': datetime.now().isoformat(),
+                            'type': 'agent_job', 'status': 'running'
+                        }, indent=2))
+                        status_msg = f"\n\n🤖 Agent job dispatched (ID: {job_id})\nInstruction: {instruction}\nAsk me 'is the agent done?' to check status."
+                        response = response.replace(match.group(0), status_msg)
+                        logger.info(f"[Action] Agent job submitted: {job_id}")
+                    else:
+                        response = response.replace(match.group(0), "\n❌ Failed to submit agent job")
+                else:
+                    response = response.replace(match.group(0), "\n⚠️ ollama-cmd agent is offline")
+            except Exception as e:
+                response = response.replace(match.group(0), f"\n❌ Agent error: {e}")
+                logger.error(f"[Action] RUN_AGENT error: {e}")
+
+        # [RUN_CHAIN: goal] - Dispatch to ollama-cmd multi-phase chain
+        match = re.search(r'\[RUN_CHAIN:\s*([^\]]+)\]', response, re.IGNORECASE)
+        if match:
+            goal = match.group(1).strip()
+            try:
+                if self.cmd_client.is_available():
+                    chain_id = self.cmd_client.submit_chain(goal)
+                    if chain_id:
+                        TASKS_DIR.mkdir(parents=True, exist_ok=True)
+                        chain_file = TASKS_DIR / f"agent_chain_{chain_id}.json"
+                        chain_file.write_text(json.dumps({
+                            'chain_id': chain_id, 'goal': goal,
+                            'started_at': datetime.now().isoformat(),
+                            'type': 'agent_chain', 'status': 'running'
+                        }, indent=2))
+                        status_msg = f"\n\n⛓️ Agent chain started (ID: {chain_id})\nGoal: {goal}\nAsk me 'how is the chain going?' to check status."
+                        response = response.replace(match.group(0), status_msg)
+                        logger.info(f"[Action] Agent chain submitted: {chain_id}")
+                    else:
+                        response = response.replace(match.group(0), "\n❌ Failed to submit agent chain")
+                else:
+                    response = response.replace(match.group(0), "\n⚠️ ollama-cmd agent is offline")
+            except Exception as e:
+                response = response.replace(match.group(0), f"\n❌ Chain error: {e}")
+                logger.error(f"[Action] RUN_CHAIN error: {e}")
+
+        # [GET_AGENT_RESULT] or [GET_AGENT_RESULT: job_id]
+        match = re.search(r'\[GET_AGENT_RESULT(?::\s*([^\]]+))?\]', response, re.IGNORECASE)
+        if match:
+            job_id = match.group(1).strip() if match.group(1) else None
+            try:
+                if not job_id:
+                    job_files = sorted(
+                        list(TASKS_DIR.glob("agent_job_*.json")) + list(TASKS_DIR.glob("agent_chain_*.json")),
+                        key=lambda p: p.stat().st_mtime, reverse=True
+                    )
+                    if job_files:
+                        saved = json.loads(job_files[0].read_text())
+                        job_id = saved.get('job_id') or saved.get('chain_id')
+                    else:
+                        response = response.replace(match.group(0), "\n(No agent jobs found)")
+                        job_id = None
+                if job_id:
+                    saved_type = None
+                    for jf in TASKS_DIR.glob("agent_chain_*.json"):
+                        d = json.loads(jf.read_text())
+                        if d.get('chain_id') == job_id:
+                            saved_type = 'chain'
+                            break
+                    if saved_type == 'chain':
+                        status = self.cmd_client.get_chain_status(job_id)
+                    else:
+                        status = self.cmd_client.get_job_status(job_id)
+                    if status:
+                        st = status.get('status', 'unknown')
+                        output = status.get('output', status.get('summary', ''))
+                        result_text = f"\n\n📋 Agent result (ID: {job_id[:8]})\nStatus: {st}"
+                        if output:
+                            result_text += f"\n\n{output[:2000]}"
+                        response = response.replace(match.group(0), result_text)
+                    else:
+                        response = response.replace(match.group(0), f"\n(Could not retrieve result for {job_id[:8]})")
+            except Exception as e:
+                response = response.replace(match.group(0), f"\n❌ Error retrieving agent result: {e}")
+                logger.error(f"[Action] GET_AGENT_RESULT error: {e}")
+
+        # Strip all action tags from response (for clean output)
+        cleaned = response
+        tag_patterns = [
+            r'\[REMEMBER:[^\]]+\]',
+            r'\[SEARCH_MEMORY:[^\]]+\]',
+            r'\[READ_RECENT_EMAILS\]',
+            r'\[SEARCH_OLD_EMAILS:[^\]]+\]',
+            r'\[MEMORY_SHOW\]',
+            r'\[MEMORY_SHOW_ABOUT:[^\]]+\]',
+            r'\[MEMORY_SHOW_PROJECTS\]',
+            r'\[MEMORY_SHOW_PREFERENCES\]',
+            r'\[MEMORY_SHOW_PROFILE\]',
+            r'\[MEMORY_FORGET:[^\]]+\]',
+            r'\[MEMORY_STORE_PREF:[^\]]+\]',
+            r'\[EXECUTE:[^\]]+\]',
+            r'\[SEND_EMAIL:[^\]]+\]',
+            r'\[DRAFT_EMAIL:[^\]]+\]',
+            r'\[USE_REASONING\]',
+            r'\[USE_CODING\]',
+            r'\[USE_AGENT\]',
+            r'\[USE_SEARCH\]',
+            r'\[DEEP_SEARCH:[^\]]+\]',
+            r'\[GET_DEEP_SEARCH_RESULT(?::[^\]]+)?\]',
+            r'\[RUN_AGENT:[^\]]+\]',
+            r'\[RUN_CHAIN:[^\]]+\]',
+            r'\[GET_AGENT_RESULT(?::[^\]]+)?\]',
+        ]
+
+        for pattern in tag_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+        # Clean up extra whitespace
+        cleaned = re.sub(r'\n\n+', '\n\n', cleaned).strip()
+
+        return cleaned
+
+    # =========================================================================
+    # MEMORY DISPLAY METHODS (from Jarvis.py lines 6983-7125)
+    # =========================================================================
+
+    def _memory_show_all(self) -> str:
+        """Format all stored memories for display"""
+        lines = []
+
+        profile = self.facts_db.get_user_profile()
+        if profile:
+            lines.append("PROFILE:")
+            for k, v in profile.items():
+                lines.append(f"  {k}: {v}")
+
+        prefs = self.facts_db.get_preferences()
+        if prefs:
+            lines.append("\nPREFERENCES:")
+            for cat, items in prefs.items():
+                for k, v in items.items():
+                    lines.append(f"  [{cat}] {k}: {v}")
+
+        projects = self.facts_db.get_active_projects()
+        if projects:
+            lines.append(f"\nACTIVE PROJECTS ({len(projects)}):")
+            for p in projects:
+                desc = (p.get('description') or '')[:60]
+                lines.append(f"  • {p['name']} — {desc}")
+
+        # Show stored notes (entities of type "note")
+        try:
+            entities = self.facts_db.get_entities(entity_type="note")
+            if entities:
+                n = min(5, len(entities))
+                lines.append(f"\nNOTES (last {n}):")
+                for entity in entities[-5:]:
+                    note_text = entity.get('details', entity.get('name', ''))
+                    lines.append(f"  • {note_text[:80]}")
+        except Exception as e:
+            logger.warning(f"Could not fetch notes: {e}")
+
+        if not lines:
+            return "Memory banks are empty at the moment, sir."
+
+        return "\n".join(lines)
+
+    def _memory_show_about(self, topic: str) -> str:
+        """Search and display memories about a specific topic"""
+        lines = [f"What I know about '{topic}':"]
+        found = False
+
+        # Search preferences
+        prefs = self.facts_db.get_preferences()
+        for cat, items in prefs.items():
+            for k, v in items.items():
+                if topic.lower() in k.lower() or topic.lower() in v.lower() or topic.lower() in cat.lower():
+                    lines.append(f"  [preference] {cat}/{k}: {v}")
+                    found = True
+
+        # Search notes
+        try:
+            entities = self.facts_db.get_entities(entity_type="note")
+            for entity in entities:
+                note_text = entity.get('details', entity.get('name', ''))
+                if topic.lower() in note_text.lower():
+                    lines.append(f"  [note] {note_text[:100]}")
+                    found = True
+        except Exception as e:
+            logger.warning(f"Could not search notes: {e}")
+
+        # Search journal entries
+        try:
+            journal_results = self.journal.search_journals(topic, days=90)
+            for entry in journal_results[:3]:
+                snippet = entry[:80] if len(entry) > 80 else entry
+                lines.append(f"  [conversation] \"{snippet}...\"")
+                found = True
+        except Exception as e:
+            logger.warning(f"Could not search journals: {e}")
+
+        if not found:
+            return f"Nothing specific about '{topic}' on file, sir."
+
+        return "\n".join(lines)
+
+    def _memory_show_projects(self) -> str:
+        """Display active projects"""
+        projects = self.facts_db.get_active_projects()
+        if not projects:
+            return "No active projects on file, sir."
+
+        lines = [f"Active projects ({len(projects)}):"]
+        for p in projects:
+            desc = (p.get('description') or 'No description')[:80]
+            priority = p.get('priority', 5)
+            lines.append(f"  • {p['name']} (priority {priority}) — {desc}")
+
+        return "\n".join(lines)
+
+    def _memory_show_preferences(self) -> str:
+        """Display all preferences"""
+        prefs = self.facts_db.get_preferences()
+        if not prefs:
+            return "No preferences stored yet, sir."
+
+        lines = ["Stored preferences:"]
+        for cat, items in prefs.items():
+            lines.append(f"  {cat}:")
+            for k, v in items.items():
+                lines.append(f"    {k}: {v}")
+
+        return "\n".join(lines)
+
+    def _memory_show_profile(self) -> str:
+        """Display user profile"""
+        profile = self.facts_db.get_user_profile()
+        if not profile:
+            return "No profile data stored, sir."
+
+        lines = ["User profile:"]
+        for k, v in profile.items():
+            lines.append(f"  {k}: {v}")
+
+        return "\n".join(lines)
+
+    def _memory_forget(self, topic: str) -> str:
+        """Delete stored memories related to a topic"""
+        deleted_count = 0
+
+        # Delete from preferences
+        try:
+            cursor = self.facts_db.conn.cursor()
+            cursor.execute(
+                "DELETE FROM preferences WHERE lower(key) LIKE ? OR lower(value) LIKE ? OR lower(category) LIKE ?",
+                (f'%{topic.lower()}%', f'%{topic.lower()}%', f'%{topic.lower()}%')
+            )
+            deleted_count += cursor.rowcount
+            self.facts_db.conn.commit()
+        except Exception as e:
+            logger.error(f"Error deleting preferences: {e}")
+
+        # Delete from entities (notes)
+        try:
+            entities = self.facts_db.get_entities(entity_type="note")
+            for entity in entities:
+                note_text = entity.get('details', entity.get('name', ''))
+                if topic.lower() in note_text.lower():
+                    # Delete by name
+                    cursor = self.facts_db.conn.cursor()
+                    cursor.execute("DELETE FROM entities WHERE name = ?", (entity['name'],))
+                    deleted_count += cursor.rowcount
+            self.facts_db.conn.commit()
+        except Exception as e:
+            logger.error(f"Error deleting notes: {e}")
+
+        if deleted_count == 0:
+            return f"(Nothing found about '{topic}')"
+
+        return f"(Removed {deleted_count} item(s) related to '{topic}')"
+
+
+# =============================================================================
+# FASTAPI APP
+# =============================================================================
+
+app = FastAPI(
+    title="JARVIS Server",
+    description="Distributed AI Assistant System - Brain Server",
+    version="1.0.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global server instance
+server = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize server on startup"""
+    global server
+    logger.info("Starting JARVIS server...")
+    init_directories()
+    server = JarvisServer()
+
+
+@app.post("/api/session", response_model=SessionResponse)
+async def create_session():
+    """
+    Create new conversation session.
+
+    Returns:
+        Session token for subsequent chat requests
+    """
+    try:
+        session_id = server.sessions.create_session()
+        logger.info(f"[API] Created session: {session_id}")
+        return SessionResponse(session_token=session_id)
+    except Exception as e:
+        logger.error(f"[API] Failed to create session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatRequest):
+    """
+    Stream chat responses.
+
+    Args:
+        request: ChatRequest with message and session_token
+
+    Returns:
+        Streaming response with NDJSON chunks
+    """
+    try:
+        # Validate session
+        session = server.sessions.get_session(request.session_token)
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+        # Stream response
+        async def generate():
+            for chunk in server.chat(request.message, request.session_token):
+                yield json.dumps({"content": chunk}) + "\n"
+
+        return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/status", response_model=StatusResponse)
+async def status():
+    """
+    Get server status and health metrics.
+
+    Returns:
+        Server status including memory, projects, workers, sessions
+    """
+    try:
+        profile = server.facts_db.get_user_profile()
+        projects = server.facts_db.get_active_projects()
+
+        return StatusResponse(
+            status="online",
+            memory=profile,
+            active_projects=len(projects),
+            background_worker={
+                "running": server.background_worker.is_alive() if server.background_worker else False
+            },
+            email_agent={
+                "running": server.email_agent.is_alive() if server.email_agent else False
+            },
+            sessions=server.sessions.get_active_session_count()
+        )
+    except Exception as e:
+        logger.error(f"[API] Status error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+@app.get("/api/tools")
+async def tools_status():
+    """Get status of integrated tool services"""
+    return {
+        "ollama_cmd": {
+            "url": OLLAMA_CMD_URL,
+            "available": server.cmd_client.is_available()
+        },
+        "ollama_swarm": {
+            "url": DEEP_SEARCH_URL,
+            "available": server.swarm_client.is_available()
+        }
+    }
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "service": "JARVIS Server",
+        "status": "online",
+        "version": "1.0.0"
+    }
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+if __name__ == "__main__":
+    logger.info("Starting JARVIS FastAPI server...")
+    uvicorn.run(
+        app,
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        log_level="info"
+    )
