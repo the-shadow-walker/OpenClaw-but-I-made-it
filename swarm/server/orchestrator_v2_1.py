@@ -871,7 +871,7 @@ Return the corrected complete Python script in ```python``` fences. No prose."""
                     traceback.print_exc()
                 self.results[problem['title']] = {"status": "error", "message": str(e)}
         
-        self.phase_times['math'] = (datetime.now() - phase_start).total_seconds()
+        self.phase_times['compute'] = (datetime.now() - phase_start).total_seconds()
     
     async def _phase_5_summarize(self, question: str) -> str:
         """PHASE 5: Summarize"""

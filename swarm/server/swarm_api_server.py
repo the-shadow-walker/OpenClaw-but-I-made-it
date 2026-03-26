@@ -6,7 +6,7 @@ if _ROOT not in _sys.path:
 try:
     import _paths  # noqa: F401
 except ImportError:
-    for _d in [_os.path.join(_ROOT, d) for d in ('core', 'math', 'server', 'engineer')]:
+    for _d in [_os.path.join(_ROOT, d) for d in ('core', 'compute', 'server', 'engineer')]:
         if _os.path.isdir(_d) and _d not in _sys.path:
             _sys.path.insert(0, _d)
 """

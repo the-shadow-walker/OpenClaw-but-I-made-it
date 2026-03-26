@@ -7,7 +7,7 @@ Wants=ollama.service
 Type=simple
 User=Grindlewalt
 WorkingDirectory=/mnt/storage/NAS/Jarvis/swarm
-Environment=PYTHONPATH=/mnt/storage/NAS/Jarvis/swarm:/mnt/storage/NAS/Jarvis/swarm/core:/mnt/storage/NAS/Jarvis/swarm/math:/mnt/storage/NAS/Jarvis/swarm/server:/mnt/storage/NAS/Jarvis/swarm/engineer
+Environment=PYTHONPATH=/mnt/storage/NAS/Jarvis/swarm:/mnt/storage/NAS/Jarvis/swarm/core:/mnt/storage/NAS/Jarvis/swarm/compute:/mnt/storage/NAS/Jarvis/swarm/server:/mnt/storage/NAS/Jarvis/swarm/engineer
 ExecStart=/mnt/storage/NAS/Jarvis/swarm/.venv/bin/python3 /mnt/storage/NAS/Jarvis/swarm/server/swarm_api_server.py
 Restart=on-failure
 RestartSec=5
