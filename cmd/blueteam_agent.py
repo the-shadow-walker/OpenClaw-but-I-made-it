@@ -32,6 +32,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal as _signal
 import subprocess
 import threading
@@ -81,6 +82,7 @@ _ARCH_AUDIT_WARNED: bool = False
 
 # persistent report path
 _REPORT_PATH = Path("~/.agent_bin/sentinel_report.md").expanduser()
+_ARCHIVE_DIR  = Path("~/.agent_bin/sentinel_archive").expanduser()
 
 # debug log
 _DBG_LOG_PATH = Path("~/.agent_bin/sentinel_debug.log").expanduser()
@@ -891,6 +893,17 @@ class BlueteamAgent:
             )
 
             with self._report_lock:
+                # Archive previous report if it's from a different calendar day
+                if _REPORT_PATH.exists():
+                    prev_date = datetime.fromtimestamp(
+                        _REPORT_PATH.stat().st_mtime
+                    ).date()
+                    if prev_date != datetime.now().date():
+                        _ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                        archive_path = _ARCHIVE_DIR / f"sentinel_report_{prev_date.isoformat()}.md"
+                        shutil.copy2(_REPORT_PATH, archive_path)
+                        _dbg("REPORT", f"archived → {archive_path.name}")
+
                 _REPORT_PATH.write_text(content, encoding="utf-8")
             _dbg("REPORT", f"written  threat={self._current_threat_level}  "
                            f"quick={self._scan_count_quick}  deep={self._scan_count_deep}")
