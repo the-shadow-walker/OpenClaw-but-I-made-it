@@ -29,7 +29,6 @@ import argparse
 import uuid
 import threading
 import functools
-import contextvars
 import queue as _Q
 import re
 import time
@@ -44,10 +43,16 @@ from flask_cors import CORS
 import logging
 
 try:
-    from orchestrator_v2_1 import OrchestratorV2_1
+    from orchestrator_v3 import OrchestratorV3
+    OrchestratorV2_1 = OrchestratorV3   # keep legacy name for health checks
 except ImportError:
-    print("Warning: Could not import OrchestratorV2_1")
-    OrchestratorV2_1 = None
+    print("Warning: Could not import OrchestratorV3, trying V2_1 fallback")
+    OrchestratorV3 = None
+    try:
+        from orchestrator_v2_1 import OrchestratorV2_1
+    except ImportError:
+        print("Warning: Could not import OrchestratorV2_1 either")
+        OrchestratorV2_1 = None
 
 try:
     from project_session import session_manager, ProjectSessionManager
@@ -79,9 +84,6 @@ class Config:
 _progress_queues: Dict[str, _Q.Queue] = {}
 _pq_lock = threading.Lock()
 
-# ContextVar for job routing — propagates into asyncio.to_thread() executor threads
-_current_job_id: contextvars.ContextVar[str] = contextvars.ContextVar("swarm_job", default="")
-
 def _register_pq(job_id: str, q: _Q.Queue):
     with _pq_lock:
         _progress_queues[job_id] = q
@@ -102,11 +104,7 @@ class _ProgressRouter:
         self._local = threading.local()
 
     def _job(self):
-        # ContextVar propagates through asyncio.to_thread; thread-local is fallback
-        job_id = _current_job_id.get("")
-        if not job_id:
-            job_id = getattr(threading.current_thread(), "_swarm_job_id", "")
-        return job_id or None
+        return getattr(threading.current_thread(), '_swarm_job_id', None)
 
     def write(self, text: str):
         self._real.write(text)
@@ -175,7 +173,6 @@ class JobManager:
         job_id = str(uuid.uuid4())[:8]
         with self._lock:
             self.jobs[job_id] = {
-                'job_id':      job_id,
                 'question':    question,
                 'status':      'pending',
                 'answer':      None,
@@ -237,7 +234,8 @@ class JobManager:
 # =============================================================================
 
 def _make_orchestrator(date_filter: str = None):
-    if OrchestratorV2_1 is None:
+    cls = OrchestratorV3 if OrchestratorV3 is not None else OrchestratorV2_1
+    if cls is None:
         return None
     try:
         kwargs = dict(
@@ -248,7 +246,7 @@ def _make_orchestrator(date_filter: str = None):
         )
         if date_filter:
             kwargs['date_filter'] = date_filter
-        return OrchestratorV2_1(**kwargs)
+        return cls(**kwargs)
     except Exception as e:
         logging.error(f"Failed to create orchestrator: {e}")
         return None
@@ -311,10 +309,7 @@ def _start_worker(job_id: str, question: str, since: str = None,
         asyncio.set_event_loop(loop)
         try:
             job_manager.update_job(job_id, 'processing', progress='Initializing...')
-            async def _run_with_ctx():
-                _current_job_id.set(job_id)
-                return await _run_question(question, date_filter=since)
-            answer = loop.run_until_complete(_run_with_ctx())
+            answer = loop.run_until_complete(_run_question(question, date_filter=since))
             elapsed = round(time.time() - t0, 1)
             job_manager.update_job(job_id, 'completed', answer=answer, elapsed=elapsed)
             logging.info(f"Job {job_id} completed in {elapsed}s")
@@ -387,8 +382,7 @@ def status():
 @app.route('/jobs', methods=['GET'])
 def list_jobs():
     try:
-        with job_manager._lock:
-            jobs = [{'job_id': k, **v} for k, v in job_manager.jobs.items()]
+        jobs = list(job_manager.jobs.values())
         return jsonify({'total': len(jobs), 'jobs': jobs}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
