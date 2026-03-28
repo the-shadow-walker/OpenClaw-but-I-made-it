@@ -168,6 +168,9 @@ RULES:
 5. Use SymPy or scipy for solving; numpy for arrays.
 6. Verify your answer numerically before declaring STATUS: solved.
 7. Think step by step inside THOUGHT blocks.
+8. CRITICAL: After your <think> block, you MUST output EITHER a valid
+   ACTION block OR a FINAL_ANSWER block — NOTHING ELSE. No prose summary,
+   no markdown, just the structured block. The parser only reads those markers.
 """
 
 
@@ -224,15 +227,16 @@ class ReactSolver:
             self._turn = turn
             print(f"  Turn {turn}/{self.MAX_TURNS}", end=" ", flush=True)
 
-            # Check timeout (15 min hard cap for the whole sub-problem)
-            if time.time() - t0 > 900:
+            # Check timeout — 60 min hard cap per sub-problem
+            # (qwq:32b takes ~19 min per turn on this hardware)
+            if time.time() - t0 > 3600:
                 print("⏱️  TIMEOUT")
                 return SolverResult(
                     sub_problem_id=sp.id,
                     status="timeout",
                     turn_count=turn,
                     raw_log="\n".join(self._log_parts),
-                    verification_note="Hard timeout (900s) reached",
+                    verification_note="Hard timeout (3600s) reached",
                 )
 
             # Query the model
@@ -244,26 +248,48 @@ class ReactSolver:
             self._log(f"\n[TURN {turn} — ASSISTANT]\n{response}")
             self._history.append({"role": "assistant", "content": response})
 
-            # Strip qwq <think>…</think> blocks before parsing markers
+            # Search the FULL response first (qwq sometimes puts FINAL_ANSWER
+            # inside <think> blocks), then fall back to the stripped version.
             clean = self._strip_thinking(response)
-            print(f"({len(clean)} chars)")
+            search_text = response if (
+                "FINAL_ANSWER:" in response or "ACTION:" in response
+            ) else clean
+            print(f"({len(clean)} chars post-think, {len(response)} total)")
 
-            # Check for FINAL_ANSWER
-            if "FINAL_ANSWER:" in clean:
-                result = self._parse_final_answer(clean, turn)
+            # Check for FINAL_ANSWER in either surface
+            if "FINAL_ANSWER:" in search_text:
+                result = self._parse_final_answer(search_text, turn)
+                # If no RESULT: lines found, try extracting from think block
+                if not result.results:
+                    result = self._extract_from_think(response, result, turn)
                 print(f"  → {result.status.upper()} | "
                       f"{len(result.results)} result(s) | "
                       f"{turn} turns | {time.time()-t0:.0f}s")
                 return result
 
             # Parse and dispatch tool
-            parsed = self._parse_action(clean)
+            parsed = self._parse_action(search_text)
             if parsed is None:
-                # Model output has no recognised action — ask it to continue
+                # Last resort: scan the think block for any RESULT: lines
+                fallback = self._try_extract_results_from_think(response)
+                if fallback:
+                    print(f"  → SOLVED (think-block fallback) | "
+                          f"{len(fallback)} result(s) | {turn} turns")
+                    return SolverResult(
+                        sub_problem_id=sp.id,
+                        status="solved",
+                        results={v: d["value"] for v, d in fallback.items()},
+                        results_with_units=fallback,
+                        turn_count=turn,
+                        raw_log="\n".join(self._log_parts),
+                        verification_note="Extracted from think block",
+                    )
                 obs = (
                     "Your response did not contain a valid ACTION or FINAL_ANSWER. "
-                    "Continue the ReAct loop. Use one of: ACTION: run_code / search / rag, "
-                    "or produce FINAL_ANSWER."
+                    "You MUST end with one of:\n"
+                    "  ACTION: run_code / search / rag  (followed by INPUT: ... END_INPUT)\n"
+                    "  FINAL_ANSWER: ... END_ANSWER\n"
+                    "Do not continue reasoning — pick an action NOW."
                 )
             else:
                 action, inp = parsed
@@ -506,6 +532,46 @@ class ReactSolver:
             turn_count=turn,
             raw_log="\n".join(self._log_parts),
         )
+
+    def _extract_from_think(self, full_response: str, existing: SolverResult, turn: int) -> SolverResult:
+        """
+        If FINAL_ANSWER parsing found no RESULT lines, scan inside <think> blocks
+        for any "RESULT: var = value unit" lines and merge them in.
+        """
+        think_results = self._try_extract_results_from_think(full_response)
+        if think_results and not existing.results:
+            return SolverResult(
+                sub_problem_id=existing.sub_problem_id,
+                status="solved",
+                results={v: d["value"] for v, d in think_results.items()},
+                results_with_units=think_results,
+                final_code=existing.final_code,
+                verification_note=existing.verification_note or "Results from think block",
+                turn_count=turn,
+                raw_log="\n".join(self._log_parts),
+            )
+        return existing
+
+    @staticmethod
+    def _try_extract_results_from_think(response: str) -> Dict[str, Dict]:
+        """
+        Scan the full response (including <think> content) for RESULT: lines.
+        Returns {var: {"value": float, "unit": str}} or {} if nothing found.
+        """
+        results = {}
+        for rm in re.finditer(
+            r"RESULT:\s*([A-Za-z_]\w*)\s*=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([^\n]*)",
+            response,
+            re.IGNORECASE,
+        ):
+            var = rm.group(1).strip()
+            try:
+                val = float(rm.group(2))
+            except ValueError:
+                continue
+            unit = rm.group(3).strip()
+            results[var] = {"value": val, "unit": unit}
+        return results
 
     # ── Logging ───────────────────────────────────────────────────────────────
 

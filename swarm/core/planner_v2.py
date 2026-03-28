@@ -111,6 +111,10 @@ RULES:
 3. depends_on lists SP ids (e.g. ["SP1"]) that must finish before this SP runs.
 4. If the whole question is a single calculation, use exactly ONE sub-problem.
 5. coordinate_system: choose a clear frame and origin (or "N/A" for non-spatial).
+6. MAXIMUM 3 sub-problems total. Group related tasks together. Quality over
+   quantity — one well-scoped SP is better than three overlapping ones.
+   Purely qualitative/descriptive parts (e.g. "explain precession direction")
+   do NOT need their own SP; fold them into a neighbouring computational SP.
 
 Respond ONLY with valid JSON (no markdown fences, no explanation):
 {{
