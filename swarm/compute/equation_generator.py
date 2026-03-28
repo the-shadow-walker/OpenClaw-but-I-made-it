@@ -79,8 +79,12 @@ PITFALLS TO AVOID:
 MANDATORY RULES:
 1. NO {{variable}} placeholder syntax.  Every variable must be assigned a
    concrete float/int value before it is used.
-2. Import only: math, numpy, sympy, scipy (all available).
-   uncertainties library available for uncertainty propagation (see Rule 12).
+2. Available libraries: math, numpy, sympy, scipy, uncertainties (all installed).
+   ALWAYS guard scipy imports with try/except so the script degrades gracefully:
+     try:
+         from scipy.optimize import fsolve
+     except ImportError:
+         fsolve = None   # use numpy or sympy fallback below
    CoolProp (via PropsSI) and mendeleev available for material properties.
    Use material_props.get_fluid_property() / get_element_property() if installed.
 3. For values NOT stated in the problem (Isp, structural fraction,
@@ -112,9 +116,18 @@ MANDATORY RULES:
 9. Handle edge cases (avoid division by zero, log of non-positive, etc.).
 10. TIME-DEPENDENT PROBLEMS: If the problem involves changing forces, varying
     density, drag, or any quantity that evolves over time (trajectory, rocket
-    ascent, thermal transient, orbital propagation), you MUST use
-    scipy.integrate.solve_ivp.
-    Structure:
+    ascent, thermal transient, orbital propagation), prefer scipy.integrate.solve_ivp.
+    Always guard the import:
+      try:
+          from scipy.integrate import solve_ivp
+          USE_SCIPY = True
+      except ImportError:
+          USE_SCIPY = False
+    If USE_SCIPY is False, fall back to a simple numpy Euler loop:
+      dt = 0.01; t = t0; y = y0
+      while t < tf:
+          y = y + np.array(dy_dt(t, y)) * dt; t += dt
+    Structure when scipy available:
       - Define state vector y (e.g. [x, vx, y, vy, mass])
       - Define dy_dt(t, y) right-hand-side function
       - Call solve_ivp(dy_dt, [t0, tf], y0, max_step=0.1, dense_output=True)
@@ -145,6 +158,25 @@ MANDATORY RULES:
       m = 500 * kg
       a = F / m   # gives 10 m/s² — unit-safe
     Convert to float for RESULT: lines: float(a.evalf())
+14. SOLVER CONVERGENCE (MANDATORY when using fsolve / root / least_squares):
+    After ANY numerical solve call, ALWAYS verify convergence before trusting
+    the result.  If not converged, print a machine-readable failure line and
+    attempt an alternative method.
+    Pattern for fsolve:
+      solution, info, ier, msg = fsolve(func, x0, full_output=True)
+      residual = np.max(np.abs(func(solution)))
+      if residual > 1e-4 or ier != 1:
+          print(f"SOLVER FAILED: fsolve did not converge, residual={residual:.3e}, ier={ier}")
+          # Fallback — try scipy.optimize.least_squares or sympy
+      else:
+          print(f"SOLVER CHECK: converged OK, residual={residual:.3e}")
+    For targeting / trajectory problems: also verify the endpoint matches:
+      x_err = abs(x_final - target_x); y_err = abs(y_final - target_y)
+      if x_err > 0.01 or y_err > 0.01:
+          print(f"SOLVER FAILED: endpoint error x={x_err:.4f}m y={y_err:.4f}m — solver did not reach target")
+      else:
+          print(f"SOLVER CHECK: endpoint OK, x_err={x_err:.4f}m y_err={y_err:.4f}m")
+    NEVER print RESULT: lines for a solution that failed the convergence check.
 
 Output ONLY the Python code inside ```python ... ``` fences.
 No prose before or after.

@@ -10,6 +10,7 @@ Equation Validator and Executor
 import re
 import math
 import subprocess
+import sys
 import tempfile
 import os
 from typing import Dict, Optional, Any, List, Tuple
@@ -193,9 +194,11 @@ class EquationExecutor:
         
         # Step 2: Safety checks
         dangerous_patterns = [
-            'os.', 'subprocess', 'eval', 'exec', '__import__',
-            'open(', 'requests.', 'urllib', 'socket', 'system', 
-            '__builtins__', 'compile', 'globals', 'locals'
+            'os.system(', 'os.popen(', 'os.execv', 'os.execve',
+            'subprocess', 'eval(', 'exec(',  '__import__',
+            'open(',      'requests.',       'urllib',
+            'socket',     '__builtins__',    'compile(',
+            'globals(',   'locals(',
         ]
         
         for pattern in dangerous_patterns:
@@ -216,9 +219,10 @@ class EquationExecutor:
                 temp_file = f.name
             
             try:
-                # Run with timeout
+                # Run with timeout — use sys.executable so the subprocess
+                # inherits the same venv and has scipy/numpy/sympy available
                 result = subprocess.run(
-                    ['python3', temp_file],
+                    [sys.executable, temp_file],
                     capture_output=True,
                     text=True,
                     timeout=timeout

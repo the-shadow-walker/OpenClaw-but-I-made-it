@@ -38,6 +38,7 @@ class ClassificationResult:
     variable_schema: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Format: {"delta_v": {"unit": "m/s", "description": "total velocity change", "known": false},
     #           "mass":   {"unit": "kg",  "description": "initial wet mass", "known": true, "value": 50000}}
+    self_contained: bool = False  # True when MATHEMATICAL and all needed values are in the question
 
 
 class QuestionClassifier:
@@ -149,6 +150,16 @@ Respond with ONLY valid JSON (no markdown, no explanation):
                     if isinstance(meta, dict):
                         variable_schema[var_name] = meta
 
+            # Self-contained: MATHEMATICAL, solvable, no missing values, has known vars in schema
+            critical_missing = data.get('critical_missing', [])
+            known_vars = [v for v, m in variable_schema.items() if m.get('known', False)]
+            self_contained = (
+                qtype == QuestionType.MATHEMATICAL
+                and data.get('is_solvable', False)
+                and len(critical_missing) == 0
+                and len(known_vars) > 0
+            )
+
             return ClassificationResult(
                 question_type=qtype,
                 is_solvable=data.get('is_solvable', True),
@@ -158,10 +169,11 @@ Respond with ONLY valid JSON (no markdown, no explanation):
                 steps=data.get('steps', []),
                 confidence=data.get('confidence', 0.5),
                 reasoning=data.get('reasoning', ''),
-                critical_missing=data.get('critical_missing', []),
+                critical_missing=critical_missing,
                 domain=data.get('domain', ''),
                 dependency_order=data.get('dependency_order', []),
                 variable_schema=variable_schema,
+                self_contained=self_contained,
             )
         
         except Exception as e:

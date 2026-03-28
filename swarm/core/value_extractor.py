@@ -230,7 +230,7 @@ class ValueExtractor:
         # ── Moles / concentration ─────────────────────────────────────────────────
         (r'(\d+(?:\.\d+)?)\s*mol/L\b', 'concentration_molL'),
         (r'(\d+(?:\.\d+)?)\s*mol\b', 'moles'),
-        (r'(\d+(?:\.\d+)?)\s*M(?![a-zA-Z\d])', 'concentration_M'),
+        (r'(\d+(?:\.\d+)?)\s*M(?![a-zA-Z\d/])', 'concentration_M'),
 
         # ── Magnetic ──────────────────────────────────────────────────────────────
         (r'(\d+(?:\.\d+)?)\s*T(?![a-zA-Z\d])', 'magnetic_flux_t'),
@@ -303,7 +303,11 @@ class ValueExtractor:
                             suffix += 1
                         key = f"{base_key}_{suffix}"
                 else:
-                    # Specific pattern — claim this span and register the value
+                    # Specific pattern — skip if an earlier pattern already claimed
+                    # this number position (prevents e.g. concentration_M stealing
+                    # a velocity value that was already extracted as m/s)
+                    if num_start in claimed_spans:
+                        continue
                     claimed_spans.add(num_start)
                     key = key_hint
                     if key in values:

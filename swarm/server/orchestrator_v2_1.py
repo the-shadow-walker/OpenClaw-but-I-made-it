@@ -154,6 +154,8 @@ class OrchestratorV2_1:
         
         self.is_math_question = False
         self.is_engineering_design = False
+        self.skip_search = False          # True when phi4 says no search needed
+        self.targeted_queries: List[str] = []  # specific lookups phi4 requested
         self.raw_content: List[str] = []
         self.results = {}
         
@@ -204,22 +206,37 @@ class OrchestratorV2_1:
                     self.is_math_question = True
                     self.is_engineering_design = False
 
-            # PHASE 1: Plan
-            if self.status:
-                self.status.set_phase(2, "Planning")
-            await self._phase_1_plan_and_decompose(question)
+            # FAST PATH: obvious self-contained math (heuristic, no LLM call)
+            if (self.classification is not None
+                    and getattr(self.classification, 'self_contained', False)):
+                self.skip_search = True
+                self.sub_problems = [{'title': 'Main Problem', 'question': question}]
+                print("\n⚡ Self-contained math — skipping search (all values present)")
+            else:
+                # PHASE 0B: knowledge check — phi4 decides what (if anything) to look up
+                if self.status:
+                    self.status.set_phase(1, "Knowledge Check")
+                await self._phase_0b_knowledge_check(question)
+                if self.skip_search:
+                    self.sub_problems = [{'title': 'Main Problem', 'question': question}]
 
-            # PHASE 1A: Create information checklist
-            await self._phase_1a_create_checklist(question)
+            if not self.skip_search:
+                # PHASE 1: Plan
+                if self.status:
+                    self.status.set_phase(2, "Planning")
+                await self._phase_1_plan_and_decompose(question)
 
-            # PHASE 2: Search
-            if self.status:
-                self.status.set_phase(3, "Search")
-            await self._phase_2_search(question)
+                # PHASE 1A: Create information checklist
+                await self._phase_1a_create_checklist(question)
 
-            # PHASE 2A: Create solution checklist (if math problem)
-            if self.is_math_question:
-                await self._phase_2a_create_solution_checklist(question)
+                # PHASE 2: Search
+                if self.status:
+                    self.status.set_phase(3, "Search")
+                await self._phase_2_search(question)
+
+                # PHASE 2A: Create solution checklist (if math problem)
+                if self.is_math_question:
+                    await self._phase_2a_create_solution_checklist(question)
 
             # PHASE 3-4: Math (only if applicable)
             if self.question_type in [QuestionType.MATHEMATICAL, QuestionType.HYBRID]:
@@ -280,6 +297,74 @@ class OrchestratorV2_1:
         
         self.phase_times['classification'] = (datetime.now() - phase_start).total_seconds()
     
+    async def _phase_0b_knowledge_check(self, question: str) -> None:
+        """PHASE 0B: phi4 decides what (if anything) it needs to look up.
+
+        Sets self.skip_search = True if phi4 can answer from training knowledge.
+        Sets self.targeted_queries to a short list of specific lookups otherwise.
+        This runs only when the heuristic self_contained flag was not set.
+        """
+        print("\n" + "="*70)
+        print("PHASE 0B: KNOWLEDGE CHECK")
+        print("="*70)
+
+        phase_start = datetime.now()
+        qtype = self.question_type.value if self.question_type else "unknown"
+        given = (self.classification.given_variables
+                 if self.classification else [])
+
+        prompt = f"""You are deciding whether web searches are needed before answering.
+
+Question: {question}
+Type: {qtype}
+Given values in the question: {given}
+
+Respond ONLY with valid JSON:
+{{
+  "can_answer_without_search": true or false,
+  "reason": "one sentence",
+  "targeted_queries": ["very specific lookup 1", "very specific lookup 2"]
+}}
+
+Rules:
+- true  → you know all needed formulas, constants, and facts from training
+- false → you need current/live data, or uncommon domain-specific values
+- targeted_queries: 0-3 pinpoint lookups (e.g. "Isp of HTPB at 68 atm")
+  NOT broad topics (e.g. "rocket engines")
+- Leave targeted_queries empty ([]) when can_answer_without_search is true
+"""
+
+        try:
+            response = await self._llm_query(
+                prompt,
+                system_prompt="Respond with ONLY valid JSON, no markdown, no explanation."
+            )
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            data = json.loads(json_match.group()) if json_match else {}
+
+            can_answer  = data.get('can_answer_without_search', False)
+            reason      = data.get('reason', '')
+            targeted    = [q for q in data.get('targeted_queries', [])
+                           if isinstance(q, str) and q.strip()][:3]
+
+            if can_answer:
+                self.skip_search = True
+                print(f"\n🧠 phi4 knows this — skipping search")
+                print(f"   {reason}")
+            elif targeted:
+                self.targeted_queries = targeted
+                print(f"\n🔍 phi4 wants {len(targeted)} targeted lookup(s):")
+                for q in targeted:
+                    print(f"   • {q}")
+            else:
+                print(f"\n🔍 phi4 wants full search")
+                print(f"   {reason}")
+
+        except Exception as e:
+            print(f"⚠️  Knowledge check failed: {e} — proceeding with full search")
+
+        self.phase_times['knowledge_check'] = (datetime.now() - phase_start).total_seconds()
+
     async def _phase_1_plan_and_decompose(self, question: str) -> None:
         """PHASE 1: Plan and decompose"""
         print("\n" + "="*70)
@@ -410,11 +495,17 @@ For EACH sub-problem provide JSON (no markdown):
             )
 
             # Build sub-query list from planner output (up to 4 queries)
-            sub_queries = []
-            if self.plan_result:
-                for q in self.plan_result.get('search_needed', [])[:4]:
-                    if q and q != question:
-                        sub_queries.append(q)
+            # Use targeted queries from Phase 0B knowledge check when available;
+            # otherwise fall back to planner-generated sub-queries.
+            if self.targeted_queries:
+                sub_queries = self.targeted_queries
+                print(f"\n🎯 Using {len(sub_queries)} targeted query/queries from knowledge check")
+            else:
+                sub_queries = []
+                if self.plan_result:
+                    for q in self.plan_result.get('search_needed', [])[:4]:
+                        if q and q != question:
+                            sub_queries.append(q)
 
             # Run coordinator on sub-queries (writes facts to SharedMemory)
             # THEORETICAL/HYBRID → iterative deep search with reflection loop
@@ -752,6 +843,70 @@ Return the corrected complete Python script in ```python``` fences. No prose."""
                         print(f"  ⚠️  Retry {retry_num} returned invalid Python — stopping retries.")
                         break
 
+                # ── Detect silent solver convergence failure ───────────────────
+                # fsolve returns last iterate even when not converged — check output
+                if execution.success:
+                    solver_fail_lines = [
+                        ln for ln in execution.output.splitlines()
+                        if ln.strip().startswith("SOLVER FAILED:")
+                    ]
+                    if solver_fail_lines:
+                        print(f"\n⚠️  Solver convergence failure detected (false-success):")
+                        for ln in solver_fail_lines:
+                            print(f"   {ln}")
+                        conv_hint = "\n".join(solver_fail_lines)
+                        fix_prompt = f"""The script below RAN without Python errors but the SOLVER FAILED TO CONVERGE:
+
+PROBLEM:
+{problem['question'][:500]}
+
+CONVERGENCE FAILURE:
+{conv_hint}
+
+ORIGINAL SCRIPT (first 3000 chars):
+```python
+{equation.python_code[:3000]}
+```
+
+Rewrite to correctly converge.  Try in order:
+1. scipy.optimize.least_squares with method='trf' (robust for nonlinear systems)
+2. Better initial guess closer to the physical answer
+3. sympy.solve() / nsolve() for analytical / semi-analytical solution
+4. solve_ivp with event detection for trajectory endpoint problems
+
+RULES:
+- After solving, print "SOLVER CHECK: residual=<value>" or "SOLVER CHECK: x_err=<v> y_err=<v>"
+- Only print RESULT: lines when convergence is confirmed
+- No {{placeholder}} syntax — inline all values
+
+Return ONLY the corrected Python in ```python``` fences. No prose."""
+
+                        print(f"  Attempting convergence-aware re-solve...")
+                        fix_resp = await self._llm_query_coder(fix_prompt)
+                        fix_match = re.search(r'```python\n(.*?)\n```', fix_resp, re.DOTALL)
+                        if not fix_match:
+                            fix_match = re.search(r'```\n(.*?)\n```', fix_resp, re.DOTALL)
+                        if fix_match and EquationGenerator.validate_syntax(fix_match.group(1)):
+                            conv_code = fix_match.group(1).strip()
+                            conv_exec = await EquationExecutor.execute(
+                                conv_code, given_values, timeout=90)
+                            if conv_exec.success:
+                                still_failing = [
+                                    ln for ln in conv_exec.output.splitlines()
+                                    if ln.strip().startswith("SOLVER FAILED:")
+                                ]
+                                if not still_failing:
+                                    print(f"  ✅ Convergence re-solve succeeded.")
+                                    execution = conv_exec
+                                    equation.python_code = conv_code
+                                else:
+                                    print(f"  ⚠️  Re-solve still shows convergence failure — result flagged")
+                                    execution.output += "\n[WARNING: SOLVER CONVERGENCE UNVERIFIED]"
+                            else:
+                                print(f"  ❌ Re-solve failed: {(conv_exec.error or '')[:150]}")
+                        else:
+                            print(f"  ⚠️  Convergence-fix returned invalid Python")
+
                 if execution.success:
                     print(f"\n✅ Execution successful!")
                     print("\nOutput:")
@@ -843,8 +998,29 @@ Return the corrected complete Python script in ```python``` fences. No prose."""
                                 execution.computed_values.update(reconcile["values"])
                                 verif_notes.append(f"RECONCILED: {reconcile['diagnosis'][:100]}")
                             else:
-                                print(f"  ⚠️  Reconciliation failed — keeping primary result (flagged unverified)")
+                                print(f"  ⚠️  Reconciliation failed — attempting to execute reconcile code directly")
                                 verif_notes.append("UNRESOLVED_DISCREPANCY")
+                                # Try running the third-attempt code produced by debug_reconcile
+                                recon_code = reconcile.get("code", "").strip()
+                                if recon_code and EquationGenerator.validate_syntax(recon_code):
+                                    recon_exec = await EquationExecutor.execute(
+                                        recon_code, given_values, timeout=90)
+                                    if recon_exec.success and recon_exec.computed_values:
+                                        recon_fails = [
+                                            ln for ln in recon_exec.output.splitlines()
+                                            if ln.strip().startswith("SOLVER FAILED:")
+                                        ]
+                                        if not recon_fails:
+                                            print(f"  ✅ Reconcile code executed successfully — using its values")
+                                            execution.computed_values.update(recon_exec.computed_values)
+                                            execution.output = recon_exec.output
+                                            verif_notes.append("RECONCILE_CODE_EXECUTED")
+                                        else:
+                                            print(f"  ⚠️  Reconcile code also has convergence failure — result flagged")
+                                    else:
+                                        print(f"  ❌ Reconcile code also failed: {(recon_exec.error or '')[:120]}")
+                                else:
+                                    print(f"  ⚠️  No usable reconcile code — primary result kept (flagged unverified)")
                         except Exception as re_err:
                             print(f"  ⚠️  Reconcile error: {re_err}")
 
@@ -989,39 +1165,49 @@ If the script printed "delta_v = 9450.23 m/s", write "9450.23 m/s", not "~9.5 km
                 )
 
             else:
-                # ── Math ran but nothing solved — fall back to research ────
-                print("\n  Math phase produced no solved results — falling back to research answer.")
+                # ── Math ran but nothing solved — attempt recovery ─────────
+                print("\n  Math phase produced no solved results — attempting recovery.")
 
-                # Gather search facts for context
-                search_facts = self.memory.get_facts(fact_type=FactType.SEARCH_RESULT)
-                facts_text = "\n".join(
-                    f"• {f.content[:200]}" for f in search_facts[:30]
-                )
+                # Collect failed code + errors for context
+                failed_blocks = []
+                for title, result in self.results.items():
+                    code  = result.get("code", "").strip()
+                    error = result.get("error", "").strip()
+                    if code or error:
+                        block = f"=== {title} ===\n"
+                        if error:
+                            block += f"Error: {error}\n"
+                        if code:
+                            block += f"Failed script:\n{code[:2000]}\n"
+                        failed_blocks.append(block)
 
-                prompt = f"""You are a technical writer. Answer the following engineering question using the research gathered.
+                failed_code_text = "\n\n".join(failed_blocks) if failed_blocks else "(no code generated)"
+
+                # Ask qwen2.5 to compute the answer directly, using the failed code
+                # as a starting point — or derive the numbers from scratch.
+                prompt = f"""You are an expert physicist and Python programmer.
+A computation script was generated to solve the problem below but failed to execute.
+Your job: compute the ACTUAL NUMERICAL ANSWER by reasoning through the math yourself.
 
 PROBLEM:
 {question}
 
-MATH PIPELINE STATUS:
-{results_text}
+FAILED SCRIPT (use as a reference for the approach, fix errors if any):
+{failed_code_text}
 
-RESEARCH FINDINGS:
-{facts_text}
+Instructions:
+1. Work through the problem step-by-step using correct physics.
+2. Show every equation and intermediate value with units.
+3. State the final numerical answers clearly (e.g. "Azimuth = -23.4°", "Elevation = 15.2°").
+4. If the script had a fixable error (missing library, wrong syntax), write the corrected
+   version as a short Python snippet showing the key calculation.
+5. DO NOT say "exact values cannot be determined" — compute them from the given data."""
 
-Provide the best possible answer from the research. Where the math pipeline failed,
-explain what equations and approach would be needed and state typical values from
-the literature. Be explicit about what is a computed result vs. a literature value."""
-
-                if HAS_WRITER:
-                    try:
-                        writer = WriterAgent(self.memory)
-                        answer = await writer.write_research_answer(question)
-                    except Exception as e:
-                        print(f"⚠️  WriterAgent error: {e}")
-                        answer = await self._llm_query_coder(prompt)
-                else:
-                    answer = await self._llm_query_coder(prompt)
+                print(f"  Asking qwen2.5 to recover answer from {len(failed_blocks)} failed script(s)...")
+                answer = await self._llm_query_coder(
+                    prompt,
+                    system_prompt="You are a technical physicist. Compute exact numerical answers. Never refuse to calculate."
+                )
 
             self.phase_times['summary'] = (datetime.now() - phase_start).total_seconds()
             return answer
