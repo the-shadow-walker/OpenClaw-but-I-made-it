@@ -180,8 +180,21 @@ class ReactSolver:
     MAX_TURNS = 15
     MODEL = "qwq:32b"
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    # qwq:32b is a reasoning model — needs a long timeout
-    LLM_TIMEOUT = 1800  # seconds — qwq:32b reasoning chains can be long
+    LLM_TIMEOUT = 1800  # seconds — streaming keep-alive; actual cap is hard timeout below
+
+    # ── Thinking controls (experiment by changing these) ──────────────────
+    # NUM_PREDICT: max tokens for the ENTIRE response (think block + answer).
+    #   4096 → ~19 min/turn on this hardware (too slow)
+    #   2048 → ~8-10 min/turn  (default — halves think time)
+    #   1024 → ~4-5 min/turn   (may truncate complex reasoning)
+    #    512 → ~2 min/turn     (minimal thinking; good for simple steps)
+    NUM_PREDICT: int = 2048
+
+    # THINKING_ENABLED: set False to pass think=False to Ollama.
+    #   True  → qwq reasons fully before answering (slower, more accurate)
+    #   False → qwq skips <think> block entirely (fast, less accurate)
+    #   Tip: try False first for simple arithmetic SPs, True for derivations.
+    THINKING_ENABLED: bool = True
 
     def __init__(
         self,
@@ -317,9 +330,10 @@ class ReactSolver:
             "model": self.MODEL,
             "messages": messages,
             "stream": True,   # streaming keeps the connection alive for slow models
+            "think": self.THINKING_ENABLED,   # False = skip <think> block entirely
             "options": {
                 "temperature": 0.6,
-                "num_predict": 4096,
+                "num_predict": self.NUM_PREDICT,
             },
         }
         try:

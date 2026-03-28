@@ -558,7 +558,8 @@ REQUIREMENTS:
             return ""
 
     async def _llm_query_reasoner(self, prompt: str, system_prompt: str = "") -> str:
-        """qwq:32b — deep reasoning, synthesis, verification. Long timeout."""
+        """qwq:32b — synthesis + verification. Uses THINKING_ENABLED from ReactSolver."""
+        from react_solver import ReactSolver as _RS
         return await self._ollama_chat(
             model=_MODEL_REASONER,
             prompt=prompt,
@@ -566,8 +567,9 @@ REQUIREMENTS:
                 "You are an expert scientist and mathematician. "
                 "Think step by step. Be precise with units and numerical values."
             ),
-            timeout=600,
-            num_predict=6144,
+            timeout=1800,
+            num_predict=_RS.NUM_PREDICT,
+            think=_RS.THINKING_ENABLED,
         )
 
     async def _llm_query_fallback(self, prompt: str, system_prompt: str = "") -> str:
@@ -589,7 +591,8 @@ REQUIREMENTS:
         prompt: str,
         system: str = "",
         timeout: int = 1800,
-        num_predict: int = 4096,
+        num_predict: int = 2048,
+        think: bool = True,
     ) -> str:
         """Direct Ollama /api/chat call using streaming (avoids HTTP timeout on large models)."""
         messages = []
@@ -601,6 +604,7 @@ REQUIREMENTS:
             "model": model,
             "messages": messages,
             "stream": True,
+            "think": think,
             "options": {
                 "temperature": 0.6,
                 "num_predict": num_predict,
