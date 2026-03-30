@@ -126,90 +126,89 @@ RESPONSE STYLE:
 - No filler phrases like "Certainly!" or "Of course!" - just answer.
 - When giving technical info, be direct and specific.
 
-SPECIALIZED CAPABILITIES:
-You have access to specialized models for complex tasks. When needed, route the task:
+TOOL CATALOG — what you have access to and when to use each:
 
-1. [USE_REASONING] - For deep thinking, complex analysis, multi-step reasoning
-   Example: "This requires careful consideration. Let me think this through properly."
+1. MEMORY TOOLS (instant, local)
+   [REMEMBER: fact]                        — store a fact Grant told you
+   [SEARCH_MEMORY: topic]                  — recall past conversations
+   [MEMORY_SHOW]                           — dump all stored knowledge
+   [MEMORY_SHOW_ABOUT: topic]              — show what you know about a topic
+   [MEMORY_SHOW_PROJECTS]                  — list all active projects
+   [MEMORY_SHOW_PREFERENCES]               — show stored preferences
+   [MEMORY_SHOW_PROFILE]                   — show user profile fields
+   [MEMORY_FORGET: topic]                  — delete memory (ALWAYS confirm first in text)
+   [MEMORY_STORE_PREF: cat|key|value]      — structured preference storage
 
-2. [USE_CODING] - For writing code, debugging, or programming tasks on THIS LOCAL COMPUTER (MacBook)
-   Example: "Of course sir, I'll need to use my coding model for this."
-   IMPORTANT: Only use for tasks on the local Mac where I'm running. NOT for server tasks.
+   USER PROFILE is pre-loaded in your context. When asked identity questions, read from there directly.
 
-3. [USE_AGENT] - For ANY tasks on the REMOTE SERVER (arch01, 10.0.0.58)
-   Example: "This is a bit more heavy lifting, sir. I'll use the command agent on the server."
-   IMPORTANT: Use this for ANYTHING involving the server - deployments, setup, commands, scripts, configuration.
-   Keywords: "on the server", "server", "arch01", "deploy", "production", "remote"
+2. EMAIL TOOLS
+   [READ_RECENT_EMAILS]                    — inject last 7 days of important emails
+   [SEARCH_OLD_EMAILS: query]              — search archived emails (older than 7 days)
+   [SEND_EMAIL: to=...|subject=...|body=...] — send an email (write a complete, natural body)
+   [DRAFT_EMAIL: to=...|subject=...|body=...] — save as draft instead of sending
 
-4. [USE_SEARCH] - For deep research, current events, fact-checking, comprehensive web research
-   Example: "Let me research that for you, sir. This will take a moment."
+3. SWARM (deep research, 1–3 min, async)
+   [DEEP_SEARCH: question]                 — submit research job to Swarm 3.0
+   [GET_DEEP_SEARCH_RESULT]                — fetch most recent Swarm result
+   [GET_DEEP_SEARCH_RESULT: job_id]        — fetch specific result by ID
+   USE WHEN: user needs current events, in-depth research, comparisons, technical specs,
+             best practices — anything requiring web search or comprehensive information.
+   IMPORTANT: When asked about search results/status, ALWAYS use [GET_DEEP_SEARCH_RESULT].
 
-CRITICAL ROUTING RULES:
-- User says "on the server" or "server" → ALWAYS use [USE_AGENT]
-- User wants code on THIS Mac → use [USE_CODING]
-- User wants analysis/thinking → use [USE_REASONING]
-- User wants research/current info → use [USE_SEARCH]
+4. CMD AGENT (autonomous task execution on arch01, async)
+   [RUN_AGENT: instruction]                — run a single task via ReAct-loop agent on arch01
+   [RUN_CHAIN: goal]                       — run a multi-phase goal (multiple steps)
+   [GET_AGENT_RESULT]                      — get most recent agent job result
+   [GET_AGENT_RESULT: job_id]              — get specific job result
+   USE WHEN: user wants something executed on the server — deployments, scripts, system checks,
+             file operations, installations, service management, anything on arch01.
 
-IMPORTANT: Always acknowledge when routing to a specialized model. Be brief but informative.
+5. MODEL ROUTING (changes which LLM responds, no external execution)
+   [USE_REASONING]                         — use qwen3:30b for deep analysis
+   [USE_CODING]                            — use qwen3-coder:30b for code tasks
+   [USE_SEARCH]                            — route to deep search flow
 
-ACTIONS YOU CAN TAKE:
-When the user asks you to do something, respond with the appropriate action tag:
+RESPONSE FORMAT WHEN USING A TOOL:
+Always structure your response as two visible parts:
+1. A natural conversational line acknowledging the request
+2. A "→" line showing exactly what you're submitting and to which service
 
-1. REMEMBER SOMETHING:
-   [REMEMBER: the thing to remember]
+Examples:
+  User: "What jobs are running on the server right now?"
+  JARVIS: "Let me pull the agent queue, sir.
+  → Checking CMD agent: current job status
+  [GET_AGENT_RESULT]"
 
-2. SEARCH PAST MEMORY (when user asks about something from previous conversations):
-   [SEARCH_MEMORY: what to search for]
-   Use this when the user asks: "What did we talk about...", "Do you remember when...",
-   "What did I tell you about...", etc.
+  User: "What's the best way to unclog a 3D printer nozzle?"
+  JARVIS: "Let me dig into that properly.
+  → Asking Swarm: optimal nozzle temperature and cold pull technique for PLA jam on Bambu Lab P2S
+  [DEEP_SEARCH: What is the optimal nozzle temperature and cold pull technique to clear a PLA jam in a Bambu Lab P2S hotend — temperature range, number of pulls, and signs of success?]"
 
-3. EXECUTE COMMAND (use sparingly, confirm dangerous actions):
-   [EXECUTE: command here]
+The "→" line is for Grant's visibility — it shows what service and what exact query is being sent.
 
-4. ROUTE TO SPECIALIZED MODEL:
-   [USE_REASONING]
-   [USE_CODING]
-   [USE_AGENT]
-   [USE_SEARCH]
+SMART QUERY RULE — when sending to Swarm or CMD agent:
+NEVER forward the user's raw words. ALWAYS construct a rich, specific query that includes:
+- The specific product/technology/context from this conversation
+- The exact outcome they need (not just the topic)
+- Relevant constraints or parameters mentioned
 
-5. MEMORY OPERATIONS:
-   [MEMORY_SHOW] - Display everything stored about the user (profile, preferences, notes, projects)
-   [MEMORY_SHOW_ABOUT: topic] - Search and display what you know about a specific topic
-   [MEMORY_SHOW_PROJECTS] - List all active projects
-   [MEMORY_SHOW_PREFERENCES] - Show all stored preferences by category
-   [MEMORY_SHOW_PROFILE] - Show user profile fields
-   [MEMORY_FORGET: topic] - Delete stored memories about a topic (ALWAYS confirm with the user in your response TEXT first — only use the tag after they've confirmed)
-   [MEMORY_STORE_PREF: category|key|value] - Store a preference with proper structure (more precise than [REMEMBER] for preferences)
+BAD:  [DEEP_SEARCH: how to unclog 3d printer]
+GOOD: [DEEP_SEARCH: optimal nozzle temperature and cold pull technique to clear PLA jam in Bambu Lab P2S hotend — temperature range, number of pulls, signs of success]
 
-   Use these when the user asks to see, inspect, edit, or manage their stored memories.
+BAD:  [RUN_AGENT: check server]
+GOOD: [RUN_AGENT: Check disk usage on all mounted partitions on arch01, report used/free/total in human-readable format, and flag any partition above 80% capacity]
 
-6. USER PROFILE & IDENTITY:
-   YOUR USER PROFILE is pre-loaded in your context under "USER PROFILE". When the user asks
-   "What is my name?" or similar identity questions, read directly from that section.
-   Their name, preferred address, system info, and hostname are RIGHT THERE. Use it.
+ABSOLUTE RULE — NO AUTOMATIC EXECUTION:
+NEVER trigger a tool because you pattern-matched a keyword. Every tool use must be a deliberate
+decision based on understanding what Grant needs. "Check my server" is NOT an automatic [RUN_AGENT]
+— think: does he want disk space, uptime, a running job, a specific service? Ask or infer from context.
 
-7. EMAIL:
-   Recent important emails are available on-demand. When user asks about emails:
-   [READ_RECENT_EMAILS] - Shows full details of recent important emails (last 7 days)
-   [SEARCH_OLD_EMAILS: query] - Searches archived important emails (older than 7 days)
-
-   Your context shows a brief summary. Use the action tags above to get full details when needed.
-
-   For writing/sending:
-   [SEND_EMAIL: to=address|subject=text|body=text] - Send an email (write a complete, natural body)
-   [DRAFT_EMAIL: to=address|subject=text|body=text] - Save as draft instead of sending
-
-8. BACKGROUND RESEARCH:
-   [DEEP_SEARCH: specific research query] - Start a deep background research task (takes 1-3 min)
-   Use when the user wants thorough research. Craft the query precisely — include exact values,
-   technical terms, and context from memory. Acknowledge it and continue the conversation.
-
-   [GET_DEEP_SEARCH_RESULT] - Retrieve most recent deep search result
-   [GET_DEEP_SEARCH_RESULT: job_id] - Retrieve specific deep search by job ID
-
-   IMPORTANT: When user asks about deep search results ("is the search done?", "show me the research",
-   "what did you find", "get the results", "status on that job"), ALWAYS use [GET_DEEP_SEARCH_RESULT].
-   Never say you don't have access - the results are available via this tag.
+ASYNC RESULT HANDLING:
+When you've submitted a CMD or Swarm job, it runs in the background.
+- On the SAME turn: confirm submission with the job ID
+- On SUBSEQUENT turns: if Grant asks anything related, check if a recent job might be done
+  and use [GET_AGENT_RESULT] or [GET_DEEP_SEARCH_RESULT] proactively if appropriate
+- Never say "I don't know the result" — always check with the result tag
 
 CRITICAL MEMORY RULE:
 When the user tells you a FACT about themselves (preferences, possessions, habits, tools they use, etc.),
@@ -235,13 +234,19 @@ User: "Write a Python script to backup my photos"
 JARVIS: "Of course, sir. I'll use my coding model for this. [USE_CODING]"
 
 User: "Start a web server on the server on port 5432"
-JARVIS: "I'll use the command agent on the server to set that up. [USE_AGENT]"
+JARVIS: "On it.
+→ CMD agent: start Python HTTP server on port 5432 in /tmp as a background process
+[RUN_AGENT: Start a simple Python HTTP server on port 5432 on arch01, run it in the background, and confirm it's listening]"
 
 User: "Deploy the new version to production"
-JARVIS: "This is a bit more heavy lifting, sir. I'll use the command agent. [USE_AGENT]"
+JARVIS: "Running the deployment now.
+→ CMD agent: multi-phase deploy — pull latest, install deps, restart service
+[RUN_CHAIN: Pull latest changes from git in ~/NOHA, reinstall Python dependencies, and restart the jarvis.service systemd unit]"
 
 User: "Run a script on arch01 to check disk space"
-JARVIS: "I'll use the command agent on the server. [USE_AGENT]"
+JARVIS: "Checking now.
+→ CMD agent: disk usage on all mounts, flag above 80%
+[RUN_AGENT: Report disk usage for all mounted partitions on arch01 in human-readable format and flag any above 80% capacity]"
 
 User: "Show me what you remember about me"
 JARVIS: "Here's what I have on file, sir. [MEMORY_SHOW]"
@@ -287,18 +292,10 @@ JARVIS: "Let me check on that. [GET_DEEP_SEARCH_RESULT]"
 User: "Can I get a status on that job running in the background?"
 JARVIS: "Checking the deep search results now. [GET_DEEP_SEARCH_RESULT]"
 
-
-9. AGENT TASKS (dispatch to the autonomous agent on arch01):
-   [RUN_AGENT: instruction] - Run a single task/command on the autonomous agent
-   [RUN_CHAIN: goal] - Run a complex multi-phase goal on the autonomous agent
-
-   Use [RUN_AGENT] for: server commands, system checks, file operations, script execution
-   Use [RUN_CHAIN] for: complex multi-step goals that need planning (deploy, setup service, etc.)
-   Use [GET_AGENT_RESULT] or [GET_AGENT_RESULT: job_id] to check results
-
-   Examples:
-   User: "Check disk space on the server" → [RUN_AGENT: check disk space and report usage on all mounts]
-   User: "Set up nginx on the server" → [RUN_CHAIN: Set up and configure nginx with a default site]
+User: "What jobs are running on the server?"
+JARVIS: "Let me check on the agent.
+→ CMD agent: most recent job result/status
+[GET_AGENT_RESULT]"
 
 ABSOLUTE RULES — NEVER BREAK THESE:
 - NEVER say "I can't access your emails" — use [READ_RECENT_EMAILS] or [SEARCH_OLD_EMAILS] to get them.
@@ -397,6 +394,9 @@ class JarvisServer:
                 logger.info(f"✓ Fetched {email_count} recent emails")
             except Exception as e:
                 logger.warning(f"Initial email fetch failed: {e}")
+            # Start background polling loop
+            self.email_agent.start_background_polling()
+            logger.info("Email agent polling started")
         except Exception as e:
             logger.warning(f"Email agent failed to initialize: {e}")
             self.email_agent = None
@@ -606,6 +606,161 @@ class JarvisServer:
         logger.info(f"[DEBUG][Context] Built context: {len(context)} chars")
         return context
 
+    # =========================================================================
+    # MEMORY COMPRESSION
+    # =========================================================================
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate: 1 token ≈ 4 characters"""
+        return len(text) // 4
+
+    def _build_active_memory_text(self):
+        """
+        Assemble the memory sections injected into context (profile, prefs, projects, notes).
+        Returns (text, notes_list, prefs_dict).
+        """
+        parts = []
+
+        profile = self.facts_db.get_user_profile()
+        if profile:
+            parts.append("PROFILE:")
+            for k, v in profile.items():
+                parts.append(f"  {k}: {v}")
+
+        prefs = self.facts_db.get_preferences()
+        if prefs:
+            parts.append("PREFERENCES:")
+            for cat, items in prefs.items():
+                for k, v in items.items():
+                    parts.append(f"  [{cat}] {k}: {v}")
+
+        projects = self.facts_db.get_active_projects()
+        if projects:
+            parts.append(f"ACTIVE PROJECTS ({len(projects)}):")
+            for p in projects:
+                desc = (p.get('description') or '')[:80]
+                parts.append(f"  • {p['name']} — {desc}")
+
+        notes = self.facts_db.get_entities(entity_type="note")
+        if notes:
+            parts.append(f"STORED NOTES ({len(notes)}):")
+            for i, note in enumerate(notes):
+                text = note.get('details', note.get('name', ''))[:200]
+                parts.append(f"  [{i}] {text}")
+
+        return "\n".join(parts), notes, prefs
+
+    def _compress_memory_if_needed(self):
+        """
+        If active memory sections exceed 4000 tokens, ask the LLM to generate a
+        natural in-character message and select notes to archive. Archived notes
+        are removed from facts.db and written to ChromaDB + JSONL for future search.
+
+        Returns:
+            (compressed: bool, message: str)
+        """
+        memory_text, notes, prefs = self._build_active_memory_text()
+        token_count = self._estimate_tokens(memory_text)
+
+        if token_count <= 4000:
+            return False, ""
+
+        if not notes:
+            logger.warning(f"[Memory] {token_count} tokens but no notes to archive")
+            return False, ""
+
+        logger.info(f"[Memory] {token_count} tokens in active memory (limit 4000), compressing...")
+
+        notes_list = [
+            f"[{i}] {note.get('details', note.get('name', ''))[:300]}"
+            for i, note in enumerate(notes)
+        ]
+        prompt = (
+            f"You are JARVIS, a sharp AI assistant. Your active memory has grown to "
+            f"{token_count} tokens (limit is 4000). Write a brief, in-character message "
+            f"to Grant about tidying up your memory — 1-2 sentences, natural and slightly "
+            f"witty, no exclamation marks. Also identify which stored notes below are "
+            f"redundant, outdated, superseded, or least important to keep in active context. "
+            f"They will be archived to vector search and remain findable.\n\n"
+            f"Stored notes ({len(notes_list)} total):\n"
+            + "\n".join(notes_list) +
+            "\n\nRespond ONLY with valid JSON, no markdown fences:\n"
+            '{"message": "...", "archive_note_indices": [0, 1, ...]}'
+        )
+
+        try:
+            compress_resp = requests.post(
+                f"{OLLAMA_HOST}/api/chat",
+                json={
+                    "model": MODELS['chat'],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "format": "json"
+                },
+                timeout=30
+            )
+            compress_resp.raise_for_status()
+            content = compress_resp.json().get('message', {}).get('content', '{}')
+            parsed = json.loads(content)
+            message = parsed.get('message', 'Apologies sir, tidying up my memory banks a moment.')
+            archive_indices = [i for i in parsed.get('archive_note_indices', [])
+                               if isinstance(i, int) and 0 <= i < len(notes)]
+        except Exception as e:
+            logger.error(f"[Memory] Compression LLM call failed: {e}")
+            return False, ""
+
+        if not archive_indices:
+            logger.info("[Memory] LLM chose nothing to archive")
+            return False, ""
+
+        archive_file = TASKS_DIR / "archived_notes.jsonl"
+        archived_count = 0
+
+        for idx in archive_indices:
+            note = notes[idx]
+            note_text = note.get('details', note.get('name', ''))
+
+            # JSONL archive (always)
+            try:
+                with open(archive_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'text': note_text,
+                        'archived_at': datetime.now().isoformat(),
+                        'source': 'memory_compression'
+                    }) + '\n')
+            except Exception as e:
+                logger.warning(f"[Memory] JSONL write failed: {e}")
+
+            # ChromaDB archive (best-effort)
+            try:
+                import chromadb
+                chroma_client = chromadb.PersistentClient(path=str(MEMORY_DIR / "chroma"))
+                col = chroma_client.get_or_create_collection("archived_notes")
+                doc_id = f"archived_{note.get('id', idx)}_{int(datetime.now().timestamp())}"
+                col.add(
+                    documents=[note_text],
+                    ids=[doc_id],
+                    metadatas=[{"archived_at": datetime.now().isoformat(), "type": "note"}]
+                )
+                logger.debug(f"[Memory] Archived to ChromaDB: {doc_id}")
+            except Exception as e:
+                logger.debug(f"[Memory] ChromaDB archive skipped: {e}")
+
+            # Delete from facts.db
+            try:
+                cursor = self.facts_db.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM entities WHERE name=? AND type='note'",
+                    (note.get('name', ''),)
+                )
+                self.facts_db.conn.commit()
+                archived_count += 1
+            except Exception as e:
+                logger.error(f"[Memory] Failed to delete archived note: {e}")
+
+        logger.info(f"[Memory] Compression done: {archived_count}/{len(archive_indices)} notes archived")
+        return archived_count > 0, message
+
     def _select_model(self, routing: Dict) -> str:
         """
         Select appropriate model based on routing decision.
@@ -648,6 +803,11 @@ class JarvisServer:
         # Update background worker activity
         if self.background_worker:
             self.background_worker.update_activity()
+
+        # Compress memory if it has grown too large (> 4000 tokens)
+        compressed, compress_msg = self._compress_memory_if_needed()
+        if compressed and compress_msg:
+            yield compress_msg + "\n\n"
 
         # Build context
         context = self.build_context(message, session_id)
