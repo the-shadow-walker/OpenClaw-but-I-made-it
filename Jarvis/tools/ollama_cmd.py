@@ -129,6 +129,22 @@ class OllamaCMDClient:
             logger.error(f"[OllamaCMD] drop_to_inbox failed: {e}")
             return None
 
+    def quick_query(self, question: str) -> Optional[dict]:
+        """Synchronous single-command query (Tier 1 — 1-3s).
+        Returns {command, stdout, stderr, returncode, success, elapsed_ms, risk} or None."""
+        try:
+            r = requests.post(
+                f"{self.base_url}/api/v1/quick",
+                headers=self._headers,
+                json={"question": question},
+                timeout=15,
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.error(f"[OllamaCMD] quick_query failed: {e}")
+            return None
+
     def get_state(self) -> Optional[dict]:
         """Get current queue/active jobs state snapshot."""
         try:

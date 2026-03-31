@@ -155,13 +155,33 @@ TOOL CATALOG — what you have access to and when to use each:
              best practices — anything requiring web search or comprehensive information.
    IMPORTANT: When asked about search results/status, ALWAYS use [GET_DEEP_SEARCH_RESULT].
 
-4. CMD AGENT (autonomous task execution on arch01, async)
-   [RUN_AGENT: instruction]                — run a single task via ReAct-loop agent on arch01
-   [RUN_CHAIN: goal]                       — run a multi-phase goal (multiple steps)
-   [GET_AGENT_RESULT]                      — get most recent agent job result
-   [GET_AGENT_RESULT: job_id]              — get specific job result
-   USE WHEN: user wants something executed on the server — deployments, scripts, system checks,
-             file operations, installations, service management, anything on arch01.
+4. CMD AGENT (arch01 task execution — three tiers by complexity)
+
+   TIER 1 — QUICK (synchronous, 1-3 seconds, single-command factual queries):
+   [QUICK_CMD: question]   — instant answer, runs ONE command, returns output immediately
+   Returns: {command, stdout, stderr, returncode, success, elapsed_ms, risk}
+   USE FOR: "is nginx running?", "what's the disk space?", "what's CPU/RAM usage?",
+            "is port 8080 open?", "what's the uptime?", "check if a process is alive"
+
+   TIER 2 — TASK (async, ReAct loop, seconds to minutes, multi-step execution):
+   [RUN_AGENT: instruction]  — submit job → job_id (async); ask me to check it later
+   USE FOR: scripts, git pulls, file operations, service management, installations,
+            anything requiring multiple steps or decision-making on arch01
+
+   TIER 3 — CHAIN (async, multi-phase plans, minutes, cross-goal workflows):
+   [RUN_CHAIN: goal]         — submit chain → chain_id (async); ask me to check it later
+   USE FOR: deploy + test + restart sequences, full system setups, complex multi-goal tasks
+
+   QUEUE / RESULT TOOLS:
+   [CMD_STATE]               — snapshot of ALL running and queued jobs right now
+   [GET_AGENT_RESULT]        — fetch most recent job or chain result
+   [GET_AGENT_RESULT: id]    — fetch specific job_id or chain_id result
+
+   TIER SELECTION RULE:
+   - Single status/info query with one obvious command? → QUICK_CMD
+   - Multi-step execution or anything with logic/decisions? → RUN_AGENT
+   - Complex multi-phase plan across multiple goals? → RUN_CHAIN
+   - "What's running?" / "Check my jobs"? → CMD_STATE first, then GET_AGENT_RESULT if a specific job
 
 5. MODEL ROUTING (changes which LLM responds, no external execution)
    [USE_REASONING]                         — use qwen3:30b for deep analysis
@@ -233,9 +253,24 @@ JARVIS: "Noted, sir. [REMEMBER: meeting at 3pm]"
 User: "Write a Python script to backup my photos"
 JARVIS: "Of course, sir. I'll use my coding model for this. [USE_CODING]"
 
+User: "What's the disk space on the server?"
+JARVIS: "Checking now.
+→ CMD Quick: df -h
+[QUICK_CMD: What is the disk space usage on all mounted partitions?]"
+
+User: "Is nginx running?"
+JARVIS: "Let me check.
+→ CMD Quick: systemctl status nginx
+[QUICK_CMD: Is the nginx service currently running and active?]"
+
+User: "What jobs are currently in the agent queue?"
+JARVIS: "Pulling the queue snapshot, sir.
+→ CMD State: all running and queued jobs
+[CMD_STATE]"
+
 User: "Start a web server on the server on port 5432"
 JARVIS: "On it.
-→ CMD agent: start Python HTTP server on port 5432 in /tmp as a background process
+→ CMD Task: start Python HTTP server on port 5432 in /tmp as a background process
 [RUN_AGENT: Start a simple Python HTTP server on port 5432 on arch01, run it in the background, and confirm it's listening]"
 
 User: "Deploy the new version to production"
@@ -1112,6 +1147,67 @@ class JarvisServer:
             except Exception as e:
                 logger.error(f"[Action] Failed to search old emails: {e}")
 
+        # [QUICK_CMD: question] - Synchronous Tier-1 CMD query (1-3s, single command)
+        match = re.search(r'\[QUICK_CMD:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
+        if match:
+            question = match.group(1).strip()
+            try:
+                if self.cmd_client.is_available():
+                    result = self.cmd_client.quick_query(question)
+                    if result and result.get('success'):
+                        stdout = (result.get('stdout') or '').strip()
+                        cmd_used = result.get('command', '')
+                        elapsed = result.get('elapsed_ms', 0)
+                        output_text = f"\n\n```\n$ {cmd_used}\n{stdout}\n```\n_(completed in {elapsed}ms)_"
+                    elif result:
+                        stderr = (result.get('stderr') or '').strip()
+                        cmd_used = result.get('command', '')
+                        rc = result.get('returncode', '?')
+                        output_text = f"\n\n⚠️ Command returned exit code {rc}:\n```\n$ {cmd_used}\n{stderr}\n```"
+                    else:
+                        output_text = "\n\n❌ Quick CMD returned no result"
+                    response = response.replace(match.group(0), output_text)
+                    logger.info(f"[Action] QUICK_CMD executed: {question[:80]}")
+                else:
+                    response = response.replace(match.group(0), "\n⚠️ ollama-cmd agent is offline")
+            except Exception as e:
+                response = response.replace(match.group(0), f"\n❌ QUICK_CMD error: {e}")
+                logger.error(f"[Action] QUICK_CMD error: {e}")
+
+        # [CMD_STATE] - Queue snapshot (all running/queued jobs)
+        if re.search(r'\[CMD_STATE\]', response, re.IGNORECASE):
+            try:
+                if self.cmd_client.is_available():
+                    state = self.cmd_client.get_state()
+                    if state:
+                        active = state.get('active_jobs', [])
+                        queued = state.get('queued_jobs', state.get('queue', []))
+                        lines = [f"\n\n📋 CMD Agent Queue — {len(active)} active, {len(queued)} queued"]
+                        if active:
+                            lines.append("Running:")
+                            for j in active[:5]:
+                                jid = (j.get('job_id') or j.get('id', '?'))[:12]
+                                inst = (j.get('instruction') or j.get('goal', ''))[:60]
+                                lines.append(f"  • [{jid}] {inst}")
+                        if queued:
+                            lines.append("Queued:")
+                            for j in queued[:5]:
+                                jid = (j.get('job_id') or j.get('id', '?'))[:12]
+                                inst = (j.get('instruction') or j.get('goal', ''))[:60]
+                                lines.append(f"  • [{jid}] {inst}")
+                        if not active and not queued:
+                            lines.append("  Queue is empty — no jobs running or waiting.")
+                        result_text = "\n".join(lines)
+                    else:
+                        result_text = "\n\n⚠️ Could not retrieve agent state"
+                    response = re.sub(r'\[CMD_STATE\]', result_text, response, flags=re.IGNORECASE)
+                    logger.info(f"[Action] CMD_STATE retrieved")
+                else:
+                    response = re.sub(r'\[CMD_STATE\]', "\n⚠️ ollama-cmd agent is offline", response, flags=re.IGNORECASE)
+            except Exception as e:
+                response = re.sub(r'\[CMD_STATE\]', f"\n❌ CMD_STATE error: {e}", response, flags=re.IGNORECASE)
+                logger.error(f"[Action] CMD_STATE error: {e}")
+
         # [DEEP_SEARCH: query] - Start async deep search
         logger.info(f"[DEBUG] Checking for DEEP_SEARCH tag in response ({len(response)} chars)")
         logger.info(f"[DEBUG] Response contains '[DEEP_SEARCH': {'[DEEP_SEARCH' in response.upper()}")
@@ -1182,10 +1278,10 @@ class JarvisServer:
 
                 # Only fetch if we have a valid job_id
                 if job_id:
-                    # Fetch result from deep search API
+                    # Fetch result from deep search API  (Swarm 3.0: GET /result/<job_id>)
                     logger.info(f"[Action] Fetching deep search result: {job_id}")
                     result_response = requests.get(
-                        f"{DEEP_SEARCH_URL}/jobs/{job_id}/result",
+                        f"{DEEP_SEARCH_URL}/result/{job_id}",
                         timeout=10
                     )
                     result_response.raise_for_status()
@@ -1350,6 +1446,8 @@ class JarvisServer:
             r'\[RUN_AGENT:[^\]]+\]',
             r'\[RUN_CHAIN:[^\]]+\]',
             r'\[GET_AGENT_RESULT(?::[^\]]+)?\]',
+            r'\[QUICK_CMD:[^\]]+\]',
+            r'\[CMD_STATE\]',
         ]
 
         for pattern in tag_patterns:
