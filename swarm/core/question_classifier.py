@@ -72,6 +72,20 @@ material grades, system architecture etc. — not just plugging numbers into equ
 Examples: "design a rocket", "size an electric motor drive", "specify a heat exchanger".
 For engineering_design questions also provide 'domain' and 'dependency_order'.
 
+CRITICAL CLASSIFICATION RULES (these override your intuition):
+1. "theoretical" means PURELY conceptual — no specific numerical values present, no request
+   to compute any number. Example: "Explain qualitatively how orbital precession arises."
+2. If the question contains SPECIFIC NUMERICAL VALUES for variables (e.g., "m = 2 kg",
+   "L = 3 kg·m²/s", "V(r) = -5/r + 3r²", any coefficient with a number) → NEVER classify
+   as "theoretical". Use "mathematical" or "hybrid".
+3. If ANY sub-task says "evaluate", "compute", "calculate", "solve for", "find numerically",
+   "evaluate numerically", or asks to compare specific numerical frequencies/values →
+   classify as "mathematical" (if mostly compute) or "hybrid" (if mix of compute + explain).
+4. Multi-part questions with BOTH numerical computation tasks AND conceptual explanation
+   tasks → ALWAYS "hybrid", never "theoretical".
+5. The presence of "explain", "describe", or "qualitatively" in ONE sub-task does NOT make
+   the whole question theoretical if OTHER sub-tasks require numerical computation.
+
 Respond with ONLY valid JSON (no markdown, no explanation):
 {{
     "question_type": "theoretical" | "mathematical" | "hybrid" | "engineering_design" | "unknown",

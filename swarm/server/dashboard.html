@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis Command Station</title>
+<style>
+/* ── Base theme ─────────────────────────────────────────────────── */
+:root {
+  --bg:        #0a0a0f;
+  --surface:   #12121a;
+  --surface2:  #1a1a26;
+  --border:    #1e1e2e;
+  --accent:    #00d4ff;
+  --green:     #00ff88;
+  --red:       #ff4444;
+  --yellow:    #ffcc00;
+  --orange:    #ff8800;
+  --dim:       #555577;
+  --text:      #ccd6f6;
+  --text-dim:  #778aaa;
+  --mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+/* ── Header ─────────────────────────────────────────────────────── */
+#header {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  height: 44px;
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 16px;
+  user-select: none;
+}
+.brand {
+  font-size: 15px; font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 2px;
+  text-shadow: 0 0 8px var(--accent);
+}
+.badge {
+  display: flex; align-items: center; gap: 5px;
+  padding: 3px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.badge .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--dim);
+  transition: background 0.3s;
+}
+.badge.online .dot  { background: var(--green); box-shadow: 0 0 4px var(--green); }
+.badge.offline .dot { background: var(--red); }
+.badge .label { font-weight: 600; color: var(--text); }
+.badge .val   { color: var(--accent); }
+#hdr-clock { margin-left: auto; color: var(--dim); font-size: 11px; }
+
+/* ── Workspace / drag area ───────────────────────────────────────── */
+#workspace {
+  position: relative;
+  margin-top: 44px;
+  min-height: calc(100vh - 44px);
+  padding: 12px;
+  background-image: radial-gradient(circle, #252540 1.5px, transparent 1.5px);
+  background-size: 20px 20px;
+}
+
+/* ── Widget base ─────────────────────────────────────────────────── */
+.widget {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  transition: box-shadow 0.15s;
+}
+.widget:hover { box-shadow: 0 2px 20px rgba(0,212,255,0.08); }
+.widget.dragging { box-shadow: 0 8px 32px rgba(0,0,0,0.8); opacity: 0.95; z-index: 200; }
+
+.widget-title {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px; font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  cursor: grab;
+  user-select: none;
+}
+.widget-title:active { cursor: grabbing; }
+.widget-title .icon { color: var(--accent); }
+.widget-body { flex: 1; overflow: auto; padding: 10px; }
+
+/* ── Tabs ────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex; gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+  background: var(--surface2);
+}
+.tab-btn {
+  padding: 6px 12px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--dim);
+  background: none; border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover  { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-pane { display: none; }
+.tab-pane.active { display: flex; flex-direction: column; height: 100%; }
+
+/* ── Chat widget ─────────────────────────────────────────────────── */
+#widget-chat { left: 12px; top: 56px; width: 580px; height: 680px; }
+
+#chat-input-row {
+  display: flex; gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+#chat-service-sel {
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  font-family: var(--mono); font-size: 11px;
+  cursor: pointer;
+}
+#chat-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono); font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+#chat-input:focus { border-color: var(--accent); }
+#chat-submit {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #000;
+  border: none; border-radius: 4px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+#chat-submit:hover  { opacity: 0.85; }
+#chat-submit:active { opacity: 0.7; }
+
+.phase-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.phase-row:hover { background: var(--surface2); }
+.phase-icon { width: 18px; text-align: center; }
+.phase-id   { color: var(--accent); width: 28px; font-weight: 700; }
+.phase-name { color: var(--text); flex: 1; }
+.phase-el   { color: var(--dim); font-size: 10px; width: 40px; text-align: right; }
+
+.sp-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.sp-row:hover { background: var(--surface2); }
+.sp-id     { color: var(--accent); width: 36px; font-weight: 700; }
+.sp-status { width: 18px; text-align: center; }
+.sp-turns  { color: var(--dim); width: 42px; font-size: 10px; }
+.sp-tool   { color: #8888cc; width: 80px; }
+.sp-vals   { color: var(--green); flex: 1; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#stream-log {
+  flex: 1; overflow-y: auto;
+  padding: 6px;
+  font-size: 11px; line-height: 1.6;
+  background: var(--bg);
+}
+.log-phase   { color: var(--accent); }
+.log-wave    { color: var(--yellow); }
+.log-sp      { color: #8888cc; }
+.log-sp-done { color: var(--green); }
+.log-fail    { color: var(--red); }
+.log-default { color: var(--text-dim); }
+
+#answer-box {
+  flex: 1; overflow-y: auto;
+  padding: 10px;
+  font-size: 12px; line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#answer-copy-btn {
+  margin: 6px; padding: 4px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 4px;
+  font-family: var(--mono); font-size: 10px;
+  cursor: pointer;
+}
+#answer-copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ── API Builder widget ──────────────────────────────────────────── */
+#widget-api { width: 340px; height: 400px; }
+
+#api-method-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px; font-weight: 700;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--accent);
+}
+#api-top-row {
+  display: flex; gap: 5px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+#api-svc-sel, #api-ep-sel {
+  padding: 4px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  font-family: var(--mono); font-size: 10px;
+  cursor: pointer;
+  outline: none;
+}
+#api-svc-sel { width: 110px; flex-shrink: 0; }
+#api-ep-sel  { flex: 1; min-width: 0; }
+#api-fire {
+  padding: 4px 10px;
+  background: var(--green);
+  color: #000;
+  border: none; border-radius: 4px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+#api-fire:hover { opacity: 0.85; }
+#api-params {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px;
+  background: var(--surface);
+  min-height: 0;
+}
+.api-param-label {
+  font-size: 10px; color: var(--text-dim); margin-bottom: 1px;
+}
+.api-param-input, .api-param-textarea, .api-param-select {
+  width: 100%; padding: 4px 7px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono); font-size: 11px;
+  outline: none;
+  box-sizing: border-box;
+}
+.api-param-textarea { resize: vertical; min-height: 52px; }
+.api-param-input:focus, .api-param-textarea:focus { border-color: var(--accent); }
+#api-response-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+#api-status-badge {
+  flex: 1; font-size: 10px; color: var(--text-dim);
+}
+#api-copy-btn {
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 3px; font-size: 10px; cursor: pointer;
+  font-family: var(--mono);
+}
+#api-copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+#api-response-body {
+  flex: 1; overflow-y: auto;
+  padding: 7px 9px;
+  font-size: 10px; line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg);
+  margin: 0;
+}
+
+/* ── GPU widget ──────────────────────────────────────────────────── */
+#widget-gpu { width: 320px; height: 220px; }
+
+.metric-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 0;
+}
+.metric-label { color: var(--text-dim); width: 50px; font-size: 11px; }
+.metric-bar-wrap {
+  flex: 1; height: 10px;
+  background: var(--surface2);
+  border-radius: 5px; overflow: hidden;
+}
+.metric-bar {
+  height: 100%; border-radius: 5px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.metric-bar.warn  { background: var(--yellow); }
+.metric-bar.crit  { background: var(--red); }
+.metric-val { width: 50px; text-align: right; font-size: 11px; color: var(--text); }
+.metric-name { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.metric-temp { font-size: 10px; color: var(--dim); }
+
+/* ── Jobs widget ─────────────────────────────────────────────────── */
+#widget-jobs { left: 12px; top: 752px; width: 880px; height: 240px; }
+
+.job-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  transition: background 0.1s;
+  cursor: pointer;
+}
+.job-row:hover { background: var(--surface2); }
+.job-svc   { width: 14px; text-align: center; }
+.job-id    { color: var(--accent); width: 60px; font-weight: 700; font-size: 10px; }
+.job-type  { color: var(--text-dim); width: 60px; }
+.job-st    { width: 70px; }
+.job-el    { color: var(--dim); width: 44px; text-align: right; font-size: 10px; }
+.job-prev  { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-watch {
+  padding: 2px 7px;
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text-dim); border-radius: 3px;
+  font-size: 10px; cursor: pointer;
+}
+.job-watch:hover { color: var(--accent); border-color: var(--accent); }
+.st-processing { color: var(--yellow); }
+.st-pending    { color: var(--dim); }
+.st-completed  { color: var(--green); }
+.st-failed     { color: var(--red); }
+
+/* ── Utilities ───────────────────────────────────────────────────── */
+.empty-hint { color: var(--dim); font-size: 11px; text-align: center; padding: 20px; }
+.status-dot-inline {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--dim); margin-right: 4px;
+  vertical-align: middle;
+}
+.status-dot-inline.active { background: var(--green); box-shadow: 0 0 4px var(--green); }
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ──────────────────────────────────────────────────────── -->
+<div id="header">
+  <span class="brand">⬡ JARVIS</span>
+
+  <div class="badge" id="badge-swarm">
+    <span class="dot"></span>
+    <span class="label">Swarm</span>
+    <span class="val" id="hdr-swarm-jobs">—</span>
+  </div>
+
+  <div class="badge" id="badge-cmd">
+    <span class="dot"></span>
+    <span class="label">Cmd</span>
+  </div>
+
+  <div class="badge">
+    <span style="color:var(--accent)">GPU</span>
+    <span class="val" id="hdr-gpu">—</span>
+  </div>
+
+  <div class="badge">
+    <span style="color:var(--text-dim)">RAM</span>
+    <span class="val" id="hdr-ram">—</span>
+  </div>
+
+  <div class="badge">
+    <span style="color:var(--text-dim)">CPU</span>
+    <span class="val" id="hdr-cpu">—</span>
+  </div>
+
+  <span id="hdr-clock">--:--:--</span>
+</div>
+
+<!-- ── WORKSPACE ───────────────────────────────────────────────────── -->
+<div id="workspace">
+
+  <!-- Chat Widget -->
+  <div class="widget" id="widget-chat">
+    <div class="widget-title" data-widget="widget-chat">
+      <span class="icon">⬡</span>
+      <span>SWARM RESEARCH</span>
+      <span id="chat-job-badge" style="margin-left:auto;color:var(--dim);font-size:10px"></span>
+    </div>
+
+    <!-- Input row -->
+    <div id="chat-input-row">
+      <select id="chat-service-sel">
+        <option value="swarm">Swarm</option>
+        <option value="cmd">Execute</option>
+      </select>
+      <input id="chat-input" placeholder="Ask anything or give a command…" autocomplete="off">
+      <button id="chat-submit">↵</button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="phases">Phases</button>
+      <button class="tab-btn" data-tab="sps">SPs</button>
+      <button class="tab-btn" data-tab="stream">Stream</button>
+      <button class="tab-btn" data-tab="answer">Answer</button>
+    </div>
+
+    <!-- Tab: Phases -->
+    <div class="tab-pane active" id="tab-phases" style="overflow:auto;padding:8px;flex:1">
+      <div class="empty-hint" id="phases-empty">Submit a query to see pipeline phases</div>
+      <div id="phases-list"></div>
+    </div>
+
+    <!-- Tab: SPs -->
+    <div class="tab-pane" id="tab-sps" style="overflow:auto;padding:8px;flex:1">
+      <div class="empty-hint" id="sps-empty">Sub-problems appear here during solving</div>
+      <div id="sps-list"></div>
+    </div>
+
+    <!-- Tab: Stream -->
+    <div class="tab-pane" id="tab-stream" style="flex:1">
+      <div id="stream-log"></div>
+    </div>
+
+    <!-- Tab: Answer -->
+    <div class="tab-pane" id="tab-answer" style="flex:1;display:none">
+      <button id="answer-copy-btn">Copy</button>
+      <div id="answer-box"><span style="color:var(--dim)">Answer will appear here…</span></div>
+    </div>
+  </div>
+
+  <!-- API Builder Widget -->
+  <div class="widget" id="widget-api">
+    <div class="widget-title" data-widget="widget-api">
+      <span class="icon">🔌</span>
+      <span>API BUILDER</span>
+      <span id="api-method-badge">GET</span>
+    </div>
+    <div id="api-top-row">
+      <select id="api-svc-sel">
+        <option value="swarm">⬡ Swarm :5002</option>
+        <option value="cmd">🔧 Cmd :5000</option>
+      </select>
+      <select id="api-ep-sel"><!-- populated by JS --></select>
+      <button id="api-fire">FIRE</button>
+    </div>
+    <div id="api-params"></div>
+    <div id="api-response-bar">
+      <span id="api-status-badge"></span>
+      <button id="api-copy-btn">Copy</button>
+    </div>
+    <pre id="api-response-body">…</pre>
+  </div>
+
+  <!-- GPU Widget -->
+  <div class="widget" id="widget-gpu">
+    <div class="widget-title" data-widget="widget-gpu">
+      <span class="icon">⚡</span>
+      <span>GPU / SYSTEM</span>
+    </div>
+    <div class="widget-body">
+      <div class="metric-name" id="gpu-name">Loading…</div>
+      <div class="metric-temp" id="gpu-temp"></div>
+      <br>
+      <div class="metric-row">
+        <span class="metric-label">GPU</span>
+        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-gpu" style="width:0%"></div></div>
+        <span class="metric-val" id="val-gpu">—</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">VRAM</span>
+        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-vram" style="width:0%"></div></div>
+        <span class="metric-val" id="val-vram">—</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">RAM</span>
+        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-ram" style="width:0%"></div></div>
+        <span class="metric-val" id="val-ram">—</span>
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">CPU</span>
+        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-cpu" style="width:0%"></div></div>
+        <span class="metric-val" id="val-cpu">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs Widget -->
+  <div class="widget" id="widget-jobs">
+    <div class="widget-title" data-widget="widget-jobs">
+      <span class="icon">📋</span>
+      <span>JOBS</span>
+      <span id="jobs-count" style="margin-left:auto;color:var(--dim);font-size:10px">0 total</span>
+    </div>
+    <div class="widget-body" style="padding:0">
+      <div id="jobs-list">
+        <div class="empty-hint">No jobs yet</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /workspace -->
+
+<script>
+/* ── Config ───────────────────────────────────────────────────── */
+const SWARM_URL = `${location.protocol}//${location.hostname}:5002`
+const CMD_URL   = `${location.protocol}//${location.hostname}:5000`
+const GRID      = 20  // drag snap grid in pixels
+
+/* ── State ────────────────────────────────────────────────────── */
+const state = {
+  swarm:  { url: SWARM_URL, online: false, jobs: [] },
+  cmd:    { url: CMD_URL,   online: false, jobs: [] },
+  gpu:    {},
+  activeStream: null,       // EventSource for current watched job
+  activeJobId: null,
+  activeJobSvc: null,
+  currentJob: {
+    phases: {},             // phase_id → {name, status, elapsed_s}
+    sps:    {},             // sp_id   → {status, turn, max_turn, tool, values}
+    wave: '', qtype: '',
+    logs: [], answer: '',
+  },
+  widgets: JSON.parse(localStorage.getItem('jcs-widgets') || '{}'),
+}
+
+/* ── Widget positions ─────────────────────────────────────────── */
+function saveWidgetPos(id, left, top) {
+  state.widgets[id] = { left, top }
+  localStorage.setItem('jcs-widgets', JSON.stringify(state.widgets))
+}
+function restoreWidgetPositions() {
+  for (const [id, pos] of Object.entries(state.widgets)) {
+    const el = document.getElementById(id)
+    if (el) {
+      el.style.left = Math.round(pos.left / GRID) * GRID + 'px'
+      el.style.top  = Math.round(pos.top  / GRID) * GRID + 'px'
+    }
+  }
+}
+
+function initWidgetDefaults() {
+  const W = document.getElementById('workspace').clientWidth
+  const R = Math.round((W - 360) / GRID) * GRID   // right column left edge
+  const defaults = {
+    'widget-chat': { left: 20,  top: 60  },
+    'widget-api':  { left: R,   top: 60  },
+    'widget-gpu':  { left: R,   top: 340 },
+    'widget-jobs': { left: 20,  top: 760 },
+  }
+  for (const [id, pos] of Object.entries(defaults)) {
+    if (!state.widgets[id]) {
+      const el = document.getElementById(id)
+      if (el) { el.style.left = pos.left + 'px'; el.style.top = pos.top + 'px' }
+    }
+  }
+}
+
+/* ── Drag-and-drop ────────────────────────────────────────────── */
+function initDrag() {
+  document.querySelectorAll('.widget-title').forEach(handle => {
+    const widget = handle.closest('.widget')
+    let ox = 0, oy = 0
+
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault()
+      const rect = widget.getBoundingClientRect()
+      const wsRect = document.getElementById('workspace').getBoundingClientRect()
+      ox = e.clientX - rect.left
+      oy = e.clientY - rect.top
+      widget.classList.add('dragging')
+      widget.style.zIndex = 1000
+
+      const onMove = ev => {
+        const rawX = ev.clientX - wsRect.left - ox
+        const rawY = ev.clientY - wsRect.top  - oy
+        const x = Math.round(rawX / GRID) * GRID
+        const y = Math.round(rawY / GRID) * GRID
+        widget.style.left = Math.max(0, x) + 'px'
+        widget.style.top  = Math.max(0, y) + 'px'
+      }
+      const onUp = ev => {
+        widget.classList.remove('dragging')
+        widget.style.zIndex = ''
+        saveWidgetPos(widget.id,
+          parseInt(widget.style.left) || 0,
+          parseInt(widget.style.top)  || 0)
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    })
+  })
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────── */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tabId = btn.dataset.tab
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+    document.querySelectorAll('.tab-pane').forEach(p => {
+      p.classList.remove('active')
+      p.style.display = 'none'
+    })
+    btn.classList.add('active')
+    const pane = document.getElementById('tab-' + tabId)
+    if (pane) { pane.classList.add('active'); pane.style.display = 'flex' }
+  })
+})
+
+/* ── Clock ────────────────────────────────────────────────────── */
+function tickClock() {
+  const now = new Date()
+  document.getElementById('hdr-clock').textContent =
+    now.toTimeString().slice(0,8)
+}
+setInterval(tickClock, 1000); tickClock()
+
+/* ── Poll (metrics + jobs every 3s) ──────────────────────────── */
+async function poll() {
+  // Swarm health + metrics
+  try {
+    const m = await fetchJSON(SWARM_URL + '/metrics')
+    if (m) updateMetrics(m)
+    document.getElementById('badge-swarm').className = 'badge online'
+    state.swarm.online = true
+  } catch { document.getElementById('badge-swarm').className = 'badge offline' }
+
+  // Swarm jobs
+  try {
+    const d = await fetchJSON(SWARM_URL + '/jobs')
+    if (d && d.jobs) {
+      state.swarm.jobs = d.jobs.map(j => normalizeJob(j, 'swarm'))
+      document.getElementById('hdr-swarm-jobs').textContent =
+        state.swarm.jobs.filter(j => j.status === 'processing').length + ' active'
+    }
+  } catch {}
+
+  // Cmd health
+  // EXPAND: add cmd /api/v1/state polling here
+  try {
+    const c = await fetchJSON(CMD_URL + '/api/v1/health')
+    if (c) { document.getElementById('badge-cmd').className = 'badge online'; state.cmd.online = true }
+  } catch { document.getElementById('badge-cmd').className = 'badge offline' }
+
+  renderJobsList()
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(4000) })
+  if (!r.ok) return null
+  return r.json()
+}
+
+/* ── Metrics update ───────────────────────────────────────────── */
+function updateMetrics(m) {
+  const gpu = m.gpu || {}
+  if (!gpu.error) {
+    document.getElementById('gpu-name').textContent = gpu.name || 'GPU'
+    document.getElementById('gpu-temp').textContent = gpu.temp_c != null ? `${gpu.temp_c}°C` : ''
+    setBar('gpu',  gpu.gpu_pct,  `${gpu.gpu_pct}%`)
+    setBar('vram', gpu.mem_pct,
+      gpu.mem_used_mb != null
+        ? `${(gpu.mem_used_mb/1024).toFixed(1)}/${(gpu.mem_total_mb/1024).toFixed(0)} GB`
+        : `${gpu.mem_pct}%`)
+    document.getElementById('hdr-gpu').textContent = `${gpu.gpu_pct}%`
+  } else {
+    document.getElementById('gpu-name').textContent = 'nvidia-smi unavailable'
+  }
+  if (m.memory_pct != null) {
+    setBar('ram', m.memory_pct, `${m.memory_pct.toFixed(0)}%`)
+    document.getElementById('hdr-ram').textContent = `${m.memory_pct.toFixed(0)}%`
+  }
+  if (m.cpu_pct != null) {
+    setBar('cpu', m.cpu_pct, `${m.cpu_pct.toFixed(0)}%`)
+    document.getElementById('hdr-cpu').textContent = `${m.cpu_pct.toFixed(0)}%`
+  }
+}
+function setBar(key, pct, label) {
+  const bar = document.getElementById('bar-' + key)
+  const val = document.getElementById('val-' + key)
+  if (!bar) return
+  bar.style.width = Math.min(100, pct || 0) + '%'
+  bar.className   = 'metric-bar' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '')
+  if (val) val.textContent = label || `${pct}%`
+}
+
+/* ── Job normalization ────────────────────────────────────────── */
+function normalizeJob(raw, service) {
+  if (service === 'swarm') return {
+    id:      raw.job_id,
+    service: 'swarm',
+    status:  raw.status,
+    type:    'query',
+    preview: (raw.question || '').slice(0, 55),
+    elapsed: raw.elapsed,
+    stream:  `${SWARM_URL}/stream/${raw.job_id}`,
+  }
+  if (service === 'cmd') return {
+    id:      raw.id,
+    service: 'cmd',
+    status:  raw.status,
+    type:    raw.type || 'execute',
+    preview: (raw.instruction || '').slice(0, 55),
+    elapsed: raw.elapsed_s,
+    stream:  `${CMD_URL}/api/v1/jobs/${raw.id}/stream`,
+  }
+  return raw
+}
+
+/* ── Jobs list render ─────────────────────────────────────────── */
+function renderJobsList() {
+  const all = [...state.swarm.jobs, ...state.cmd.jobs]
+    .sort((a, b) => (b.elapsed || 0) - (a.elapsed || 0))
+    .slice(0, 30)
+
+  const container = document.getElementById('jobs-list')
+  document.getElementById('jobs-count').textContent = `${all.length} total`
+
+  if (!all.length) { container.innerHTML = '<div class="empty-hint">No jobs yet</div>'; return }
+
+  container.innerHTML = all.map(j => {
+    const icon  = j.service === 'swarm' ? '⬡' : '🔧'
+    const stCls = { processing: 'st-processing', pending: 'st-pending',
+                    completed: 'st-completed',   failed: 'st-failed' }[j.status] || ''
+    const el    = j.elapsed ? `${parseFloat(j.elapsed).toFixed(0)}s` : '—'
+    const active = j.id === state.activeJobId ? 'style="background:var(--surface2)"' : ''
+    return `<div class="job-row" ${active} onclick="watchJob('${j.id}','${j.service}')">
+      <span class="job-svc">${icon}</span>
+      <span class="job-id">${j.id}</span>
+      <span class="job-type">${j.type}</span>
+      <span class="job-st ${stCls}">${j.status}</span>
+      <span class="job-el">${el}</span>
+      <span class="job-prev">${escHtml(j.preview)}</span>
+      <button class="job-watch" onclick="event.stopPropagation();watchJob('${j.id}','${j.service}')">Watch</button>
+    </div>`
+  }).join('')
+}
+
+/* ── Watch job (SSE) ──────────────────────────────────────────── */
+function watchJob(jobId, service) {
+  // Close existing stream
+  if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
+
+  state.activeJobId  = jobId
+  state.activeJobSvc = service
+
+  // Reset current job state
+  state.currentJob = { phases: {}, sps: {}, wave: '', qtype: '', logs: [], answer: '' }
+  clearJobDisplay()
+
+  document.getElementById('chat-job-badge').textContent = `[ ${jobId} ]`
+
+  const streamUrl = service === 'swarm'
+    ? `${SWARM_URL}/stream/${jobId}`
+    : `${CMD_URL}/api/v1/jobs/${jobId}/stream`
+
+  const es = new EventSource(streamUrl)
+  state.activeStream = es
+
+  es.onmessage = e => {
+    try { handleEvent(JSON.parse(e.data)) } catch {}
+  }
+  es.onerror = () => {
+    appendLog('[stream error / closed]', 'log-fail')
+    es.close()
+  }
+}
+
+/* ── Handle SSE event ─────────────────────────────────────────── */
+function handleEvent(ev) {
+  const t = ev.type || ''
+
+  if (t === 'phase') {
+    const pid = ev.phase_id || ''
+    // Mark previous active phases done
+    for (const [k, p] of Object.entries(state.currentJob.phases)) {
+      if (p.status === 'active') p.status = 'done'
+    }
+    state.currentJob.phases[pid] = {
+      name: ev.phase_name || '', status: 'active',
+      elapsed_s: ev.elapsed_s || ev.elapsed || 0
+    }
+    if (pid.toUpperCase() === '0A' && ev.phase_name)
+      state.currentJob.qtype = ev.phase_name
+    renderPhases()
+    appendLog(`Phase ${pid} ${ev.phase_name || ''} ${ev.elapsed_s ? '| '+ev.elapsed_s+'s' : ''}`, 'log-phase')
+  }
+
+  else if (t === 'wave') {
+    state.currentJob.wave = `Wave ${ev.wave}/${ev.total_waves}`
+    for (const sp of (ev.sps || [])) {
+      if (!state.currentJob.sps[sp])
+        state.currentJob.sps[sp] = { status:'pending', turn:0, max_turn:15, tool:'—', values:'—' }
+    }
+    renderSPs()
+    appendLog(`Wave ${ev.wave}/${ev.total_waves}: [${(ev.sps||[]).join(', ')}]`, 'log-wave')
+  }
+
+  else if (t === 'sp_turn') {
+    const sp = state.currentJob.sps[ev.sp_id] || {}
+    state.currentJob.sps[ev.sp_id] = Object.assign(sp, {
+      status: 'active', turn: ev.turn, max_turn: ev.max_turns,
+      tool: ev.tool || '—'
+    })
+    renderSPs()
+    appendLog(`[${ev.sp_id}] Turn ${ev.turn}/${ev.max_turns} → ${ev.tool}: ${ev.preview||''}`, 'log-sp')
+  }
+
+  else if (t === 'sp_done') {
+    const sp = state.currentJob.sps[ev.sp_id] || {}
+    state.currentJob.sps[ev.sp_id] = Object.assign(sp, {
+      status: ev.status, values: (ev.values||'').slice(0,32), turn: ev.turns || 0
+    })
+    renderSPs()
+    const cls = ev.status === 'solved' ? 'log-sp-done' : 'log-fail'
+    appendLog(`[${ev.sp_id}] ${ev.status.toUpperCase()} | ${ev.values||''} | ${ev.turns} turns`, cls)
+  }
+
+  else if (t === 'solve_done') {
+    appendLog(`Done ${ev.solved}/${ev.total} SPs · ${ev.total_s}s total`, 'log-sp-done')
+  }
+
+  else if (t === 'toks') {
+    appendLog(`${ev.tokens} tokens ${ev.toks_per_sec?.toFixed(1)} tok/s`, 'log-default')
+  }
+
+  else if (t === 'agent') {
+    appendLog(`Agent: ${ev.agent} @ ${ev.model}`, 'log-default')
+  }
+
+  else if (t === 'log' || t === 'error_line') {
+    const cls = t === 'error_line' ? 'log-fail' : 'log-default'
+    appendLog(ev.line || '', cls)
+  }
+
+  else if (t === 'answer') {
+    state.currentJob.answer = ev.answer || ''
+    document.getElementById('answer-box').textContent = ev.answer || ''
+    // Auto-switch to Answer tab
+    document.querySelector('[data-tab="answer"]')?.click()
+    appendLog(`✅ Answer ready (${ev.elapsed?.toFixed ? ev.elapsed.toFixed(1) : ev.elapsed}s)`, 'log-sp-done')
+    if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
+    // Mark phase done
+    const lastPhase = Object.keys(state.currentJob.phases).pop()
+    if (lastPhase) state.currentJob.phases[lastPhase].status = 'done'
+    renderPhases()
+  }
+
+  else if (t === 'error') {
+    appendLog(`❌ Error: ${ev.error || ev.message || 'unknown'}`, 'log-fail')
+  }
+
+  else if (t === 'done') {
+    if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
+  }
+
+  // EXPAND: handle cmd-specific event types (react_iter, tool_call, etc.) here
+}
+
+/* ── Render helpers ───────────────────────────────────────────── */
+const SI = { pending:'⏳', active:'🔄', done:'✅', solved:'✅', failed:'❌', timeout:'⏱' }
+
+function renderPhases() {
+  const list = document.getElementById('phases-list')
+  const empty = document.getElementById('phases-empty')
+  const phases = state.currentJob.phases
+  if (!Object.keys(phases).length) { empty.style.display=''; list.innerHTML=''; return }
+  empty.style.display = 'none'
+  list.innerHTML = Object.entries(phases).map(([pid, ph]) =>
+    `<div class="phase-row">
+      <span class="phase-icon">${SI[ph.status]||'·'}</span>
+      <span class="phase-id">${escHtml(pid)}</span>
+      <span class="phase-name">${escHtml(ph.name)}</span>
+      <span class="phase-el">${ph.elapsed_s ? ph.elapsed_s.toFixed(1)+'s' : ''}</span>
+    </div>`
+  ).join('')
+}
+
+function renderSPs() {
+  const list  = document.getElementById('sps-list')
+  const empty = document.getElementById('sps-empty')
+  const sps   = state.currentJob.sps
+  if (!Object.keys(sps).length) { empty.style.display=''; list.innerHTML=''; return }
+  empty.style.display = 'none'
+  list.innerHTML = Object.entries(sps).map(([spId, sp]) => {
+    const st = sp.status || 'pending'
+    const turnsStr = st === 'active'
+      ? `<span class="sp-turns" style="color:var(--yellow)">${sp.turn}/${sp.max_turn}</span>`
+      : `<span class="sp-turns">${sp.turn || '—'}</span>`
+    const valsStyle = st === 'solved' ? 'color:var(--green)' : st === 'failed' ? 'color:var(--red)' : ''
+    return `<div class="sp-row">
+      <span class="sp-status">${SI[st]||'·'}</span>
+      <span class="sp-id">${escHtml(spId)}</span>
+      ${turnsStr}
+      <span class="sp-tool">${escHtml(sp.tool||'—')}</span>
+      <span class="sp-vals" style="${valsStyle}">${escHtml(sp.values||'—')}</span>
+    </div>`
+  }).join('')
+}
+
+function appendLog(line, cls) {
+  if (!line) return
+  const log = document.getElementById('stream-log')
+  const div = document.createElement('div')
+  div.className = cls || 'log-default'
+  div.textContent = line
+  log.appendChild(div)
+  log.scrollTop = log.scrollHeight
+  // Keep max 500 lines
+  while (log.children.length > 500) log.removeChild(log.firstChild)
+}
+
+function clearJobDisplay() {
+  document.getElementById('phases-list').innerHTML = ''
+  document.getElementById('sps-list').innerHTML = ''
+  document.getElementById('stream-log').innerHTML = ''
+  document.getElementById('answer-box').innerHTML =
+    '<span style="color:var(--dim)">Answer will appear here…</span>'
+  document.getElementById('phases-empty').style.display = ''
+  document.getElementById('sps-empty').style.display = ''
+}
+
+/* ── Submit Swarm query ───────────────────────────────────────── */
+async function submitSwarm(q) {
+  if (!q.trim()) return
+  appendLog(`↗ Swarm: ${q.slice(0,80)}`, 'log-phase')
+  try {
+    const r = await fetch(SWARM_URL + '/query_async', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    })
+    if (!r.ok) { appendLog(`HTTP ${r.status}`, 'log-fail'); return }
+    const d = await r.json()
+    const jobId = d.job_id
+    if (!jobId) { appendLog('No job_id returned', 'log-fail'); return }
+    document.getElementById('chat-job-badge').textContent = `[ ${jobId} ]`
+    watchJob(jobId, 'swarm')
+    // Switch to phases tab
+    document.querySelector('[data-tab="phases"]')?.click()
+  } catch (e) { appendLog(`Submit error: ${e.message}`, 'log-fail') }
+}
+
+/* ── Submit CMD task ──────────────────────────────────────────── */
+async function submitCmd(instruction) {
+  if (!instruction.trim()) return
+  appendLog(`↗ Cmd: ${instruction.slice(0,80)}`, 'log-wave')
+  // EXPAND: add tier selection (quick/execute/chain)
+  try {
+    const r = await fetch(CMD_URL + '/api/v1/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction }),
+    })
+    if (!r.ok) { appendLog(`Cmd HTTP ${r.status}`, 'log-fail'); return }
+    const d = await r.json()
+    if (d.job_id || d.id) {
+      watchJob(d.job_id || d.id, 'cmd')
+      document.querySelector('[data-tab="stream"]')?.click()
+    }
+  } catch (e) {
+    appendLog(`Cmd error: ${e.message}`, 'log-fail')
+    // EXPAND: fallback to /api/v1/quick for simple one-shot commands
+  }
+}
+
+/* ── API Builder ─────────────────────────────────────────────────── */
+const API_ENDPOINTS = [
+  // Swarm
+  { svc:'swarm', method:'GET',  path:'/health',       label:'Health Check',    params:[] },
+  { svc:'swarm', method:'GET',  path:'/status',        label:'Server Status',   params:[] },
+  { svc:'swarm', method:'GET',  path:'/jobs',          label:'List Jobs',       params:[] },
+  { svc:'swarm', method:'GET',  path:'/metrics',       label:'GPU Metrics',     params:[] },
+  { svc:'swarm', method:'GET',  path:'/result/{id}',   label:'Get Result',
+    params:[{name:'id', type:'text', in:'path', ph:'job_id'}] },
+  { svc:'swarm', method:'POST', path:'/query_async',   label:'Research (async)',
+    params:[{name:'question', type:'textarea', ph:'Ask anything…'}] },
+  { svc:'swarm', method:'POST', path:'/query',         label:'Research (sync)',
+    params:[{name:'question', type:'textarea', ph:'Ask anything…'}] },
+  // Cmd
+  { svc:'cmd', method:'GET',  path:'/api/v1/health',          label:'Cmd Health',      params:[] },
+  { svc:'cmd', method:'GET',  path:'/api/v1/jobs',            label:'List Cmd Jobs',   params:[] },
+  { svc:'cmd', method:'GET',  path:'/api/v1/events',          label:'Global Events',   params:[] },
+  { svc:'cmd', method:'GET',  path:'/api/v1/blueteam/alerts', label:'Security Alerts', params:[] },
+  { svc:'cmd', method:'POST', path:'/api/v1/execute',         label:'Execute Task',
+    params:[
+      {name:'instruction', type:'textarea', ph:'What to do…'},
+      {name:'tier',        type:'select',   options:['quick','standard','deep']},
+    ]},
+  { svc:'cmd', method:'POST', path:'/api/v1/quick',           label:'Quick Command',
+    params:[{name:'command', type:'text', ph:'shell command'}] },
+]
+
+function populateApiEndpoints(svc) {
+  const sel = document.getElementById('api-ep-sel')
+  sel.innerHTML = ''
+  API_ENDPOINTS.filter(ep => ep.svc === svc).forEach((ep, i) => {
+    const opt = document.createElement('option')
+    opt.value = i
+    opt.textContent = ep.label
+    sel.appendChild(opt)
+  })
+  renderApiParams(svc)
+}
+
+function renderApiParams(svc) {
+  const svcVal = svc || document.getElementById('api-svc-sel').value
+  const epIdx  = document.getElementById('api-ep-sel').selectedIndex
+  const allEps = API_ENDPOINTS.filter(ep => ep.svc === svcVal)
+  const ep     = allEps[epIdx >= 0 ? epIdx : 0]
+  if (!ep) return
+  document.getElementById('api-method-badge').textContent = ep.method
+  document.getElementById('api-method-badge').style.color =
+    ep.method === 'POST' ? 'var(--yellow)' : 'var(--accent)'
+  const container = document.getElementById('api-params')
+  container.innerHTML = ''
+  ep.params.forEach(p => {
+    const wrap  = document.createElement('div')
+    const label = document.createElement('div')
+    label.className   = 'api-param-label'
+    label.textContent = p.name
+    wrap.appendChild(label)
+    let field
+    if (p.type === 'textarea') {
+      field = document.createElement('textarea')
+      field.className   = 'api-param-textarea'
+      field.placeholder = p.ph || ''
+    } else if (p.type === 'select') {
+      field = document.createElement('select')
+      field.className = 'api-param-select';
+      (p.options || []).forEach(v => {
+        const o = document.createElement('option'); o.value = v; o.textContent = v
+        field.appendChild(o)
+      })
+    } else {
+      field = document.createElement('input')
+      field.className   = 'api-param-input'
+      field.type        = 'text'
+      field.placeholder = p.ph || ''
+    }
+    field.dataset.paramName = p.name
+    field.dataset.paramIn   = p.in || 'body'
+    wrap.appendChild(field)
+    container.appendChild(wrap)
+  })
+}
+
+async function fireApi() {
+  const svc    = document.getElementById('api-svc-sel').value
+  const epIdx  = document.getElementById('api-ep-sel').selectedIndex
+  const allEps = API_ENDPOINTS.filter(ep => ep.svc === svc)
+  const ep     = allEps[epIdx]
+  if (!ep) return
+
+  const baseUrl = svc === 'swarm' ? SWARM_URL : CMD_URL
+  let path = ep.path
+  const body = {}
+  document.querySelectorAll('#api-params [data-param-name]').forEach(el => {
+    const n = el.dataset.paramName
+    const v = el.value
+    if (el.dataset.paramIn === 'path') {
+      path = path.replace(`{${n}}`, encodeURIComponent(v))
+    } else {
+      if (v !== '') body[n] = v
+    }
+  })
+
+  const url   = baseUrl + path
+  const isSSE = path.includes('/stream') || path.includes('/events')
+  const badge = document.getElementById('api-status-badge')
+  const pre   = document.getElementById('api-response-body')
+
+  if (isSSE) {
+    pre.textContent = '…streaming…\n'
+    badge.textContent = 'SSE'
+    const es = new EventSource(url)
+    es.onmessage = e => { pre.textContent += e.data + '\n'; pre.scrollTop = pre.scrollHeight }
+    es.onerror   = () => { pre.textContent += '[stream closed]\n'; es.close() }
+    return
+  }
+
+  badge.textContent = '…'
+  badge.style.color = 'var(--text-dim)'
+  const t0 = Date.now()
+  try {
+    const opts = { method: ep.method, signal: AbortSignal.timeout(30000) }
+    if (ep.method === 'POST') {
+      opts.headers = { 'Content-Type': 'application/json' }
+      opts.body    = JSON.stringify(body)
+    }
+    const r = await fetch(url, opts)
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(2)
+    badge.textContent = `${r.status} · ${elapsed}s`
+    badge.style.color = r.ok ? 'var(--green)' : 'var(--red)'
+    let text = await r.text()
+    try { text = JSON.stringify(JSON.parse(text), null, 2) } catch {}
+    pre.textContent = text
+    // Offer Watch button if response has job_id
+    try {
+      const parsed = JSON.parse(text)
+      const jid = parsed.job_id || parsed.id
+      if (jid) {
+        const btn = document.createElement('button')
+        btn.className = 'job-watch'
+        btn.textContent = `▶ Watch ${jid}`
+        btn.style.cssText = 'display:block;margin:6px 8px;'
+        btn.onclick = () => watchJob(jid, svc)
+        pre.parentNode.insertBefore(btn, pre)
+        setTimeout(() => btn.remove(), 60000)
+      }
+    } catch {}
+  } catch (e) {
+    badge.textContent = `Error · ${((Date.now()-t0)/1000).toFixed(2)}s`
+    badge.style.color = 'var(--red)'
+    pre.textContent = e.message
+  }
+}
+
+document.getElementById('api-svc-sel').addEventListener('change', e => {
+  populateApiEndpoints(e.target.value)
+})
+document.getElementById('api-ep-sel').addEventListener('change', () => {
+  renderApiParams()
+})
+document.getElementById('api-fire').addEventListener('click', fireApi)
+document.getElementById('api-copy-btn').addEventListener('click', () => {
+  const txt = document.getElementById('api-response-body').textContent
+  if (txt && txt !== '…') navigator.clipboard.writeText(txt).then(() => {
+    const btn = document.getElementById('api-copy-btn')
+    btn.textContent = 'Copied!'
+    setTimeout(() => { btn.textContent = 'Copy' }, 1500)
+  })
+})
+
+/* ── Chat submit ──────────────────────────────────────────────── */
+document.getElementById('chat-submit').addEventListener('click', () => {
+  const q   = document.getElementById('chat-input').value.trim()
+  const svc = document.getElementById('chat-service-sel').value
+  if (!q) return
+  document.getElementById('chat-input').value = ''
+  if (svc === 'swarm') submitSwarm(q)
+  else                 submitCmd(q)
+})
+document.getElementById('chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('chat-submit').click()
+})
+
+/* ── Answer copy ──────────────────────────────────────────────── */
+document.getElementById('answer-copy-btn').addEventListener('click', () => {
+  const txt = state.currentJob.answer
+  if (txt) navigator.clipboard.writeText(txt).then(() => {
+    const btn = document.getElementById('answer-copy-btn')
+    btn.textContent = 'Copied!'
+    setTimeout(() => { btn.textContent = 'Copy' }, 1500)
+  })
+})
+
+/* ── Escape HTML ──────────────────────────────────────────────── */
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+/* ── Init ─────────────────────────────────────────────────────── */
+restoreWidgetPositions()
+initWidgetDefaults()
+initDrag()
+poll()
+setInterval(poll, 3000)
+
+// Seed API Builder
+populateApiEndpoints('swarm')
+
+// Focus chat input on load
+document.getElementById('chat-input').focus()
+
+// Fix tab-pane initial visibility
+document.querySelectorAll('.tab-pane').forEach(p => {
+  if (!p.classList.contains('active')) p.style.display = 'none'
+  else p.style.display = 'flex'
+})
+</script>
+</body>
+</html>

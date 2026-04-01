@@ -44,6 +44,7 @@ def llm(prompt: str, system: str = "", model: str = "phi4:14b", max_tokens: int 
         "model": model,
         "prompt": full,
         "stream": False,
+        "keep_alive": 0,
         "options": {"temperature": 0.4, "num_predict": max_tokens},
     }
     try:

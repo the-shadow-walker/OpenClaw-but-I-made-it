@@ -44,10 +44,11 @@ except ImportError:
 
 # ── Planner V2 ───────────────────────────────────────────────────────────────
 try:
-    from planner_v2 import PlannerV2, SolvePlan, SubProblem
+    from planner_v2 import PlannerV2, SolvePlan, SubProblem, Requirement
     _HAS_PLANNER_V2 = True
 except ImportError:
     _HAS_PLANNER_V2 = False
+    Requirement = None
     print("⚠️  OrchestratorV3: planner_v2 not available")
 
 # ── ReAct solver ─────────────────────────────────────────────────────────────
@@ -140,11 +141,37 @@ class OrchestratorV3:
 
         try:
             # ── Phase 0A: Classify ────────────────────────────────────────
+            t_classify = time.time()
+            print(f"\n{'─'*62}")
+            print(f"Phase 0A  Classification    │ 0.0s")
             if self.status:
                 self.status.set_phase(1, "Classification")
             classification = await self._classify(question)
             qtype = classification.question_type if classification else None
-            print(f"🎯 Type: {qtype.value.upper() if qtype else 'UNKNOWN'}")
+            print(f"  → {qtype.value.upper() if qtype else 'UNKNOWN'} "
+                  f"({time.time()-t_classify:.1f}s)")
+
+            # ── Safety override: upgrade THEORETICAL/UNKNOWN → HYBRID when the
+            #    question contains specific numerical assignments AND computation verbs.
+            #    Guards against phi4 misclassifying multi-part HYBRID questions.
+            if qtype is not None and qtype.value in ("theoretical", "unknown") and classification:
+                _num_assign  = bool(re.search(r'[A-Za-z_]\w*\s*=\s*[\d.]+', question))
+                _num_units   = bool(re.search(
+                    r'\b\d+\.?\d*\s*(kg|m/s|rad/s|N\b|J\b|W\b|Hz|mol|K\b|m\b|s\b)',
+                    question, re.IGNORECASE))
+                _compute_verb = bool(re.search(
+                    r'\b(compute|calculate|solve|evaluate|find|determine)\b',
+                    question, re.IGNORECASE))
+                _explicitly_numerical = bool(re.search(
+                    r'\bnumerically\b|\bsolve\s+for\b|\bevaluate.{0,50}\d',
+                    question, re.IGNORECASE))
+                if (_num_assign or _num_units) and (_compute_verb or _explicitly_numerical):
+                    print(f"  ⚠️  Override: {qtype.value.upper()} → HYBRID "
+                          f"(numerical constants + computation verbs detected)")
+                    if _HAS_CLASSIFIER:
+                        classification.question_type = QuestionType.HYBRID
+                    qtype = QuestionType.HYBRID if _HAS_CLASSIFIER else type(
+                        'Q', (), {'value': 'hybrid'})()
 
             # ── Route ─────────────────────────────────────────────────────
 
@@ -183,12 +210,22 @@ class OrchestratorV3:
         qtype_value: str,
     ) -> str:
         t0 = time.time()
+        _sep = "─" * 62
+
+        def _elapsed() -> str:
+            return f"{time.time() - t0:.1f}s"
 
         # ── Phase 0B: Generate SolvePlan ─────────────────────────────────
+        print(f"\n{_sep}")
+        print(f"Phase 0B  Planning          │ {_elapsed()}")
         if self.status:
             self.status.set_phase(2, "Planning")
+
+        requirements: List = []
         if _HAS_PLANNER_V2:
-            plan = await PlannerV2.create_plan(question, classification, self._llm_query)
+            plan, requirements = await PlannerV2.create_plan(
+                question, classification, self._llm_query
+            )
         else:
             print("⚠️  PlannerV2 not available — single-SP fallback")
             from planner_v2 import SolvePlan, SubProblem  # might still work
@@ -206,30 +243,49 @@ class OrchestratorV3:
                 notes="",
             )
 
-        print(f"\n📋 Plan: {len(plan.sub_problems)} SP(s), order: {plan.dependency_order}")
-        print(plan.to_markdown()[:800])
+        print(f"  → {len(plan.sub_problems)} SP(s), "
+              f"{len(requirements)} requirement(s), "
+              f"order: {plan.dependency_order}")
+        print(plan.to_markdown()[:600])
 
         # ── Phase 0C: Targeted research (HYBRID only) ─────────────────────
         research_contexts: Dict[str, str] = {}
         if qtype_value == "hybrid":
+            print(f"\n{_sep}")
+            print(f"Phase 0C  Research          │ {_elapsed()}")
             if self.status:
                 self.status.set_phase(3, "Research")
             research_contexts = await self._targeted_research(plan)
 
+        # ── VRAM handoff: evict phi4, pre-warm solver ─────────────────────
+        solver_model = "deepseek-r1:14b"
+        try:
+            from react_solver import ReactSolver as _RS_tmp
+            solver_model = _RS_tmp.MODEL
+        except Exception:
+            pass
+        print(f"\n  🔄 VRAM handoff: {_MODEL_PLANNER} → {solver_model}")
+        await self._unload_model(_MODEL_PLANNER)
+        # Pre-warm solver in background while we start Phase 1 setup
+        asyncio.ensure_future(self._prewarm_model(solver_model))
+
         # ── Phase 1: Run ReactSolvers in topological waves ─────────────────
+        print(f"\n{_sep}")
+        print(f"Phase 1   Solving           │ {_elapsed()}")
         if self.status:
             self.status.set_phase(4, "Solving")
 
-        solver_results: Dict[str, SolverResult] = {}
+        sp_map = {sp.id: sp for sp in plan.sub_problems}
+        solver_results: Dict[str, "SolverResult"] = {}
         waves = self._topological_waves(plan)
-        print(f"\n⚡ Executing {len(waves)} wave(s): {waves}")
+        print(f"  ⚡ {len(waves)} wave(s): {waves}")
 
         for wave_idx, wave in enumerate(waves):
-            print(f"\n  Wave {wave_idx+1}/{len(waves)}: {wave}")
+            print(f"\n  Wave {wave_idx+1}/{len(waves)}: {wave}  │ {_elapsed()}")
 
             # Inject outputs from previous waves into inputs for this wave
             for sp_id in wave:
-                sp = next(s for s in plan.sub_problems if s.id == sp_id)
+                sp = sp_map[sp_id]
                 for dep_id in sp.depends_on:
                     dep_result = solver_results.get(dep_id)
                     if dep_result and dep_result.results:
@@ -240,7 +296,7 @@ class OrchestratorV3:
             # Run this wave in parallel
             tasks = []
             for sp_id in wave:
-                sp = next(s for s in plan.sub_problems if s.id == sp_id)
+                sp = sp_map[sp_id]
                 ctx = research_contexts.get(sp_id, "")
                 if _HAS_REACT:
                     solver = ReactSolver(
@@ -251,29 +307,75 @@ class OrchestratorV3:
                     )
                     tasks.append(solver.solve())
                 else:
-                    # No ReactSolver — return a stub failure
                     tasks.append(self._stub_solve(sp))
 
             wave_results = await asyncio.gather(*tasks)
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result
-                print(f"  {result.sub_problem_id}: {result.status.upper()} "
-                      f"({result.turn_count} turns, {len(result.results)} results)")
+
+            # ── Post-wave: retry SPs with expected_outputs but 0 results ─
+            retry_tasks = []
+            retry_sp_ids = []
+            for result in wave_results:
+                sp_id = result.sub_problem_id
+                sp = sp_map.get(sp_id)
+                if sp and result.status != "solved" and sp.expected_outputs and _HAS_REACT:
+                    print(f"  ⚡ Retrying {sp_id} (status={result.status}, "
+                          f"0 computed results, outputs expected)…")
+                    retry_solver = ReactSolver(
+                        sub_problem=sp,
+                        plan=plan,
+                        research_context=research_contexts.get(sp_id, ""),
+                        searxng_url=self.searxng_url,
+                    )
+                    # Inject a mandatory-code message at the top of history
+                    retry_solver._history.append({
+                        "role": "user",
+                        "content": (
+                            "Previous attempt returned 0 results. "
+                            "You MUST write Python code and use ACTION: run_code. "
+                            "Do not describe the calculation in prose — execute it."
+                        ),
+                    })
+                    retry_tasks.append(retry_solver.solve())
+                    retry_sp_ids.append(sp_id)
+
+            if retry_tasks:
+                retry_results = await asyncio.gather(*retry_tasks)
+                for sp_id, rr in zip(retry_sp_ids, retry_results):
+                    solver_results[sp_id] = rr
+                    vals_str = (
+                        ", ".join(
+                            f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                            for v, d in rr.results_with_units.items()
+                        ) if rr.results_with_units else "no results"
+                    )
+                    print(f"  {sp_id} RETRY → {rr.status.upper()} | {vals_str} "
+                          f"| {rr.turn_count} turns")
+
+        # ── Free VRAM before synthesis (evict reactor model) ───────────────
+        await self._unload_solver_model()
 
         # ── Phase 2: Synthesis ─────────────────────────────────────────────
+        print(f"\n{_sep}")
+        print(f"Phase 2   Synthesis         │ {_elapsed()}")
         if self.status:
             self.status.set_phase(5, "Synthesis")
         synthesis = await self._synthesize(question, plan, solver_results)
 
         # ── Phase 3: Writer ────────────────────────────────────────────────
+        print(f"\n{_sep}")
+        print(f"Phase 3   Writing           │ {_elapsed()}")
         if self.status:
             self.status.set_phase(6, "Writing")
-        answer = await self._write_final_answer(question, synthesis, plan, solver_results)
+        answer = await self._write_final_answer(
+            question, synthesis, plan, solver_results, requirements
+        )
 
+        n_solved = sum(1 for r in solver_results.values() if r.status == "solved")
         elapsed = time.time() - t0
-        print(f"\n✅ Done in {elapsed:.1f}s | "
-              f"{sum(1 for r in solver_results.values() if r.status=='solved')}/"
-              f"{len(solver_results)} SP(s) solved")
+        print(f"\n{_sep}")
+        print(f"✅ Done │ {n_solved}/{len(solver_results)} SP(s) solved │ Total: {elapsed:.1f}s")
         return answer
 
     # ── Topological waves ─────────────────────────────────────────────────────
@@ -414,9 +516,9 @@ PLAUSIBILITY: <brief physical sanity check>
 CHAIN_SUMMARY: <one paragraph explaining how the sub-results connect>
 END_ANSWER_DATA
 """
-        print("\n🧠 Synthesising with qwq:32b …")
-        raw = await self._llm_query_reasoner(prompt)
-        # If qwq fails, try fallback
+        print("\n🧠 Synthesising with qwen2.5:14b …")
+        raw = await self._llm_query_coder(prompt)
+        # If qwen fails, try fallback
         if not raw.strip():
             print("⚠️  qwq:32b empty — trying deepseek-r1 fallback")
             raw = await self._llm_query_fallback(prompt)
@@ -430,13 +532,12 @@ END_ANSWER_DATA
         synthesis: str,
         plan: "SolvePlan",
         solver_results: Dict[str, "SolverResult"],
+        requirements: Optional[List] = None,
     ) -> str:
         """
         Phase 3: qwen2.5:14b writes a full-page report.
+        Phase 3C: Lock C enforces negative constraints from requirements.
         """
-        # Collect sources from search tool calls (best-effort)
-        all_sources: List[str] = []
-
         # Collect final codes for appendix
         code_appendix = []
         for sp_id in plan.dependency_order:
@@ -444,37 +545,169 @@ END_ANSWER_DATA
             if sr and sr.final_code:
                 code_appendix.append(f"#### {sp_id} — Final Code\n```python\n{sr.final_code}\n```")
 
+        # Build verified-only results block — Writer must NOT invent numbers
+        verified_results = []
+        failed_sps = []
+        for sp_id in plan.dependency_order:
+            sr = solver_results.get(sp_id)
+            sp = next((s for s in plan.sub_problems if s.id == sp_id), None)
+            sp_desc = sp.description[:120] if sp else sp_id
+            if sr and sr.status == "solved" and sr.results_with_units:
+                for var, info in sr.results_with_units.items():
+                    val = info.get("value", "")
+                    unit = info.get("unit", "")
+                    verified_results.append(f"  {sp_id} | {var} = {val} {unit}".strip())
+            elif sr and sr.status == "solved" and sr.results:
+                for var, val in sr.results.items():
+                    verified_results.append(f"  {sp_id} | {var} = {val}")
+            else:
+                failed_sps.append(f"  {sp_id} | FAILED — {sp_desc}")
+
+        results_block = "\n".join(verified_results) if verified_results else "  (no numerical results computed)"
+        failed_block  = ("\nFAILED SUB-PROBLEMS (do NOT invent values for these):\n" +
+                         "\n".join(failed_sps)) if failed_sps else ""
+
         prompt = f"""\
-Write a complete, well-structured technical answer to this question.
+Write a complete, well-structured technical answer based ONLY on the verified computed results below.
 
-QUESTION:
-{question}
+VERIFIED COMPUTED RESULTS (these are the ONLY numbers you may use):
+{results_block}
+{failed_block}
 
-SYNTHESIS (chain of results from the solver):
-{synthesis[:3000]}
+CONTEXT (for framing only — do NOT use any numbers from here):
+{question[:400]}
 
-REQUIREMENTS:
-- Start with a clearly highlighted final answer (bold or header).
-- Explain step-by-step reasoning in plain language.
-- List all assumptions and their physical basis.
-- Include a table or list of all computed values with units.
-- Mention what the user needs to understand the result.
-- Minimum length: one full page (500+ words).
-- Use markdown formatting (headers, bold, tables, code blocks).
+RULES — you MUST follow these:
+1. Every number in your answer MUST come from the VERIFIED COMPUTED RESULTS above.
+2. If a sub-problem FAILED, write exactly: "**[SP description]: Numerical solution failed.**"
+   Do NOT guess, estimate, or invent a value for failed sub-problems.
+3. Explain the physical meaning and method for each result.
+4. List all computed values in a summary table with units.
+5. Use markdown formatting (headers, bold, tables).
+6. Minimum 400 words.
 
 {"CODE APPENDIX:" + chr(10) + chr(10).join(code_appendix[:3]) if code_appendix else ""}
 """
         system = (
-            "You are a technical writer and scientist. "
-            "Write precise, well-structured explanations with correct units. "
-            "Always present the key numerical result prominently at the top."
+            "You are a technical writer. You ONLY report numbers that were explicitly "
+            "computed and provided to you. If a value was not computed, you state it failed. "
+            "You NEVER guess, estimate, or invent numerical results."
         )
         print("\n✍️  Writing final answer with qwen2.5:14b …")
-        answer = await self._llm_query_coder(prompt, system)
+        answer = await self._ollama_chat(
+            model=_MODEL_CODER,
+            prompt=prompt,
+            system=system,
+            timeout=900,       # CPU-only fallback needs up to ~10 min
+            num_predict=4096,
+        )
         if not answer.strip():
-            # Fallback: return the synthesis as-is
             answer = f"## Result\n\n{synthesis}"
+
+        # ── Phase 3C: Lock C — enforce negative constraints ───────────────
+        print(f"\n{'─'*62}")
+        elapsed_str = ""  # timing handled in _solve_react
+        print(f"Phase 3C  ConstraintCheck")
+        answer = await self._enforce_negative_constraints(answer, requirements or [])
+
         return answer
+
+    # ── Lock C: Negative constraint enforcement ───────────────────────────────
+
+    async def _enforce_negative_constraints(
+        self,
+        answer: str,
+        requirements: List,
+    ) -> str:
+        """
+        Scan answer for violations of negative constraints extracted from
+        requirements (e.g. no_formulas, no_math).  Calls phi4:14b to detect
+        violations, then qwen2.5:14b to rewrite only the offending sections.
+        Returns the answer unchanged if no constraints are defined or no
+        violations are found.
+        """
+        if not requirements:
+            print("  → OK (no requirements)")
+            return answer
+
+        # Collect all negative constraints across requirements
+        constraint_items = []
+        for r in requirements:
+            nc = getattr(r, "negative_constraints", [])
+            for c in nc:
+                constraint_items.append((r.id, c, r.text))
+
+        if not constraint_items:
+            print("  → OK (no negative constraints)")
+            return answer
+
+        constraints_str = "\n".join(
+            f"  - {rid} ({rtxt[:60]}): {c}"
+            for rid, c, rtxt in constraint_items
+        )
+
+        check_prompt = f"""\
+Scan this answer for violations of these constraints:
+{constraints_str}
+
+Constraint meanings:
+- no_formulas: answer must NOT use symbolic math (no ΔG, Σ, ∫, nF, dE, ΔH,
+  Ksp, dT, etc.) in the relevant section
+- no_equations: no mathematical equations
+- no_math: conceptual explanation only, no numbers or formulas
+- no_calculus: no integrals or derivatives
+
+ANSWER (first 4000 chars):
+{answer[:4000]}
+
+For each violation output exactly:
+VIOLATION: <section_title> | <constraint> | <offending_text_snippet>
+
+If no violations, output only: OK
+"""
+        check_result = await self._llm_query_coder(
+            check_prompt,
+            "You are a constraint checker. Be precise. Only report genuine violations."
+        )
+
+        if "VIOLATION:" not in check_result:
+            print("  → OK (no violations detected)")
+            return answer
+
+        violations = re.findall(r"VIOLATION:", check_result)
+        print(f"  → {len(violations)} violation(s) found — rewriting offending sections…")
+
+        rewrite_prompt = f"""\
+Rewrite the answer below to fix these constraint violations:
+
+VIOLATIONS DETECTED:
+{check_result[:1500]}
+
+CONSTRAINTS TO ENFORCE:
+{constraints_str}
+
+ORIGINAL ANSWER:
+{answer[:5000]}
+
+Rules:
+- Fix ONLY the sections mentioned in violations.
+- Replace symbolic math with plain English descriptions of the same concept.
+- Keep all other sections, headers, tables, and numerical results unchanged.
+- Return the complete corrected answer in full.
+"""
+        corrected = await self._llm_query_coder(
+            rewrite_prompt,
+            "You are a technical editor. Enforce the listed constraints while preserving meaning.",
+        )
+
+        is_error = (not corrected.strip() or
+                    corrected.strip().startswith("Error:") or
+                    len(corrected.strip()) < 50)
+        if is_error:
+            print(f"  ⚠️  Constraint rewrite failed — returning original answer")
+            return answer
+        print(f"  → Constraint rewrite complete ({len(corrected)} chars)")
+        return corrected
 
     # ── Delegation helpers ────────────────────────────────────────────────────
 
@@ -604,7 +837,8 @@ REQUIREMENTS:
             "model": model,
             "messages": messages,
             "stream": True,
-            "think": think,
+            "keep_alive": 600,  # keep loaded 10 min — explicit unload at phase transitions
+            # NOTE: do NOT pass "think" — Ollama 0.17+ rejects it for qwq/deepseek models.
             "options": {
                 "temperature": 0.6,
                 "num_predict": num_predict,
@@ -643,3 +877,53 @@ REQUIREMENTS:
         except Exception as e:
             print(f"⚠️  _ollama_chat({model}) error: {e}")
             return ""
+
+    @staticmethod
+    async def _unload_model(model: str) -> None:
+        """Evict any model from VRAM (keep_alive=0 signal to Ollama)."""
+        def _do():
+            import requests as _req
+            try:
+                _req.post(
+                    f"{_OLLAMA_URL}/api/chat",
+                    json={"model": model, "messages": [], "keep_alive": 0},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do)
+            print(f"  🧹 Unloaded {model}")
+        except Exception as e:
+            print(f"  ⚠️  Unload {model} skipped: {e}")
+
+    @staticmethod
+    async def _prewarm_model(model: str) -> None:
+        """Pre-load model into VRAM with a minimal 1-token generation."""
+        def _do():
+            import requests as _req
+            try:
+                _req.post(
+                    f"{_OLLAMA_URL}/api/generate",
+                    json={"model": model, "prompt": " ", "stream": False,
+                          "keep_alive": 600, "options": {"num_predict": 1}},
+                    timeout=600,
+                )
+            except Exception:
+                pass
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do)
+            print(f"  🔥 Pre-warmed {model}")
+        except Exception as e:
+            print(f"  ⚠️  Pre-warm {model} skipped: {e}")
+
+    @staticmethod
+    async def _unload_solver_model() -> None:
+        """Evict the ReactSolver model. Called after Phase 1 before synthesis."""
+        try:
+            from react_solver import ReactSolver as _RS
+            await OrchestratorV3._unload_model(_RS.MODEL)
+        except Exception as e:
+            print(f"  ⚠️  VRAM unload skipped: {e}")

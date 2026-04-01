@@ -18,7 +18,7 @@ Environment:
   SWARM_API_KEY  Bearer token (optional)
 """
 
-import sys, os, json, time, textwrap, argparse
+import sys, os, json, time, textwrap, argparse, re
 import urllib.request, urllib.error, urllib.parse
 
 DEFAULT_SERVER = os.environ.get("SWARM_SERVER", "http://10.0.0.58:5002")
@@ -27,8 +27,9 @@ POLL_INTERVAL  = 4
 POLL_TIMEOUT   = 600
 
 # Verbosity: 0=quiet (answer only), 1=normal (phase+answer), 2=verbose (all events)
-VERBOSITY  = 1
-DEBUG_MODE = False   # print raw SSE JSON when True
+VERBOSITY     = 1
+DEBUG_MODE    = False   # print raw SSE JSON when True
+STREAM_TOKENS = False   # -t/--tokens: stream raw LLM output token-by-token
 
 # -- ANSI helpers --------------------------------------------------------------
 _USE_COLOR = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else True
@@ -36,15 +37,67 @@ _USE_COLOR = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else True
 def _c(code, text):
     return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
 
-BOLD    = lambda t: _c("1",  t)
-DIM     = lambda t: _c("2",  t)
-GREEN   = lambda t: _c("32", t)
-YELLOW  = lambda t: _c("33", t)
-CYAN    = lambda t: _c("36", t)
-RED     = lambda t: _c("31", t)
-BLUE    = lambda t: _c("34", t)
-MAGENTA = lambda t: _c("35", t)
+BOLD       = lambda t: _c("1",   t)
+DIM        = lambda t: _c("2",   t)
+GREEN      = lambda t: _c("32",  t)
+YELLOW     = lambda t: _c("33",  t)
+CYAN       = lambda t: _c("36",  t)
+RED        = lambda t: _c("31",  t)
+BLUE       = lambda t: _c("34",  t)
+MAGENTA    = lambda t: _c("35",  t)
+PURPLE     = lambda t: _c("95",  t)   # bright magenta  — new SP turn
+LIGHT_BLUE = lambda t: _c("94",  t)   # bright blue     — code blocks
+B_GREEN    = lambda t: _c("92",  t)   # bright green    — SOLVED / RESULT
+B_RED      = lambda t: _c("91",  t)   # bright red      — FAILED / errors
 CLEAR   = "\033[2K\r" if _USE_COLOR else ""
+
+def _colorize_llm_line(line: str, in_code: bool) -> tuple:
+    """Return (colored_line, new_in_code_state).  Called once per complete line."""
+    s = line.rstrip()
+    # Code fence toggle
+    if s.startswith("```"):
+        new_in_code = not in_code
+        return LIGHT_BLUE(s), new_in_code
+    if in_code:
+        return LIGHT_BLUE(s), True
+    # Structural ReAct markers
+    if s.startswith("THOUGHT:"):
+        return DIM(s), False
+    if s.startswith("ACTION:"):
+        return PURPLE(BOLD("ACTION:")) + PURPLE(s[7:]), False
+    if s.startswith("INPUT:"):
+        return LIGHT_BLUE(s), False
+    if s.startswith("END_INPUT") or s.startswith("END_ANSWER"):
+        return DIM(s), False
+    # Locked ledger / results
+    if s.startswith("🔒 LOCKED RESULTS") or s.startswith("LOCKED RESULTS"):
+        return B_GREEN(BOLD(s)), False
+    if re.match(r'\s{2}\w+ = ', s) and not s.strip().startswith("#"):
+        # indented ledger entries like "  r0 = 1.186 m"
+        return B_GREEN(s), False
+    # RESULT lines
+    if s.startswith("RESULT:"):
+        return B_GREEN(BOLD(s)), False
+    # Final answer section
+    if s.startswith("FINAL_ANSWER:"):
+        return B_GREEN(BOLD("━"*50 + " FINAL ANSWER " + "━"*50)), False
+    if s.startswith("STATUS: solved"):
+        return B_GREEN(BOLD(s)), False
+    if s.startswith("STATUS: failed"):
+        return B_RED(BOLD(s)), False
+    if s.startswith("STATUS:"):
+        return YELLOW(s), False
+    # Observation / verification
+    if s.startswith("OBSERVATION:"):
+        return CYAN(BOLD(s)), False
+    if s.startswith("VERIFICATION:"):
+        return YELLOW(s), False
+    if s.startswith("CODE:"):
+        return LIGHT_BLUE(s), False
+    # Errors
+    if s.startswith("EXECUTION ERROR") or s.startswith("ERROR:") or s.startswith("EXCEPTION"):
+        return B_RED(s), False
+    return s, False
 
 # Phase colour map
 _PHASE_COLORS = {
@@ -60,6 +113,139 @@ def _phase_color(phase_id: str):
         if phase_id.startswith(k):
             return fn
     return CYAN
+
+# -- Rich Live panel (optional) -----------------------------------------------
+
+try:
+    from rich.live import Live as _RichLive
+    from rich.console import Console as _RichConsole
+    from rich.panel import Panel as _RichPanel
+    from rich.text import Text as _RichText
+    _HAS_RICH = True
+except ImportError:
+    _HAS_RICH = False
+
+
+class LiveStatus:
+    """Tracks Swarm job progress for the Rich Live panel display."""
+
+    _STATUS_ICON = {'pending': '⏳', 'active': '🔄', 'done': '✅',
+                    'solved': '✅', 'failed': '❌', 'timeout': '⏱'}
+
+    def __init__(self, question: str):
+        self.question = question[:80]
+        self.t0 = time.time()
+        self.phases: dict = {}   # id → {name, status, elapsed_s, notes}
+        self.sps: dict = {}      # id → {status, turn, max_turn, tool, values}
+        self.wave = ""
+        self.q_type = ""
+        self.n_solved = 0
+        self.n_total = 0
+        self._last_phase_id = ""
+
+    def on_event(self, ev: dict):
+        t = ev.get('type', '')
+
+        if t == 'phase':
+            pid  = ev.get('phase_id', '')
+            name = ev.get('phase_name', '')
+            el   = ev.get('elapsed_s') or ev.get('elapsed', 0)
+            if self._last_phase_id and self._last_phase_id in self.phases:
+                self.phases[self._last_phase_id]['status'] = 'done'
+            self.phases[pid] = {'name': name, 'status': 'active', 'elapsed_s': el, 'notes': ''}
+            self._last_phase_id = pid
+            if pid.upper() in ('0A',) and name:
+                self.q_type = name
+
+        elif t == 'wave':
+            w, tw = ev.get('wave', 1), ev.get('total_waves', 1)
+            self.wave = f"Wave {w}/{tw}"
+            for sp_id in ev.get('sps', []):
+                if sp_id not in self.sps:
+                    self.sps[sp_id] = {'status': 'pending', 'turn': 0,
+                                       'max_turn': 15, 'tool': '—', 'values': '—'}
+            self.n_total = max(self.n_total, len(self.sps))
+
+        elif t == 'sp_turn':
+            sp_id = ev.get('sp_id', '')
+            if sp_id not in self.sps:
+                self.sps[sp_id] = {'status': 'active', 'turn': 0,
+                                   'max_turn': 15, 'tool': '—', 'values': '—'}
+            self.sps[sp_id].update({
+                'status': 'active',
+                'turn': ev.get('turn', 0),
+                'max_turn': ev.get('max_turns', 15),
+                'tool': ev.get('tool', '—'),
+            })
+
+        elif t == 'sp_done':
+            sp_id = ev.get('sp_id', '')
+            st    = ev.get('status', 'failed')
+            vals  = (ev.get('values') or '—')[:28]
+            if sp_id not in self.sps:
+                self.sps[sp_id] = {'status': st, 'turn': 0,
+                                   'max_turn': 15, 'tool': '—', 'values': vals}
+            self.sps[sp_id].update({'status': st, 'values': vals,
+                                    'turn': ev.get('turns', 0)})
+            if st == 'solved':
+                self.n_solved += 1
+
+        elif t == 'solve_done':
+            self.n_solved = ev.get('solved', self.n_solved)
+            self.n_total  = ev.get('total',  self.n_total)
+
+    def render(self) -> "_RichPanel":
+        elapsed = time.time() - self.t0
+        mm, ss  = divmod(int(elapsed), 60)
+
+        parts = ["[bold cyan]SWARM 3.2[/bold cyan]"]
+        if self.q_type:
+            parts.append(f"[dim]{self.q_type}[/dim]")
+        if self.wave:
+            parts.append(f"[yellow]{self.wave}[/yellow]")
+        if self.n_total > 0:
+            parts.append(f"[green]{self.n_solved}/{self.n_total}[/green]")
+        parts.append(f"[dim]⏱ {mm:02d}:{ss:02d}[/dim]")
+        title = "  ".join(parts)
+
+        body = _RichText()
+        body.append(f"Q: {self.question}\n", style="bold white")
+        body.append("─" * 58 + "\n", style="dim")
+
+        si = self._STATUS_ICON
+        for pid, ph in self.phases.items():
+            icon = si.get(ph['status'], '·')
+            el   = f"  {ph['elapsed_s']:.1f}s" if ph.get('elapsed_s') else ''
+            body.append(f"  {icon} ")
+            body.append(f"{pid:<4}", style="cyan")
+            body.append(f"  {ph['name']:<18}", style="white")
+            body.append(f"{el}\n", style="dim green")
+
+        if self.sps:
+            body.append("─" * 58 + "\n", style="dim")
+            for sp_id, sp in self.sps.items():
+                st   = sp.get('status', 'pending')
+                icon = si.get(st, '·')
+                turn = sp.get('turn', 0)
+                mx   = sp.get('max_turn', 15)
+                tool = sp.get('tool', '—')[:10]
+                vals = sp.get('values', '—')[:26]
+                body.append(f"  {icon} ")
+                body.append(f"{sp_id:<5}", style="cyan")
+                if st == 'active':
+                    body.append(f"  {turn:>2}/{mx}  ", style="yellow")
+                    body.append(f"{tool:<12}", style="blue")
+                elif st in ('solved', 'failed', 'timeout'):
+                    turns_s = f"  {turn:>2} turns  " if turn else "           "
+                    body.append(turns_s, style="dim")
+                    style = "green" if st == 'solved' else "red"
+                    body.append(vals, style=style)
+                else:
+                    body.append("  pending", style="dim")
+                body.append("\n")
+
+        return _RichPanel(body, title=title, border_style="cyan", padding=(0, 1))
+
 
 # -- HTTP helpers --------------------------------------------------------------
 
@@ -207,6 +393,315 @@ def cmd_query(server, question):
     resp = _post(server, "/query", {"question": question}, timeout=600)
     _print_answer(resp)
 
+def cmd_logs(server: str, job_id: str, tail: int = None, grep: str = None):
+    """Fetch and print the full disk log for a completed or running job."""
+    params = []
+    if tail:
+        params.append(f"tail={tail}")
+    if grep:
+        params.append(f"grep={urllib.parse.quote(grep)}")
+    qs = ("?" + "&".join(params)) if params else ""
+    req = urllib.request.Request(
+        server.rstrip("/") + f"/logs/{job_id}{qs}",
+        headers=_headers(),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(r.read().decode(errors="replace"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        if e.code == 404:
+            print(RED(f"No log for job {job_id} — is the job_id correct?"), file=sys.stderr)
+        else:
+            print(RED(f"[HTTP {e.code}] {body}"), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(RED(f"[Connection error] {e.reason}"), file=sys.stderr)
+        sys.exit(1)
+
+
+# -- Watch (reconnect to running job) -----------------------------------------
+
+def cmd_watch(server: str, job_id: str):
+    """Tail the disk log of a running or completed job live (like tail -f).
+
+    Polls /logs/<job_id> every 1.5s and prints new lines as they arrive.
+    When STREAM_TOKENS is True, [LLMTOK] lines are rendered as raw token text.
+    Exits when the job reaches completed/failed.
+    """
+    import time as _time
+
+    print(f"\n{BOLD('◉')} Watching job {CYAN(job_id)}")
+    print(DIM("─" * 60))
+
+    seen = 0
+
+    def _fetch_log():
+        req = urllib.request.Request(
+            server.rstrip("/") + f"/logs/{job_id}",
+            headers=_headers(),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode(errors="replace").splitlines()
+        except Exception:
+            return None
+
+    def _render_line(raw):
+        if raw.startswith("[LLMTOK]"):
+            if STREAM_TOKENS:
+                content = raw[8:].replace("\\n", "\n").replace("\\\\", "\\")
+                sys.stdout.write(content)
+                sys.stdout.flush()
+            # silently skip when tokens off
+            return
+        print(raw)
+
+    try:
+        while True:
+            lines = _fetch_log()
+            if lines is not None:
+                for raw in lines[seen:]:
+                    _render_line(raw)
+                seen = len(lines)
+
+            # Check completion
+            status = ""
+            try:
+                result = _get(server, f"/result/{job_id}")
+                status = result.get("status", "")
+            except Exception:
+                pass
+
+            if status in ("completed", "failed"):
+                # Drain any final lines before printing answer
+                lines = _fetch_log()
+                if lines:
+                    for raw in lines[seen:]:
+                        _render_line(raw)
+                print()
+                _print_answer(result)
+                return
+
+            _time.sleep(1.5)
+
+    except KeyboardInterrupt:
+        print(f"\n{DIM('[detached — job still running on server]')}")
+
+
+# -- Token streaming command ---------------------------------------------------
+
+def cmd_stream_tokens(server: str, question: str):
+    """Token streaming mode — color-coded live output."""
+    url  = server.rstrip("/") + "/query_stream"
+    data = json.dumps({"question": question}).encode()
+    hdrs = {**_headers(), "Accept": "text/event-stream"}
+    req  = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+
+    W = 72  # separator width
+
+    def _sep(char="─"):
+        return DIM(char * W)
+
+    def _phase_banner(pid, name, el):
+        el_s = f"  {DIM(str(el)+'s')}" if el else ""
+        tag  = _phase_color(pid)(f" Phase {pid} ")
+        return f"\n{'━'*4}{tag}{'━'*(W-8-len(pid)-len(name)-2)} {CYAN(name)}{el_s}"
+
+    def _sp_new_banner(sp_id):
+        """Red-outlined banner printed when a NEW sub-problem context starts."""
+        bar = B_RED("┌" + "─"*(W-2) + "┐")
+        mid = B_RED("│") + RED(BOLD(f"  ⚠  NEW CONTEXT — {sp_id}  (history cleared, fresh system prompt)".center(W-2))) + B_RED("│")
+        bot = B_RED("└" + "─"*(W-2) + "┘")
+        return f"\n{bar}\n{mid}\n{bot}"
+
+    print(f"\n{BOLD('▶')} {question[:80]}")
+    print(_sep("━"))
+
+    cur_sp, cur_turn = "", -1
+    tok_buf   = ""          # incomplete line buffer for llm_chunk
+    in_code   = False       # are we inside a ``` block?
+
+    def _flush_tok_buf():
+        """Print whatever is left in tok_buf without a trailing newline."""
+        nonlocal tok_buf, in_code
+        if tok_buf:
+            colored, in_code = _colorize_llm_line(tok_buf, in_code)
+            sys.stdout.write(colored)
+            sys.stdout.flush()
+            tok_buf = ""
+
+    def _handle_llm_chunk(content: str):
+        nonlocal tok_buf, in_code
+        tok_buf += content
+        while "\n" in tok_buf:
+            line, tok_buf = tok_buf.split("\n", 1)
+            colored, in_code = _colorize_llm_line(line, in_code)
+            print(colored)
+
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            buf = ""
+            while True:
+                raw_chunk = resp.read(256)
+                if not raw_chunk:
+                    break
+                buf += raw_chunk.decode("utf-8", errors="replace")
+                while "\n\n" in buf:
+                    block, buf = buf.split("\n\n", 1)
+                    for raw_line in block.splitlines():
+                        if not raw_line.startswith("data: "):
+                            continue
+                        try:
+                            ev = json.loads(raw_line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        etype = ev.get("type", "")
+
+                        # ── Phase header ─────────────────────────────────────
+                        if etype == "phase":
+                            _flush_tok_buf()
+                            pid  = ev.get("phase_id", "")
+                            name = ev.get("phase_name", "")
+                            el   = ev.get("elapsed_s", "")
+                            print(_phase_banner(pid, name, el))
+                            print(_sep())
+
+                        # ── New SP turn ───────────────────────────────────────
+                        elif etype == "sp_turn":
+                            sp  = ev.get("sp_id", "")
+                            trn = ev.get("turn", 0)
+                            if sp != cur_sp:
+                                # New sub-problem = fresh LLM context
+                                _flush_tok_buf()
+                                print(_sp_new_banner(sp))
+                                cur_sp = sp
+                            if trn != cur_turn:
+                                _flush_tok_buf()
+                                tool = ev.get("tool", "?")
+                                mx   = ev.get("max_turns", 15)
+                                print(f"\n{PURPLE(BOLD(f'  ┌─ [{sp}] Turn {trn}/{mx}'))}  {DIM('→')}  {PURPLE(tool)}")
+                                cur_turn = trn
+
+                        # ── Live LLM tokens ───────────────────────────────────
+                        elif etype == "llm_chunk":
+                            _handle_llm_chunk(ev.get("content", ""))
+
+                        # ── SP completed ─────────────────────────────────────
+                        elif etype == "sp_done":
+                            _flush_tok_buf()
+                            sp_id  = ev.get("sp_id", "")
+                            st     = ev.get("status", "failed")
+                            vals   = ev.get("values", "") or "—"
+                            turns  = ev.get("turns", 0)
+                            if st == "solved":
+                                bar = B_GREEN("━" * W)
+                                msg = B_GREEN(BOLD(f"  ✔  {sp_id} SOLVED  │  {vals}  │  {turns} turns"))
+                            else:
+                                bar = B_RED("━" * W)
+                                msg = B_RED(BOLD(f"  ✘  {sp_id} FAILED  │  {turns} turns"))
+                            print(f"\n{bar}\n{msg}\n{bar}")
+
+                        # ── Wave / wave info ──────────────────────────────────
+                        elif etype == "wave":
+                            _flush_tok_buf()
+                            wn   = ev.get("wave_num", "")
+                            wt   = ev.get("wave_total", "")
+                            sps  = ev.get("sp_ids", [])
+                            print(f"\n{CYAN(f'  ⚡ Wave {wn}/{wt}:')}  {DIM(str(sps))}")
+
+                        # ── Final answer ──────────────────────────────────────
+                        elif etype == "answer":
+                            _flush_tok_buf()
+                            answer = ev.get("answer", "")
+                            print(f"\n{B_GREEN('━'*W)}")
+                            print(B_GREEN(BOLD("  ★  FINAL ANSWER")))
+                            print(f"{B_GREEN('━'*W)}\n")
+                            print(answer)
+                            print(f"\n{_sep('━')}")
+                            return
+
+                        # ── Errors ────────────────────────────────────────────
+                        elif etype in ("error", "error_line"):
+                            _flush_tok_buf()
+                            msg = ev.get("error", ev.get("line", "unknown"))
+                            print(f"\n{B_RED('┌── ERROR ──')}\n{B_RED(msg)}\n{B_RED('└──────────')}")
+
+    except KeyboardInterrupt:
+        _flush_tok_buf()
+        print(f"\n{DIM('[interrupted]')}")
+    except Exception as e:
+        print(f"\n{B_RED(f'Connection error: {e}')}")
+
+
+# -- Streaming command (Rich panel) -------------------------------------------
+
+def _cmd_stream_rich(server: str, question: str):
+    """Rich Live panel variant of cmd_stream (used when rich is available)."""
+    url  = server.rstrip("/") + "/query_stream"
+    data = json.dumps({"question": question}).encode()
+    hdrs = {**_headers(), "Accept": "text/event-stream"}
+    req  = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+
+    tracker = LiveStatus(question)
+    console = _RichConsole()
+
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            with _RichLive(tracker.render(), console=console,
+                           refresh_per_second=2, transient=False) as live:
+                buf = ""
+                while True:
+                    chunk = resp.read(256)
+                    if not chunk:
+                        break
+                    buf += chunk.decode("utf-8", errors="replace")
+                    while "\n\n" in buf:
+                        block, buf = buf.split("\n\n", 1)
+                        for raw in block.splitlines():
+                            if not raw.startswith("data: "):
+                                continue
+                            try:
+                                ev = json.loads(raw[6:])
+                            except json.JSONDecodeError:
+                                continue
+
+                            if DEBUG_MODE:
+                                console.print(DIM(f"  [dbg] {json.dumps(ev)[:200]}"))
+
+                            tracker.on_event(ev)
+                            live.update(tracker.render())
+
+                            etype = ev.get("type", "")
+                            if etype == "answer":
+                                live.stop()
+                                answer  = ev.get("answer", "")
+                                elapsed = ev.get("elapsed", 0)
+                                print(DIM("-" * 60))
+                                print(f"{GREEN('Done')}  {DIM(f'elapsed={elapsed:.1f}s')}")
+                                print(DIM("-" * 60))
+                                print()
+                                w = min(100, _term_width())
+                                for ln in answer.splitlines():
+                                    print(textwrap.fill(ln, width=w) if len(ln) > w else ln)
+                                print()
+                                return
+                            elif etype == "done":
+                                return
+                            elif etype == "error":
+                                live.stop()
+                                print(f"\n{RED('Error:')} {ev.get('error', 'unknown')}\n")
+                                return
+
+    except urllib.error.HTTPError as e:
+        print(RED(f"\n[HTTP {e.code}] {e.read().decode()}"), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(RED(f"\n[Connection error] {e.reason}"), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW('Interrupted.')}")
+
 
 # -- Streaming command ---------------------------------------------------------
 
@@ -216,11 +711,22 @@ def cmd_stream(server: str, question: str):
 
     Verbosity levels (set via --verbose / :verbose in REPL):
       0 = quiet   — answer only, no progress
-      1 = normal  — live spinner with phase/tok/s (default)
+      1 = normal  — Rich Live panel (if rich installed) or spinner
       2 = verbose — every event printed as its own line
     Debug mode (--debug / :debug): also prints raw SSE JSON for each event.
+    Token mode (--tokens / :tokens): raw LLM output streamed character-by-character.
     """
-    global VERBOSITY, DEBUG_MODE
+    global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
+
+    # Route to raw token streaming when -t/--tokens is active
+    if STREAM_TOKENS:
+        cmd_stream_tokens(server, question)
+        return
+
+    # Route to Rich Live panel when available and in normal verbosity
+    if _HAS_RICH and VERBOSITY == 1 and _USE_COLOR:
+        _cmd_stream_rich(server, question)
+        return
 
     url  = server.rstrip("/") + "/query_stream"
     data = json.dumps({"question": question}).encode()
@@ -398,10 +904,13 @@ def cmd_stream(server: str, question: str):
 # -- REPL ---------------------------------------------------------------------
 
 def cmd_repl(server):
-    global VERBOSITY, DEBUG_MODE
+    global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
     print(f"{BOLD('Swarm 3.0 REPL')}  (server: {server})")
-    print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}")
-    print("Commands: :health :status :jobs :stream <q> :ask <q>")
+    print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}  Tokens: {STREAM_TOKENS}")
+    print("Commands: :health :status :jobs :stream <q> :ask <q> :tokens")
+    print("          :result <job_id>  -- show answer for a completed job")
+    print("          :watch <job_id>   -- reconnect to running job (tail-f style)")
+    print("          :logs <job_id> [tail=N] [grep=pat]")
     print("          :verbose [0|1|2]  :debug [on|off]  :quit\n")
     while True:
         try:
@@ -414,8 +923,32 @@ def cmd_repl(server):
         elif line == ":health":   cmd_health(server)
         elif line == ":status":   cmd_status(server)
         elif line == ":jobs":     cmd_jobs(server)
+        elif line.startswith(":result ") or line.startswith(":results "): cmd_result(server, line.split(" ", 1)[1].strip())
         elif line.startswith(":stream "): cmd_stream(server, line[8:].strip())
         elif line.startswith(":ask "):    cmd_ask(server, line[5:].strip())
+        elif line == ":tokens":
+            STREAM_TOKENS = not STREAM_TOKENS
+            print(f"  Token streaming {'ON  (raw LLM output)' if STREAM_TOKENS else 'OFF (Rich panel)'}")
+        elif line.startswith(":watch "):
+            parts = line.split()
+            if len(parts) >= 2:
+                cmd_watch(server, parts[1])
+            else:
+                print("  Usage: :watch <job_id>")
+        elif line.startswith(":logs "):
+            parts = line.split()
+            if len(parts) >= 2:
+                job_id = parts[1]
+                tail_n = grep_s = None
+                for i, p in enumerate(parts):
+                    if p.startswith("tail="):
+                        try: tail_n = int(p[5:])
+                        except ValueError: pass
+                    if p.startswith("grep="):
+                        grep_s = p[5:]
+                cmd_logs(server, job_id, tail=tail_n, grep=grep_s)
+            else:
+                print("  Usage: :logs <job_id> [tail=N] [grep=pat]")
         elif line.startswith(":verbose"):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
@@ -431,6 +964,10 @@ def cmd_repl(server):
             else:
                 DEBUG_MODE = not DEBUG_MODE
             print(f"  Debug mode: {'ON' if DEBUG_MODE else 'OFF'}")
+        elif line.startswith(":"):
+            cmd = line.split()[0]
+            print(f"  Unknown command: {cmd}")
+            print("  Commands: :health :status :jobs :result :stream :ask :tokens :watch :logs :verbose :debug")
         else:
             if _USE_COLOR:
                 cmd_stream(server, line)
@@ -471,16 +1008,19 @@ def main():
                         help="Verbosity 0: print answer only, no progress")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Print raw SSE JSON for every event")
+    parser.add_argument("-t", "--tokens", action="store_true",
+                        help="Stream raw LLM tokens to terminal (like ollama run)")
     parser.add_argument("args", nargs="*")
     opts = parser.parse_args()
     server = opts.server.rstrip("/")
 
-    global VERBOSITY, DEBUG_MODE
+    global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
     if opts.quiet:
         VERBOSITY = 0
     elif opts.verbose:
         VERBOSITY = min(2, 1 + opts.verbose)
-    DEBUG_MODE = opts.debug
+    DEBUG_MODE    = opts.debug
+    STREAM_TOKENS = opts.tokens
 
     if opts.interactive:
         cmd_repl(server); return
@@ -498,6 +1038,18 @@ def main():
         if len(args) < 2:
             print("Usage: run_me.py result <job_id>", file=sys.stderr); sys.exit(1)
         cmd_result(server, args[1])
+    elif cmd == "logs":
+        if len(args) < 2:
+            print("Usage: run_me.py logs <job_id> [--tail N] [--grep pattern]",
+                  file=sys.stderr); sys.exit(1)
+        tail_n = grep_s = None
+        for i, a in enumerate(args):
+            if a == "--tail" and i + 1 < len(args):
+                try: tail_n = int(args[i + 1])
+                except ValueError: pass
+            if a == "--grep" and i + 1 < len(args):
+                grep_s = args[i + 1]
+        cmd_logs(server, args[1], tail=tail_n, grep=grep_s)
     elif cmd == "ask":
         q = " ".join(args[1:])
         if not q: print("Usage: run_me.py ask \"question\"", file=sys.stderr); sys.exit(1)

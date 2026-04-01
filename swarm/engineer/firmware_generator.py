@@ -18,6 +18,7 @@ def _llm(prompt: str, model: str = "qwen2.5:14b", max_tokens: int = 2500) -> str
         "model":   model,
         "prompt":  prompt,
         "stream":  False,
+        "keep_alive": 0,
         "options": {"temperature": 0.3, "num_predict": max_tokens},
     }
     try:

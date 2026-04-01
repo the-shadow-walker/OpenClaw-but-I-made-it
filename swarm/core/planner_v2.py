@@ -11,11 +11,20 @@ Uses phi4:14b for speed (structured JSON output).
 
 import json
 import re
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
+
+@dataclass
+class Requirement:
+    """One distinct task extracted from the user question."""
+    id: str                          # "R1", "R2", ...
+    text: str                        # "find radius of circular orbit"
+    req_type: str                    # "compute" | "explain" | "compare" | "describe"
+    negative_constraints: List[str]  # ["no_formulas", "no_equations"]
+
 
 @dataclass
 class SubProblem:
@@ -88,11 +97,46 @@ class SolvePlan:
         }
 
 
-# ── Planner ───────────────────────────────────────────────────────────────────
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+_REQUIREMENT_PROMPT = """\
+Extract all distinct tasks from this question. Each separate computation,
+analysis, or explanation is ONE requirement.
+
+QUESTION: {question}
+
+Split on: semicolons, "then", "finally", "next", "also", "and" (when joining
+distinct unrelated tasks).
+
+Look for negative constraints:
+- "without using symbolic formulas" / "without equations" → "no_formulas"
+- "in plain language" / "conceptually" / "without math" → "no_math"
+- "no calculus" → "no_calculus"
+
+Respond ONLY with valid JSON (no markdown fences):
+{{
+  "requirements": [
+    {{
+      "id": "R1",
+      "text": "find the circular orbit radius",
+      "req_type": "compute",
+      "negative_constraints": []
+    }},
+    {{
+      "id": "R2",
+      "text": "explain the electrochemistry process without symbolic formulas",
+      "req_type": "explain",
+      "negative_constraints": ["no_formulas"]
+    }}
+  ]
+}}
+
+req_type values: "compute" | "explain" | "compare" | "describe"
+"""
 
 _PLANNER_PROMPT = """\
 You are a precise scientific problem planner. Decompose the question below into
-a minimal set of sub-problems that can be solved in dependency order.
+sub-problems that can be solved in dependency order.
 
 QUESTION: {question}
 
@@ -104,17 +148,23 @@ CLASSIFICATION INFO:
 - Equations needed: {equations}
 - Variable schema: {schema}
 
+{requirements_block}
+
 RULES:
+0. Create EXACTLY ONE sub-problem per requirement listed above. Do NOT merge
+   requirements. Do NOT skip requirements. Do NOT create extra SPs beyond the list.
 1. Each sub-problem solves ONE clearly defined thing.
 2. lookup_queries must be SPECIFIC (e.g. "molar enthalpy CO2 at 500K") NOT vague
    (e.g. "how does combustion work").  Max 2 queries per sub-problem.
 3. depends_on lists SP ids (e.g. ["SP1"]) that must finish before this SP runs.
 4. If the whole question is a single calculation, use exactly ONE sub-problem.
 5. coordinate_system: choose a clear frame and origin (or "N/A" for non-spatial).
-6. MAXIMUM 3 sub-problems total. Group related tasks together. Quality over
-   quantity — one well-scoped SP is better than three overlapping ones.
-   Purely qualitative/descriptive parts (e.g. "explain precession direction")
-   do NOT need their own SP; fold them into a neighbouring computational SP.
+6. Create exactly ONE SP per DISTINCT task. Do NOT merge unrelated tasks into
+   one SP. Do NOT omit any task. Do NOT invent extra SPs.
+7. Unrelated tasks that share NO variables (e.g., a classical mechanics problem
+   AND a number theory problem AND a chemistry problem) MUST be separate SPs with
+   depends_on: []. They will run in PARALLEL, cutting total time. Only add a
+   dependency if SP_B genuinely needs a RESULT value from SP_A.
 
 Respond ONLY with valid JSON (no markdown fences, no explanation):
 {{
@@ -150,13 +200,18 @@ class PlannerV2:
         question: str,
         classification,              # ClassificationResult or None
         llm_query_func: Callable,    # async (prompt, system) → str
-    ) -> SolvePlan:
+    ) -> Tuple["SolvePlan", List["Requirement"]]:
         """
-        Generate and return a SolvePlan.
+        Generate and return (SolvePlan, List[Requirement]).
         Falls back to a single-SP plan wrapping the whole question on any failure.
         """
+        # ── Step 1: Extract requirements (Requirement Shredder) ───────────────
+        requirements = await PlannerV2.extract_requirements(question, llm_query_func)
+        print(f"📝 Requirements: {len(requirements)} extracted"
+              + (f" [{', '.join(r.id for r in requirements)}]" if requirements else ""))
+
         try:
-            # Build prompt
+            # ── Step 2: Build planner prompt ──────────────────────────────────
             if classification:
                 given = classification.given_variables[:10]
                 unknown = classification.unknown_variables[:10]
@@ -170,6 +225,24 @@ class PlannerV2:
                 qtype = "unknown"
                 schema_str = "{}"
 
+            # Build requirements block for the planner
+            if requirements:
+                req_lines = []
+                for r in requirements:
+                    constraints = (
+                        f" [{'|'.join(r.negative_constraints)}]"
+                        if r.negative_constraints else ""
+                    )
+                    req_lines.append(f"  {r.id}: {r.text} [{r.req_type}]{constraints}")
+                requirements_block = (
+                    f"REQUIRED TASKS ({len(requirements)} total):\n"
+                    + "\n".join(req_lines)
+                    + "\n\nYou MUST create EXACTLY ONE SP per requirement. "
+                    + "Do NOT merge, skip, or combine any requirements."
+                )
+            else:
+                requirements_block = ""
+
             prompt = _PLANNER_PROMPT.format(
                 question=question[:1000],
                 qtype=qtype,
@@ -178,6 +251,7 @@ class PlannerV2:
                 unknown=unknown,
                 equations=equations,
                 schema=schema_str,
+                requirements_block=requirements_block,
             )
 
             system = (
@@ -186,19 +260,57 @@ class PlannerV2:
             )
 
             raw = await llm_query_func(prompt, system)
-            plan = PlannerV2._parse_plan(question, raw, classification)
+            plan = PlannerV2._parse_plan(question, raw, classification, requirements)
             print(f"📋 SolvePlan: {len(plan.sub_problems)} sub-problem(s), "
                   f"order: {plan.dependency_order}")
-            return plan
+            return plan, requirements
 
         except Exception as e:
             print(f"⚠️  PlannerV2 failed ({e}), using single-SP fallback")
-            return PlannerV2._fallback_plan(question, classification)
+            return PlannerV2._fallback_plan(question, classification), requirements
+
+    # ── Requirement extraction ────────────────────────────────────────────────
+
+    @staticmethod
+    async def extract_requirements(
+        question: str,
+        llm_query_func: Callable,
+    ) -> List["Requirement"]:
+        """
+        Pre-planning step: extract all distinct tasks and negative constraints
+        from the question. Falls back gracefully to a single R1 on any failure.
+        """
+        try:
+            prompt = _REQUIREMENT_PROMPT.format(question=question[:1200])
+            system = (
+                "You are a requirement extractor. "
+                "Output ONLY valid JSON matching the schema exactly."
+            )
+            raw = await llm_query_func(prompt, system)
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
+            data = json.loads(text)
+            reqs = []
+            for item in data.get("requirements", []):
+                reqs.append(Requirement(
+                    id=item.get("id", f"R{len(reqs)+1}"),
+                    text=item.get("text", ""),
+                    req_type=item.get("req_type", "compute"),
+                    negative_constraints=item.get("negative_constraints", []),
+                ))
+            if reqs:
+                return reqs
+        except Exception as e:
+            print(f"⚠️  extract_requirements failed ({e}), using R1 fallback")
+
+        # Fallback: single R1 covering the whole question
+        return [Requirement(id="R1", text=question[:200], req_type="compute",
+                            negative_constraints=[])]
 
     # ── Parsing ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_plan(question: str, raw: str, classification) -> SolvePlan:
+    def _parse_plan(question: str, raw: str, classification,
+                    requirements: Optional[List["Requirement"]] = None) -> "SolvePlan":
         # Strip markdown fences if present
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
         data = json.loads(text)
@@ -221,7 +333,8 @@ class PlannerV2:
             raise ValueError("No sub_problems in LLM response")
 
         # Topological order — use LLM's if provided, else derive
-        dep_order = data.get("dependency_order", [sp.id for sp in sub_problems])
+        kept_ids = {sp.id for sp in sub_problems}
+        dep_order = [x for x in data.get("dependency_order", []) if x in kept_ids]
         if not dep_order:
             dep_order = [sp.id for sp in sub_problems]
 
@@ -234,6 +347,15 @@ class PlannerV2:
                         given_vals[vname] = float(vmeta["value"])
                     except (TypeError, ValueError):
                         pass
+
+        # Validate: warn if planner dropped any requirements
+        if requirements and len(sub_problems) < len(requirements):
+            missing_count = len(requirements) - len(sub_problems)
+            print(f"⚠️  WARNING: Planner created {len(sub_problems)} SP(s) for "
+                  f"{len(requirements)} requirement(s) — "
+                  f"{missing_count} requirement(s) may have been dropped!")
+            print(f"   Requirements: {[r.id for r in requirements]}")
+            print(f"   SPs created:  {[sp.id for sp in sub_problems]}")
 
         return SolvePlan(
             problem=question,

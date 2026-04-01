@@ -1,5 +1,5 @@
 """
-ReAct Solver — per-sub-problem reasoning agent (qwq:32b)
+ReAct Solver — per-sub-problem reasoning agent (deepseek-r1:14b)
 
 Runs a Reason→Act→Observe loop to solve a single SubProblem.
 Tools are invoked via text-parsed markers (no native function-calling needed —
@@ -161,6 +161,10 @@ If you cannot solve it after trying:
 
 ═══════════════════════════════════════════
 RULES:
+0. MANDATORY FIRST STEP: Your FIRST action MUST be ACTION: run_code. You are
+   NOT permitted to skip straight to FINAL_ANSWER without having executed at
+   least one code block. If you output FINAL_ANSWER without first using
+   run_code, it will be REJECTED and you must try again with code.
 1. Each RESULT line: one variable, one numeric value, one unit (no text).
 2. Code must be complete and self-contained (imports + values inlined).
 3. Print each computed result as: print(f"RESULT: var_name = {{value:.6g}} unit")
@@ -171,6 +175,12 @@ RULES:
 8. CRITICAL: After your <think> block, you MUST output EITHER a valid
    ACTION block OR a FINAL_ANSWER block — NOTHING ELSE. No prose summary,
    no markdown, just the structured block. The parser only reads those markers.
+9. LOCKED RESULTS RULE: After any code run, the OBSERVATION will show a
+   "🔒 LOCKED RESULTS" ledger. Your FINAL_ANSWER RESULT: lines MUST include
+   EVERY entry from that ledger using the EXACT same values. Do not round
+   differently, rename variables, or omit any locked result.
+10. NEVER invent a number. If your code did not print it as RESULT:, it does
+    not exist. Write STATUS: failed rather than guess.
 """
 
 
@@ -178,23 +188,23 @@ RULES:
 
 class ReactSolver:
     MAX_TURNS = 15
-    MODEL = "qwq:32b"
+    MODEL = "deepseek-r1:14b"
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    LLM_TIMEOUT = 1800  # seconds — streaming keep-alive; actual cap is hard timeout below
+    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn; 2048 tokens @ ~2 tok/s = ~17 min worst case
 
     # ── Thinking controls (experiment by changing these) ──────────────────
-    # NUM_PREDICT: max tokens for the ENTIRE response (think block + answer).
-    #   4096 → ~19 min/turn on this hardware (too slow)
-    #   2048 → ~8-10 min/turn  (default — halves think time)
-    #   1024 → ~4-5 min/turn   (may truncate complex reasoning)
-    #    512 → ~2 min/turn     (minimal thinking; good for simple steps)
+    # NUM_PREDICT: max tokens for the response (with THINKING_ENABLED=False, all tokens
+    #   go to THOUGHT+ACTION content, not hidden reasoning).
+    #   2048 → ~30-90s/turn (enough for THOUGHT + code block + END_INPUT)
+    #   1024 → ~15-45s/turn (may clip very long code blocks)
     NUM_PREDICT: int = 2048
 
-    # THINKING_ENABLED: set False to pass think=False to Ollama.
-    #   True  → qwq reasons fully before answering (slower, more accurate)
-    #   False → qwq skips <think> block entirely (fast, less accurate)
-    #   Tip: try False first for simple arithmetic SPs, True for derivations.
-    THINKING_ENABLED: bool = True
+    # THINKING_ENABLED: controls deepseek-r1's native <think> block.
+    #   True  → model pre-reasons in a hidden <think> block before each turn (~2-8 min/turn)
+    #   False → skip <think> entirely; use only our structured THOUGHT: markers (~30s-2 min/turn)
+    #   NOTE: The ReAct THOUGHT blocks we parse already serve as the reasoning scaffold,
+    #   so native thinking is redundant overhead. False is the recommended default.
+    THINKING_ENABLED: bool = False
 
     def __init__(
         self,
@@ -213,6 +223,9 @@ class ReactSolver:
         self._history: List[Dict[str, str]] = []   # {"role": ..., "content": ...}
         self._turn = 0
         self._log_parts: List[str] = []
+        self._ran_code: bool = False              # Lock B: set True on first run_code
+        self._tool_counts: Dict[str, int] = {"run_code": 0, "search": 0, "rag": 0}
+        self._locked_results: Dict[str, str] = {}  # Ledger: var → "value unit" (never overwritten once set)
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -238,18 +251,18 @@ class ReactSolver:
 
         for turn in range(1, self.MAX_TURNS + 1):
             self._turn = turn
-            print(f"  Turn {turn}/{self.MAX_TURNS}", end=" ", flush=True)
+            print(f"  [{sp.id}] Turn {turn}/{self.MAX_TURNS}", end=" ", flush=True)
 
-            # Check timeout — 60 min hard cap per sub-problem
-            # (qwq:32b takes ~19 min per turn on this hardware)
-            if time.time() - t0 > 3600:
+            # Check timeout — 30 min hard cap per sub-problem
+            # (deepseek-r1:14b takes ~3-4 min per turn on this hardware)
+            if time.time() - t0 > 1800:
                 print("⏱️  TIMEOUT")
                 return SolverResult(
                     sub_problem_id=sp.id,
                     status="timeout",
                     turn_count=turn,
                     raw_log="\n".join(self._log_parts),
-                    verification_note="Hard timeout (3600s) reached",
+                    verification_note="Hard timeout (1800s) reached",
                 )
 
             # Query the model
@@ -271,13 +284,54 @@ class ReactSolver:
 
             # Check for FINAL_ANSWER in either surface
             if "FINAL_ANSWER:" in search_text:
+                # Lock B: if no code was run but outputs expected, try to auto-run any
+                # embedded ```python block before accepting the answer.
+                if not self._ran_code and sp.expected_outputs:
+                    import re as _re
+                    code_m = _re.search(r'```python\n(.*?)```', response, _re.DOTALL)
+                    if not code_m:
+                        code_m = _re.search(r'```python\n(.*?)```', search_text, _re.DOTALL)
+                    if code_m:
+                        embedded = code_m.group(1).strip()
+                        print(f"  🔄 Auto-running embedded code ({len(embedded)} chars)")
+                        exec_obs = await self._tool_run_code(embedded)
+                        self._log(f"\n[AUTO-RUN embedded code]\n{exec_obs}")
+                        self._history.append({"role": "user",
+                                               "content": f"OBSERVATION:\n{exec_obs}"})
+                        # _ran_code now True — fall through to parse FINAL_ANSWER
+                    else:
+                        # No code block at all: reject, but cap at 2 to avoid infinite loops
+                        self._rule0_rejects = getattr(self, "_rule0_rejects", 0) + 1
+                        if self._rule0_rejects <= 2:
+                            obs = (
+                                "REJECTED: No code execution detected. "
+                                "ACTION: run_code is mandatory before FINAL_ANSWER. "
+                                "Include a ```python block with your calculations."
+                            )
+                            print(f"  ⛔ REJECTED ({self._rule0_rejects}/2 — no code or block found)")
+                            self._log(f"\n[OBSERVATION turn {turn} — REJECTED]\n{obs}")
+                            self._history.append({"role": "user", "content": f"OBSERVATION:\n{obs}"})
+                            continue
+                        else:
+                            print(f"  ⚠️  Rule 0 waived after 2 rejections — accepting answer")
+
                 result = self._parse_final_answer(search_text, turn)
                 # If no RESULT: lines found, try extracting from think block
                 if not result.results:
                     result = self._extract_from_think(response, result, turn)
-                print(f"  → {result.status.upper()} | "
-                      f"{len(result.results)} result(s) | "
-                      f"{turn} turns | {time.time()-t0:.0f}s")
+                # Pretty-print result values
+                if result.results_with_units:
+                    vals_str = ", ".join(
+                        f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                        for v, d in result.results_with_units.items()
+                    )
+                else:
+                    vals_str = "no results"
+                tool_summary = ", ".join(
+                    f"{k}×{n}" for k, n in self._tool_counts.items() if n > 0
+                ) or "no tools"
+                print(f"  [{sp.id}] {result.status.upper()} | {vals_str} | "
+                      f"{turn} turns, {tool_summary} | {time.time()-t0:.0f}s")
                 return result
 
             # Parse and dispatch tool
@@ -286,8 +340,15 @@ class ReactSolver:
                 # Last resort: scan the think block for any RESULT: lines
                 fallback = self._try_extract_results_from_think(response)
                 if fallback:
-                    print(f"  → SOLVED (think-block fallback) | "
-                          f"{len(fallback)} result(s) | {turn} turns")
+                    vals_str = ", ".join(
+                        f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                        for v, d in fallback.items()
+                    )
+                    tool_summary = ", ".join(
+                        f"{k}×{n}" for k, n in self._tool_counts.items() if n > 0
+                    ) or "no tools"
+                    print(f"  [{sp.id}] SOLVED (think-block) | {vals_str} | "
+                          f"{turn} turns, {tool_summary}")
                     return SolverResult(
                         sub_problem_id=sp.id,
                         status="solved",
@@ -306,13 +367,23 @@ class ReactSolver:
                 )
             else:
                 action, inp = parsed
+                inp_preview = inp[:60].replace('\n', '↵')
+                print(f"→ {action}: {inp_preview!r}")
                 obs = await self._run_tool(action, inp)
 
+            # Prepend locked results ledger so the model never loses computed values
+            if self._locked_results:
+                ledger = "\n".join(f"  {k} = {v}" for k, v in self._locked_results.items())
+                obs = (
+                    f"🔒 LOCKED RESULTS (carry ALL of these EXACTLY into your FINAL_ANSWER RESULT: lines):\n"
+                    f"{ledger}\n\n"
+                    f"OBSERVATION:\n{obs}"
+                )
             self._log(f"\n[OBSERVATION turn {turn}]\n{obs}")
             self._history.append({"role": "user", "content": f"OBSERVATION:\n{obs}"})
 
         # Exhausted turns
-        print(f"  → FAILED (turn limit)")
+        print(f"  [{sp.id}] FAILED (turn limit)")
         return SolverResult(
             sub_problem_id=sp.id,
             status="failed",
@@ -324,13 +395,14 @@ class ReactSolver:
     # ── LLM call ─────────────────────────────────────────────────────────────
 
     async def _llm_call(self) -> str:
-        """Call qwq:32b via Ollama /api/chat (streaming to avoid HTTP timeout)."""
+        """Call {MODEL} via Ollama /api/chat (streaming)."""
         messages = [{"role": "system", "content": self._system}] + self._history
         payload = {
             "model": self.MODEL,
             "messages": messages,
             "stream": True,   # streaming keeps the connection alive for slow models
-            "think": self.THINKING_ENABLED,   # False = skip <think> block entirely
+            "keep_alive": 600,  # keep loaded between turns — explicit unload after phase
+            "think": self.THINKING_ENABLED,  # False = skip <think> blocks (faster, ~same quality)
             "options": {
                 "temperature": 0.6,
                 "num_predict": self.NUM_PREDICT,
@@ -348,6 +420,19 @@ class ReactSolver:
                 )
                 resp.raise_for_status()
                 accumulated = []
+                tok_buf: list = []
+                tok_len: int = 0
+
+                def _flush_tok():
+                    nonlocal tok_len
+                    if not tok_buf:
+                        return
+                    raw = "".join(tok_buf)
+                    esc = raw.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '')
+                    print(f"[LLMTOK]{esc}")
+                    tok_buf.clear()
+                    tok_len = 0
+
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -356,7 +441,12 @@ class ReactSolver:
                         delta = chunk.get("message", {}).get("content", "")
                         if delta:
                             accumulated.append(delta)
+                            tok_buf.append(delta)
+                            tok_len += len(delta)
+                            if '\n' in delta or tok_len >= 30:
+                                _flush_tok()
                         if chunk.get("done", False):
+                            _flush_tok()
                             break
                     except json.JSONDecodeError:
                         continue
@@ -372,6 +462,9 @@ class ReactSolver:
 
     async def _run_tool(self, action: str, input_text: str) -> str:
         action = action.strip().lower()
+        # Track tool usage counts
+        if action in self._tool_counts:
+            self._tool_counts[action] += 1
 
         if action == "run_code":
             return await self._tool_run_code(input_text)
@@ -388,14 +481,30 @@ class ReactSolver:
         m = re.search(r"```(?:python)?\s*\n(.*?)\n```", code_text, re.DOTALL)
         code = m.group(1) if m else code_text.strip()
 
+        # Force-inject SP given values as constants so model can't assume wrong params
+        if self.sub_problem.inputs:
+            forced = "# === GIVEN VALUES — DO NOT OVERRIDE ===\n"
+            for var, val in self.sub_problem.inputs.items():
+                forced += f"{var} = {val!r}\n"
+            forced += "# =========================================\n\n"
+            code = forced + code
+
         if not _HAS_EXECUTOR:
             return "ERROR: EquationExecutor not available — cannot run code."
 
         print("    [run_code]", end=" ", flush=True)
         try:
             result = await EquationExecutor.execute(code, given_values={}, timeout=90)
+            self._ran_code = True   # Lock B: any execution attempt satisfies Rule 0
             if result.success:
                 print(f"OK ({len(result.output)} chars)")
+                # Lock any RESULT: lines into the ledger (never overwrite once set)
+                for line in result.output.splitlines():
+                    m = re.match(r'RESULT:\s*(\w+)\s*=\s*(.+)', line.strip())
+                    if m:
+                        var, val = m.group(1), m.group(2).strip()
+                        if var not in self._locked_results:
+                            self._locked_results[var] = val
                 return result.output[:4000] or "(no output)"
             else:
                 print(f"FAILED")
