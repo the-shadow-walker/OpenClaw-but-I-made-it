@@ -1296,10 +1296,10 @@ class JarvisServer:
                     logger.error(f"[Action] Deep search failed: no job_id in response")
 
             except requests.exceptions.RequestException as e:
-                response = response.replace(match.group(0), "")
+                response = response.replace(match.group(0), "\n\n⚠️ Swarm search is currently offline — try again in a moment.")
                 logger.error(f"[Action] Deep search unavailable: {e}")
             except Exception as e:
-                response = response.replace(match.group(0), "")
+                response = response.replace(match.group(0), "\n\n⚠️ Search failed unexpectedly — try again.")
                 logger.error(f"[Action] Deep search error: {e}")
 
         # [GET_DEEP_SEARCH_RESULT: job_id] or [GET_DEEP_SEARCH_RESULT] (latest)
