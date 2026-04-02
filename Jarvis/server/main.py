@@ -512,7 +512,10 @@ class JarvisServer:
             try:
                 r = requests.post(f"{OLLAMA_HOST}/api/chat", json={
                     "model": MODELS['chat'],
-                    "messages": [{"role": "user", "content": "ping"}],
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": "ping"}
+                    ],
                     "stream": False,
                     "keep_alive": "30m"
                 }, timeout=120)
@@ -667,11 +670,12 @@ class JarvisServer:
                 context_parts.append(f"{role}: {content}")
 
 
-        # Build final context with base prompt
-        context = SYSTEM_PROMPT + "\n\n" + "\n".join(context_parts)
-
-        logger.info(f"[DEBUG][Context] Built context: {len(context)} chars")
-        return context
+        # Return (static_system_prompt, dynamic_context) separately so the caller
+        # can put them in different Ollama message roles — the static system prompt
+        # gets KV-cached by Ollama after the first request, cutting prefill time.
+        dynamic_context = "\n".join(context_parts)
+        logger.info(f"[DEBUG][Context] dynamic_context: {len(dynamic_context)} chars, system_prompt: {len(SYSTEM_PROMPT)} chars")
+        return SYSTEM_PROMPT, dynamic_context
 
     # =========================================================================
     # MEMORY COMPRESSION
@@ -877,8 +881,8 @@ class JarvisServer:
         if compressed and compress_msg:
             yield compress_msg + "\n\n"
 
-        # Build context
-        context = self.build_context(message, session_id)
+        # Build context — static system prompt (KV cached) + dynamic context (fresh each request)
+        system_prompt, dynamic_context = self.build_context(message, session_id)
 
         # Safety check
         risk_level, risk_explanation = self.safety.assess_risk(message)
@@ -906,8 +910,8 @@ class JarvisServer:
                 json={
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": context},
-                        {"role": "user", "content": message}
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"[CONTEXT]\n{dynamic_context}\n[/CONTEXT]\n\n{message}"}
                     ],
                     "stream": True,
                     "keep_alive": "30m"
