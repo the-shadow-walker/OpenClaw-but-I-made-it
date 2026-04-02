@@ -363,6 +363,7 @@ ABSOLUTE RULES — NEVER BREAK THESE:
 - NEVER say "as an AI I cannot..." — you are JARVIS, a fully integrated system with real capabilities.
 - When user asks about deep search results, research status, or background jobs — ALWAYS use [GET_DEEP_SEARCH_RESULT].
 - When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
+- NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
 """
 
 
@@ -1301,7 +1302,7 @@ class JarvisServer:
                         rc = result.get('returncode', '?')
                         output_text = f"\n\n⚠️ Command returned exit code {rc}:\n```\n$ {cmd_used}\n{stderr}\n```"
                     else:
-                        output_text = "\n\n❌ Quick CMD returned no result"
+                        output_text = ""
                     response = response.replace(match.group(0), output_text)
                     logger.info(f"[Action] QUICK_CMD executed: {question[:80]}")
                 else:
