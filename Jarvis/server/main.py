@@ -2200,11 +2200,7 @@ async def tts_endpoint(text: str):
     def _synthesize():
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(22050)
-            pcm = b"".join(chunk.audio_int16_bytes for chunk in server.tts_voice.synthesize(text))
-            wf.writeframes(pcm)
+            server.tts_voice.synthesize_wav(text, wf)
         return buf.getvalue()
 
     loop = asyncio.get_event_loop()
