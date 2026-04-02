@@ -158,3 +158,33 @@ class OllamaCMDClient:
         except Exception as e:
             logger.error(f"[OllamaCMD] get_state failed: {e}")
             return None
+
+    def get_security_report(self) -> Optional[str]:
+        """Fetch the latest nightly SENTINEL security audit report (generated at 3 AM)."""
+        try:
+            r = requests.get(
+                f"{self.base_url}/api/v1/blueteam/report",
+                headers=self._headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            # Returns markdown text by default
+            return r.text
+        except Exception as e:
+            logger.error(f"[OllamaCMD] get_security_report failed: {e}")
+            return None
+
+    def get_security_alerts(self, n: int = 20) -> Optional[list]:
+        """Fetch recent security alerts from SENTINEL."""
+        try:
+            r = requests.get(
+                f"{self.base_url}/api/v1/blueteam/alerts",
+                headers=self._headers,
+                params={"n": n},
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json().get("alerts", [])
+        except Exception as e:
+            logger.error(f"[OllamaCMD] get_security_alerts failed: {e}")
+            return None

@@ -196,6 +196,11 @@ TOOL CATALOG — what you have access to and when to use each:
    - Complex multi-phase plan across multiple goals? → RUN_CHAIN
    - "What's running?" / "Check my jobs"? → CMD_STATE first, then GET_AGENT_RESULT if a specific job
 
+   SECURITY / SENTINEL (nightly audit system — runs at 3 AM, logs auth failures, SSH brute force, crashes, disk, OOM events):
+   [GET_SECURITY_REPORT]     — fetch the latest nightly SENTINEL security audit report (markdown)
+   [GET_SECURITY_ALERTS]     — get the recent security alert list with severity levels
+   USE WHEN: user asks about server security, audit findings, login attempts, suspicious activity, brute force, etc.
+
 5. MODEL ROUTING (changes which LLM responds, no external execution)
    [USE_REASONING]                         — use qwen3:30b for deep analysis
    [USE_CODING]                            — use qwen3-coder:30b for code tasks
@@ -1031,6 +1036,7 @@ class JarvisServer:
         r'|MEMORY_SHOW(?:_[A-Z_]+)?|MEMORY_FORGET|MEMORY_STORE_PREF'
         r'|SEND_EMAIL|DRAFT_EMAIL|DEEP_SEARCH|GET_DEEP_SEARCH_RESULT|START_PROJECT'
         r'|RUN_AGENT|RUN_CHAIN|GET_AGENT_RESULT|QUICK_CMD|CMD_STATE'
+        r'|GET_SECURITY_REPORT|GET_SECURITY_ALERTS'
         r'|USE_REASONING|USE_CODING|USE_SEARCH|USE_AGENT|LOCAL)'
         r'(?::[^\]]+)?\])',
         re.IGNORECASE
@@ -1154,14 +1160,35 @@ class JarvisServer:
         if match:
             topic = match.group(1).strip()
             try:
-                # Search journals for past conversations
                 journal_results = self.journal.search_journals(topic, days=90)
-                # Search entities (notes we've stored)
                 entities = self.facts_db.get_entities(entity_type="note")
                 matching_entities = [e for e in entities if topic.lower() in e.get('name', '').lower() or topic.lower() in e.get('details', '').lower()]
-                total_results = len(journal_results) + len(matching_entities)
-                logger.info(f"[Action] Memory search for '{topic}': {total_results} results ({len(journal_results)} journal, {len(matching_entities)} notes)")
+                # Also search vector memory
+                vector_results = []
+                try:
+                    vector_results = self.vector_memory.search_past_conversations(topic, n_results=5)
+                except Exception:
+                    pass
+                parts = [f"\n\n📖 Memory recall for '{topic}':"]
+                if journal_results:
+                    parts.append(f"\nFrom conversation logs ({len(journal_results)} entries):")
+                    for entry in journal_results[:5]:
+                        parts.append(f"  {str(entry)[:200]}")
+                if vector_results:
+                    parts.append(f"\nFrom semantic memory ({len(vector_results)} matches):")
+                    for r in vector_results[:3]:
+                        parts.append(f"  • {r.get('text', '')[:180]}")
+                if matching_entities:
+                    parts.append(f"\nFrom stored notes ({len(matching_entities)} found):")
+                    for e in matching_entities[:5]:
+                        parts.append(f"  • {e.get('details', e.get('name', ''))[:150]}")
+                if not journal_results and not vector_results and not matching_entities:
+                    parts.append(f"\n  No memories found for '{topic}'.")
+                result_text = "\n".join(parts)
+                response = re.sub(r'\[SEARCH_MEMORY:[^\]]+\]', result_text, response, flags=re.IGNORECASE).strip()
+                logger.info(f"[Action] Memory search '{topic}': {len(journal_results)} journal, {len(vector_results)} vector, {len(matching_entities)} notes")
             except Exception as e:
+                response = re.sub(r'\[SEARCH_MEMORY:[^\]]+\]', f"\n❌ Memory search failed: {e}", response, flags=re.IGNORECASE).strip()
                 logger.error(f"[Action] Failed to search memory: {e}")
 
         # [MEMORY_SHOW]
@@ -1417,6 +1444,45 @@ class JarvisServer:
             except Exception as e:
                 response = re.sub(r'\[CMD_STATE\]', f"\n❌ CMD_STATE error: {e}", response, flags=re.IGNORECASE)
                 logger.error(f"[Action] CMD_STATE error: {e}")
+
+        # [GET_SECURITY_REPORT] - Fetch nightly SENTINEL audit report
+        if re.search(r'\[GET_SECURITY_REPORT\]', response, re.IGNORECASE):
+            try:
+                if self.cmd_client and self.cmd_client.is_available():
+                    report = self.cmd_client.get_security_report()
+                    if report:
+                        result_text = f"\n\n🛡️ **Security Report (SENTINEL)**\n{report[:3000]}"
+                    else:
+                        result_text = "\n\n⚠️ Security report not available yet (runs at 3 AM)"
+                    response = re.sub(r'\[GET_SECURITY_REPORT\]', result_text, response, flags=re.IGNORECASE)
+                    logger.info("[Action] Security report fetched")
+                else:
+                    response = re.sub(r'\[GET_SECURITY_REPORT\]', "\n⚠️ CMD agent offline", response, flags=re.IGNORECASE)
+            except Exception as e:
+                response = re.sub(r'\[GET_SECURITY_REPORT\]', f"\n❌ Security report error: {e}", response, flags=re.IGNORECASE)
+                logger.error(f"[Action] GET_SECURITY_REPORT error: {e}")
+
+        # [GET_SECURITY_ALERTS] - Fetch recent SENTINEL alerts
+        if re.search(r'\[GET_SECURITY_ALERTS\]', response, re.IGNORECASE):
+            try:
+                if self.cmd_client and self.cmd_client.is_available():
+                    alerts = self.cmd_client.get_security_alerts(n=20)
+                    if alerts:
+                        lines = [f"\n\n🚨 Recent Security Alerts ({len(alerts)}):"]
+                        for a in alerts[:10]:
+                            sev = a.get('severity', '?')
+                            finding = a.get('finding', a.get('message', ''))[:120]
+                            lines.append(f"  [{sev}] {finding}")
+                        result_text = "\n".join(lines)
+                    else:
+                        result_text = "\n\n✅ No recent security alerts"
+                    response = re.sub(r'\[GET_SECURITY_ALERTS\]', result_text, response, flags=re.IGNORECASE)
+                    logger.info("[Action] Security alerts fetched")
+                else:
+                    response = re.sub(r'\[GET_SECURITY_ALERTS\]', "\n⚠️ CMD agent offline", response, flags=re.IGNORECASE)
+            except Exception as e:
+                response = re.sub(r'\[GET_SECURITY_ALERTS\]', f"\n❌ Security alerts error: {e}", response, flags=re.IGNORECASE)
+                logger.error(f"[Action] GET_SECURITY_ALERTS error: {e}")
 
         # [DEEP_SEARCH: query] - Start async deep search
         logger.info(f"[DEBUG] Checking for DEEP_SEARCH tag in response ({len(response)} chars)")
@@ -1726,6 +1792,9 @@ class JarvisServer:
             r'\[GET_AGENT_RESULT(?::[^\]]+)?\]',
             r'\[QUICK_CMD:[^\]]+\]',
             r'\[CMD_STATE\]',
+            r'\[GET_SECURITY_REPORT\]',
+            r'\[GET_SECURITY_ALERTS\]',
+            r'\[START_PROJECT:[^\]]+\]',
         ]
 
         for pattern in tag_patterns:
