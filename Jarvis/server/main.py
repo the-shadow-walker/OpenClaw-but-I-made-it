@@ -558,21 +558,30 @@ class JarvisServer:
         projects = self.facts_db.get_active_projects()
         logger.info(f"[DEBUG][Context] Active projects: {len(projects)}")
 
-        # Vector search (HyDE)
-        vector_results = []
-        try:
-            vector_results = self.vector_memory.search_past_conversations(query, n_results=3)
-            logger.info(f"[DEBUG][Context] Vector search: {len(vector_results)} results")
-        except Exception as e:
-            logger.warning(f"Vector search failed: {e}")
+        # Fast path: skip expensive DB lookups for simple conversational messages
+        # (greetings, status questions, etc. don't need memory retrieval)
+        _deep_keywords = {'remember', 'memory', 'email', 'project', 'search', 'show',
+                          'find', 'what did', 'last time', 'earlier', 'yesterday', 'ago'}
+        is_simple_query = (len(query) < 80 and
+                           not any(w in query.lower() for w in _deep_keywords))
 
-        # Journal search (exact text recall from markdown logs)
+        # Vector search (HyDE) — skip for simple conversational messages
+        vector_results = []
+        if not is_simple_query:
+            try:
+                vector_results = self.vector_memory.search_past_conversations(query, n_results=3)
+                logger.info(f"[DEBUG][Context] Vector search: {len(vector_results)} results")
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}")
+
+        # Journal search — skip for simple conversational messages
         journal_results = []
-        try:
-            journal_results = self.journal.search_journals(query, days=30)
-            logger.info(f"[DEBUG][Context] Journal search: {len(journal_results)} entries")
-        except Exception as e:
-            logger.warning(f"Journal search failed: {e}")
+        if not is_simple_query:
+            try:
+                journal_results = self.journal.search_journals(query, days=30)
+                logger.info(f"[DEBUG][Context] Journal search: {len(journal_results)} entries")
+            except Exception as e:
+                logger.warning(f"Journal search failed: {e}")
 
         # Session history (last 10 messages)
         session_history = self.sessions.get_history(session_id, limit=10)
@@ -637,17 +646,18 @@ class JarvisServer:
                 # entry is already a formatted string like "[2026-02-17 12:34] text..."
                 context_parts.append(entry[:250] if len(entry) > 250 else entry)
 
-        # STORED NOTES section (facts remembered via [REMEMBER] tag)
-        try:
-            stored_notes = self.facts_db.get_entities(entity_type="note")
-            if stored_notes:
-                context_parts.append("\nSTORED FACTS & NOTES:")
-                for note in stored_notes[-7:]:  # Last 7 notes
-                    details = note.get('details', note.get('name', ''))
-                    context_parts.append(f"- {details[:120]}")
-                logger.info(f"[DEBUG][Context] Stored notes: {len(stored_notes)}")
-        except Exception as e:
-            logger.warning(f"Failed to load stored notes: {e}")
+        # STORED NOTES section — skip for simple conversational queries
+        if not is_simple_query:
+            try:
+                stored_notes = self.facts_db.get_entities(entity_type="note")
+                if stored_notes:
+                    context_parts.append("\nSTORED FACTS & NOTES:")
+                    for note in stored_notes[-7:]:
+                        details = note.get('details', note.get('name', ''))
+                        context_parts.append(f"- {details[:120]}")
+                    logger.info(f"[DEBUG][Context] Stored notes: {len(stored_notes)}")
+            except Exception as e:
+                logger.warning(f"Failed to load stored notes: {e}")
 
         # PERSONALITY ADAPTATIONS — suppressed until personality-apply feature is implemented
         # (learning.json updated by PersonalityLearner but injecting raw prefs causes model echo)
