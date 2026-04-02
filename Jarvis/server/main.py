@@ -375,6 +375,15 @@ ABSOLUTE RULES — NEVER BREAK THESE:
 - When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
 - NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) or [LOCAL] on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
 - For engineering/design requests ("design a laser turret", "spec out a PCB", "plan a sensor array"), ALWAYS use [START_PROJECT] — never [DEEP_SEARCH].
+
+CONTEXT RULES — critical:
+- User messages begin with a [CONTEXT]...[/CONTEXT] block. It is BACKGROUND INFORMATION only.
+  NEVER include [CONTEXT], [/CONTEXT], or any of its contents (USER PROFILE, PREFERENCES, NOTES,
+  DATE/TIME, RECENT EMAILS, RECENT CONVERSATION) in your Message. Do not quote or reference it.
+- MEMORY_SHOW, MEMORY_SHOW_PROFILE, MEMORY_SHOW_PREFERENCES and similar dump commands are ONLY for
+  explicit requests like "what do you know about me?", "show me my profile", "show preferences".
+  NEVER call them on greetings or casual conversation.
+- Simple greetings ("hey", "you there", "hi", "great", "ok", "yes") → 1 sentence only, no commands.
 """
 
 
@@ -980,9 +989,15 @@ class JarvisServer:
 
                             # Stream message content in real time
                             if msg_start >= 0:
-                                cmd_pos = response_text.find("\nCommand:", msg_start)
+                                # Stop at Command: OR echoed [CONTEXT] block (mistral sometimes mirrors input)
+                                stops = []
+                                p = response_text.find("\nCommand:", msg_start)
+                                if p >= 0: stops.append(p)
+                                p = response_text.find("\n[CONTEXT]", msg_start)
+                                if p >= 0: stops.append(p)
+                                cmd_pos = min(stops) if stops else -1
                                 if cmd_pos >= 0:
-                                    # Yield remaining message up to Command: boundary
+                                    # Yield remaining message up to stop boundary
                                     if cmd_pos > msg_streamed:
                                         yield response_text[msg_streamed:cmd_pos]
                                     stream_done = True
@@ -1010,10 +1025,15 @@ class JarvisServer:
         # Execute commands and yield tool output
         # For simple conversational queries, suppress shell/agent commands — only allow memory ops.
         if commands and is_simple_query:
-            _shell_tag = re.compile(r'\[(QUICK_CMD|RUN_AGENT|RUN_CHAIN|LOCAL):', re.IGNORECASE)
-            filtered = [c for c in commands if not _shell_tag.search(c)]
+            # Block shell/agent/memory-dump commands on simple conversational queries.
+            # REMEMBER and MEMORY_STORE_PREF are still allowed (storing facts always makes sense).
+            _invoke_tag = re.compile(
+                r'\[(QUICK_CMD|RUN_AGENT|RUN_CHAIN|LOCAL|MEMORY_SHOW(?:_\w+)?|MEMORY_FORGET)[\]:]',
+                re.IGNORECASE
+            )
+            filtered = [c for c in commands if not _invoke_tag.search(c)]
             if len(filtered) < len(commands):
-                logger.info(f"[Actions] Suppressed {len(commands)-len(filtered)} shell cmd(s) on simple query")
+                logger.info(f"[Actions] Suppressed {len(commands)-len(filtered)} cmd(s) on simple query")
             commands = filtered
 
         tool_output = ""
@@ -1078,6 +1098,7 @@ class JarvisServer:
             # Only commands from explicit "Command: ..." lines are executed.
             clean = self._ACTION_TAG_RE.sub('', text)
             clean = re.sub(r'(?m)^Command:\s*.*$', '', clean)
+            clean = re.sub(r'\[CONTEXT\].*?(\[/CONTEXT\]|$)', '', clean, flags=re.DOTALL)
             clean = re.sub(r'\n\n+', '\n\n', clean).strip()
             if not clean:
                 clean = "Apologies sir, I didn't quite catch that. Could you rephrase?"
@@ -1107,6 +1128,8 @@ class JarvisServer:
         # Strip any stray "Command: ..." lines that ended up in the message body
         message = re.sub(r'(?m)^Command:\s*.*$', '', message)
 
+        # Strip any echoed [CONTEXT]...[/CONTEXT] block (mistral:7b sometimes mirrors the input)
+        message = re.sub(r'\[CONTEXT\].*?(\[/CONTEXT\]|$)', '', message, flags=re.DOTALL)
         # Clean up leftover whitespace
         message = re.sub(r'\n\n+', '\n\n', message).strip()
 
