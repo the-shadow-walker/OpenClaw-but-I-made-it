@@ -163,6 +163,11 @@ TOOL CATALOG — what you have access to and when to use each:
              best practices — anything requiring web search or comprehensive information.
    IMPORTANT: When asked about search results/status, ALWAYS use [GET_DEEP_SEARCH_RESULT].
 
+   [START_PROJECT: description]            — start an autonomous engineering design session
+   USE WHEN: user asks to design, spec, or plan a build (PCB, robot, enclosure, turret, sensor
+             array, etc.). JARVIS answers all Q&A autonomously and returns a full design brief.
+   RULE: use [START_PROJECT] for design/build tasks; use [DEEP_SEARCH] for research/factual tasks.
+
 4. CMD AGENT (arch01 task execution — three tiers by complexity)
 
    TIER 1 — QUICK (synchronous, 1-3 seconds, single-command factual queries):
@@ -364,6 +369,7 @@ ABSOLUTE RULES — NEVER BREAK THESE:
 - When user asks about deep search results, research status, or background jobs — ALWAYS use [GET_DEEP_SEARCH_RESULT].
 - When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
 - NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
+- For engineering/design requests ("design a laser turret", "spec out a PCB", "plan a sensor array"), ALWAYS use [START_PROJECT] — never [DEEP_SEARCH].
 """
 
 
@@ -962,7 +968,7 @@ class JarvisServer:
     _ACTION_TAG_RE = re.compile(
         r'(\[(?:REMEMBER|SEARCH_MEMORY|READ_RECENT_EMAILS|SEARCH_OLD_EMAILS'
         r'|MEMORY_SHOW(?:_[A-Z_]+)?|MEMORY_FORGET|MEMORY_STORE_PREF'
-        r'|SEND_EMAIL|DRAFT_EMAIL|DEEP_SEARCH|GET_DEEP_SEARCH_RESULT'
+        r'|SEND_EMAIL|DRAFT_EMAIL|DEEP_SEARCH|GET_DEEP_SEARCH_RESULT|START_PROJECT'
         r'|RUN_AGENT|RUN_CHAIN|GET_AGENT_RESULT|QUICK_CMD|CMD_STATE'
         r'|USE_REASONING|USE_CODING|USE_SEARCH|USE_AGENT|LOCAL)'
         r'(?::[^\]]+)?\])',
@@ -1464,6 +1470,73 @@ class JarvisServer:
                 response = response.replace(match.group(0), "")
                 logger.error(f"[Action] Error in GET_DEEP_SEARCH_RESULT: {e}")
 
+
+        # [START_PROJECT: description] - Autonomous Swarm engineering design session
+        match = re.search(r'\[START_PROJECT:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)
+        if match:
+            description = match.group(1).strip()
+            try:
+                if self.swarm_client.is_available():
+                    session = self.swarm_client.start_project(description)
+                    if not session or session.get("state") != "qa":
+                        response = response.replace(match.group(0), "\n⚠️ Swarm project session failed to start.")
+                    else:
+                        qa_log = []
+                        MAX_ROUNDS = 12
+                        for _ in range(MAX_ROUNDS):
+                            q = session.get("question", "")
+                            q_type = session.get("type", "text")
+                            options = session.get("options", [])
+                            recommendation = session.get("recommendation", "")
+                            session_id = session.get("session_id", "")
+
+                            opts_str = f"\nAvailable options: {', '.join(options)}" if options else ""
+                            rec_str = f"\nRecommendation: {recommendation}" if recommendation else ""
+                            ans_prompt = (
+                                f"You are JARVIS answering clarifying questions to spec out an engineering project for Grant.\n"
+                                f"Project: {description}\n"
+                                f"Question: {q}{opts_str}{rec_str}\n"
+                                f"Reply with ONE concise answer only — no explanation, no punctuation except if needed."
+                                f"{' Choose exactly one option from the list.' if options else ''}"
+                            )
+                            ans_resp = requests.post(f"{OLLAMA_HOST}/api/chat", json={
+                                "model": MODELS['chat'],
+                                "messages": [{"role": "user", "content": ans_prompt}],
+                                "stream": False,
+                            }, timeout=30)
+                            answer = ""
+                            if ans_resp.ok:
+                                answer = ans_resp.json().get("message", {}).get("content", "").strip()
+                                answer = self._ACTION_TAG_RE.sub("", answer).strip()
+                                # For choice questions snap to the matching option
+                                if options:
+                                    for opt in options:
+                                        if opt.lower() in answer.lower():
+                                            answer = opt
+                                            break
+
+                            qa_log.append(f"**Q:** {q}  \n**A:** {answer}")
+                            logger.info(f"[Action] PROJECT Q&A — Q: {q[:60]} | A: {answer[:60]}")
+
+                            session = self.swarm_client.answer_project_question(session_id, answer)
+                            if not session or session.get("state") == "done":
+                                break
+
+                        result_md = (session or {}).get("result_markdown", "")
+                        output = f"\n\n**📐 Project Brief — {description}**\n\n"
+                        if result_md:
+                            output += result_md
+                        elif qa_log:
+                            output += "\n".join(qa_log) + "\n\n_(Project brief not returned — Swarm may still be processing.)_"
+                        else:
+                            output += "_No result returned from Swarm._"
+                        response = response.replace(match.group(0), output)
+                        logger.info(f"[Action] START_PROJECT complete: {description[:60]}")
+                else:
+                    response = response.replace(match.group(0), "\n⚠️ Swarm is offline — can't start project session.")
+            except Exception as e:
+                response = response.replace(match.group(0), f"\n❌ START_PROJECT error: {e}")
+                logger.error(f"[Action] START_PROJECT error: {e}")
 
         # [RUN_AGENT: instruction] - Dispatch to ollama-cmd single job
         match = re.search(r'\[RUN_AGENT:\s*((?:[^\[\]]|\[[^\]]*\])+)\]', response, re.IGNORECASE)

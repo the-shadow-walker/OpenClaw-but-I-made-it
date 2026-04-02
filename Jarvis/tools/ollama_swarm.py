@@ -86,17 +86,32 @@ class OllamaSwarmClient:
                 return None
         return None
 
-    def start_project(self, description: str, budget: float = 300) -> Optional[dict]:
-        """Start an engineering design project session."""
+    def start_project(self, description: str) -> Optional[dict]:
+        """Start an engineering design project Q&A session."""
         try:
             r = requests.post(
-                f"{self.base_url}/project/new",
+                f"{self.base_url}/project/start",
                 headers=self._headers,
-                json={"description": description, "budget": budget},
+                json={"description": description},
                 timeout=10,
             )
             r.raise_for_status()
             return r.json()
         except Exception as e:
             logger.error(f"[Swarm] start_project failed: {e}")
+            return None
+
+    def answer_project_question(self, session_id: str, answer: str) -> Optional[dict]:
+        """Submit an answer to the current project Q&A question."""
+        try:
+            r = requests.post(
+                f"{self.base_url}/project/respond",
+                headers=self._headers,
+                json={"session_id": session_id, "answer": answer},
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.error(f"[Swarm] answer_project_question failed: {e}")
             return None
