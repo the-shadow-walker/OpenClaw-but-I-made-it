@@ -35,6 +35,7 @@ import queue as _Q
 import re
 import time
 import subprocess
+import requests as _req
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -69,6 +70,12 @@ try:
 except ImportError:
     _HAS_PROJECT_SESSION = False
     session_manager = None
+
+try:
+    from flexible_search_agent import FlexibleSearchAgent
+    _HAS_SEARCH = True
+except ImportError:
+    _HAS_SEARCH = False
 
 
 # =============================================================================
@@ -968,6 +975,115 @@ def metrics():
         'memory_pct': mem_pct,
         'cpu_pct': cpu_pct,
     })
+
+
+# =============================================================================
+# ROUTES -- Search Stream
+# =============================================================================
+
+@app.route('/search/stream', methods=['GET', 'POST'])
+def search_stream():
+    """
+    Streaming search + LLM synthesis.
+    GET  ?q=query&n=5
+    POST {"query": "...", "max_results": 5}
+
+    SSE event types:
+      searching  {query}
+      result     {index, title, url, snippet, source}
+      thinking   {}
+      token      {text}
+      done       {answer, num_results}
+      error      {error}
+    """
+    if request.method == 'POST':
+        data = request.json or {}
+        query       = data.get('query', '').strip()
+        max_results = int(data.get('max_results', 5))
+    else:
+        query       = request.args.get('q', '').strip()
+        max_results = int(request.args.get('n', 5))
+
+    if not query:
+        return jsonify({'error': 'No query provided'}), 400
+
+    def _sse(obj):
+        return f"data: {json.dumps(obj)}\n\n"
+
+    def generate():
+        yield _sse({'type': 'searching', 'query': query})
+
+        # ── Search ───────────────────────────────────────────────────────────
+        if not _HAS_SEARCH:
+            yield _sse({'type': 'error', 'error': 'flexible_search_agent.py not available'})
+            return
+
+        try:
+            agent = FlexibleSearchAgent(
+                searxng_url=os.environ.get('SEARXNG_URL', 'http://localhost:8080'),
+                max_results=max_results,
+            )
+            results = agent.search(query)
+        except Exception as e:
+            yield _sse({'type': 'error', 'error': f'Search failed: {e}'})
+            return
+
+        snippets = []
+        for i, r in enumerate(results):
+            yield _sse({'type': 'result', 'index': i,
+                        'title': r.title, 'url': r.url,
+                        'snippet': r.snippet, 'source': r.source})
+            snippets.append(f"[{i+1}] {r.title}\n{r.snippet}\nSource: {r.url}")
+
+        if not results:
+            yield _sse({'type': 'done', 'answer': 'No results found.', 'num_results': 0})
+            return
+
+        # ── LLM synthesis (streaming tokens) ─────────────────────────────────
+        yield _sse({'type': 'thinking'})
+
+        context = "\n\n".join(snippets)
+        prompt = (
+            f"Answer this question directly and concisely using the search results below.\n\n"
+            f"Question: {query}\n\n"
+            f"Search Results:\n{context}\n\n"
+            f"Give a factual answer in 2-4 sentences. Cite sources as [1], [2] etc."
+        )
+        payload = {
+            "model": "phi4:14b",
+            "prompt": prompt,
+            "stream": True,
+            "keep_alive": 0,
+            "options": {"temperature": 0.3, "num_predict": 512},
+        }
+        full_answer = ""
+        try:
+            resp = _req.post("http://localhost:11434/api/generate",
+                             json=payload, stream=True, timeout=120)
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        d = json.loads(line)
+                        tok = d.get("response", "")
+                        if tok:
+                            full_answer += tok
+                            yield _sse({'type': 'token', 'text': tok})
+                        if d.get("done"):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield _sse({'type': 'token', 'text': f'\n[LLM unavailable: {e}]'})
+
+        yield _sse({'type': 'done', 'answer': full_answer, 'num_results': len(results)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                 'Connection': 'keep-alive'},
+    )
 
 
 # =============================================================================

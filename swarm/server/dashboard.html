@@ -61,7 +61,7 @@ body {
 .page.active { display: block; }
 
 /* Shift workspace down to make room for nav bar */
-#workspace { margin-top: 44px; }
+#workspace { margin-top: 78px; }
 
 /* ── JARVIS Chat page ─────────────────────────────────────────────── */
 #page-chat {
@@ -453,7 +453,61 @@ body {
 .metric-temp { font-size: 10px; color: var(--dim); }
 
 /* ── Jobs widget ─────────────────────────────────────────────────── */
-#widget-jobs { left: 12px; top: 752px; width: 880px; height: 240px; }
+#widget-jobs   { left: 12px; top: 752px; width: 880px; height: 240px; }
+
+/* ── Search widget ───────────────────────────────────────────────────── */
+#widget-search { width: 440px; height: 560px; }
+#search-input-row {
+  display: flex; gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+#search-input {
+  flex: 1; padding: 6px 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text);
+  font-family: var(--mono); font-size: 12px; outline: none;
+  transition: border-color 0.15s;
+}
+#search-input:focus { border-color: var(--accent); }
+#search-n-sel {
+  padding: 5px 6px; width: 52px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text-dim); border-radius: 4px;
+  font-family: var(--mono); font-size: 11px; cursor: pointer;
+}
+#search-go {
+  padding: 6px 12px; background: var(--accent); color: #000;
+  border: none; border-radius: 4px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  cursor: pointer; transition: opacity 0.15s;
+}
+#search-go:hover { opacity: 0.85; }
+#search-go:disabled { opacity: 0.4; cursor: default; }
+#search-results-list {
+  overflow-y: auto; flex: 1; padding: 8px;
+}
+.search-result-card {
+  padding: 7px 8px; margin-bottom: 6px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 5px; font-size: 11px;
+}
+.search-result-card:hover { border-color: var(--accent); }
+.sr-title { color: var(--accent); font-weight: 700; margin-bottom: 2px; }
+.sr-url   { color: var(--dim); font-size: 10px; margin-bottom: 4px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-snip  { color: var(--text-dim); line-height: 1.5; }
+#search-answer-box {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px; font-size: 12px; line-height: 1.7;
+  color: var(--text); white-space: pre-wrap; max-height: 180px;
+  overflow-y: auto; background: var(--bg);
+}
+#search-status {
+  padding: 3px 8px; font-size: 10px; color: var(--dim);
+  border-top: 1px solid var(--border); min-height: 18px;
+}
 
 .job-row {
   display: flex; align-items: center; gap: 8px;
@@ -529,10 +583,15 @@ body {
     <span class="val" id="hdr-cpu">—</span>
   </div>
 
-  <a href="/jarvis" style="margin-left:auto;padding:4px 12px;background:var(--surface2);border:1px solid var(--accent);border-radius:4px;color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;text-decoration:none;letter-spacing:0.5px;">⯢ JARVIS</a>
   <span id="hdr-clock">--:--:--</span>
 </div>
 
+
+<!-- ── PAGE NAV ─────────────────────────────────────────────────── -->
+<div id="page-nav">
+  <button class="page-tab active" data-page="tools">⬡ Tools</button>
+  <button class="page-tab"        data-page="chat">⯢ JARVIS Chat</button>
+</div>
 
 <!-- ── WORKSPACE ───────────────────────────────────────────────────── -->
 <div id="page-tools" class="page active">
@@ -551,6 +610,7 @@ body {
       <select id="chat-service-sel">
         <option value="swarm">Swarm</option>
         <option value="cmd">Execute</option>
+        <option value="jarvis">⯢ JARVIS</option>
       </select>
       <input id="chat-input" placeholder="Ask anything or give a command…" autocomplete="off">
       <button id="chat-submit">↵</button>
@@ -658,46 +718,30 @@ body {
     </div>
   </div>
 
+  <!-- Search Widget -->
+  <div class="widget" id="widget-search">
+    <div class="widget-title" data-widget="widget-search">
+      <span class="icon">🔍</span>
+      <span>SEARCH + SYNTHESIZE</span>
+      <span id="search-src-badge" style="margin-left:auto;color:var(--dim);font-size:10px"></span>
+    </div>
+    <div id="search-input-row">
+      <input id="search-input" placeholder="Search anything…" autocomplete="off">
+      <select id="search-n-sel" title="Max results">
+        <option value="3">3</option>
+        <option value="5" selected>5</option>
+        <option value="8">8</option>
+      </select>
+      <button id="search-go">⌕</button>
+    </div>
+    <div id="search-results-list"></div>
+    <div id="search-answer-box"><span style="color:var(--dim)">Answer will appear here…</span></div>
+    <div id="search-status"></div>
+  </div>
+
 </div><!-- /workspace -->
 
-</div><!-- /page-tools -->
-
-
-<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
-<div id="page-chat">
-  <div id="jchat-messages"></div>
-  <div id="jchat-status"></div>
-  <div id="jchat-input-row">
-    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
-    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
-    <button id="jchat-send">SEND</button>
-  </div>
-</div>
-
 <script>
-
-/* ── Piper TTS playback ───────────────────────────────────────── */
-async function playTTS(text) {
-  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
-  const phrase = m ? m[0].trim() : text.slice(0, 200)
-  if (!phrase) return
-  try {
-    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
-      signal: AbortSignal.timeout(8000)
-    })
-    if (!resp.ok) return
-    const wav = await resp.arrayBuffer()
-    const ctx = new AudioContext()
-    const buf = await ctx.decodeAudioData(wav)
-    const src = ctx.createBufferSource()
-    src.buffer = buf
-    src.connect(ctx.destination)
-    src.start(0)
-  } catch(e) {
-    console.warn('[TTS]', e.message)
-  }
-}
-
 /* ── Config ───────────────────────────────────────────────────── */
 const SWARM_URL = `${location.protocol}//${location.hostname}:5002`
 const CMD_URL    = `${location.protocol}//${location.hostname}:5000`
@@ -741,10 +785,11 @@ function initWidgetDefaults() {
   const W = document.getElementById('workspace').clientWidth
   const R = Math.round((W - 360) / GRID) * GRID   // right column left edge
   const defaults = {
-    'widget-chat': { left: 20,  top: 60  },
-    'widget-api':  { left: R,   top: 60  },
-    'widget-gpu':  { left: R,   top: 340 },
-    'widget-jobs': { left: 20,  top: 760 },
+    'widget-chat':   { left: 20,  top: 60  },
+    'widget-api':    { left: R,   top: 60  },
+    'widget-gpu':    { left: R,   top: 340 },
+    'widget-jobs':   { left: 20,  top: 760 },
+    'widget-search': { left: R,   top: 580 },
   }
   for (const [id, pos] of Object.entries(defaults)) {
     if (!state.widgets[id]) {
@@ -1345,6 +1390,7 @@ document.getElementById('chat-submit').addEventListener('click', () => {
   if (!q) return
   document.getElementById('chat-input').value = ''
   if (svc === 'swarm')       submitSwarm(q)
+  else if (svc === 'jarvis') submitJarvis(q)
   else                       submitCmd(q)
 })
 document.getElementById('chat-input').addEventListener('keydown', e => {
@@ -1360,6 +1406,160 @@ document.getElementById('answer-copy-btn').addEventListener('click', () => {
     setTimeout(() => { btn.textContent = 'Copy' }, 1500)
   })
 })
+
+/* ── Piper TTS playback ──────────────────────────────────── */
+async function playTTS(text) {
+  // TTS first sentence only (keep it snappy)
+  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
+  const phrase = m ? m[0].trim() : text.slice(0, 200)
+  if (!phrase) return
+  try {
+    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!resp.ok) return
+    const wav = await resp.arrayBuffer()
+    const ctx = new AudioContext()
+    const buf = await ctx.decodeAudioData(wav)
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.connect(ctx.destination)
+    src.start(0)
+  } catch(e) {
+    console.warn('[TTS]', e.message)
+  }
+}
+
+/* ── Submit JARVIS chat ───────────────────────────────── */
+async function submitJarvis(q) {
+  if (!q.trim()) return
+  appendLog('↗ JARVIS: ' + q.slice(0,80), 'log-wave')
+  // Ensure session
+  if (!state.jarvis.session) {
+    try {
+      const s = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
+      if (!s.ok) { appendLog('JARVIS: session failed', 'log-fail'); return }
+      state.jarvis.session = (await s.json()).session_token
+    } catch(e) { appendLog('JARVIS: ' + e.message, 'log-fail'); return }
+  }
+  // Stream response
+  const answerBox = document.getElementById('answer-box')
+  answerBox.innerHTML = ''
+  document.querySelector('[data-tab="answer"]')?.click()
+  try {
+    const r = await fetch(JARVIS_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: q, session_token: state.jarvis.session }),
+      signal: AbortSignal.timeout(300000),
+    })
+    if (!r.ok) { appendLog('JARVIS HTTP ' + r.status, 'log-fail'); return }
+    const reader = r.body.getReader()
+    const dec    = new TextDecoder()
+    let buf = '', full = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('
+'); buf = lines.pop()
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try { const c = JSON.parse(line); if (c.content) { full += c.content; answerBox.textContent = full } } catch {}
+      }
+    }
+    state.currentJob.answer = full
+    playTTS(full)
+    document.getElementById('chat-job-badge').textContent = '[ JARVIS ]'
+  } catch(e) {
+    appendLog('JARVIS: ' + (e.name === 'TimeoutError' ? 'timed out' : e.message), 'log-fail')
+    state.jarvis.session = null
+  }
+}
+
+/* ── Search widget ────────────────────────────────────────────── */
+;(function() {
+  function go() {
+    const q  = document.getElementById('search-input').value.trim()
+    const n  = document.getElementById('search-n-sel').value
+    if (!q) return
+
+    document.getElementById('search-results-list').innerHTML = ''
+    document.getElementById('search-answer-box').innerHTML =
+      '<span style="color:var(--dim)">Searching…</span>'
+    document.getElementById('search-status').textContent = ''
+    document.getElementById('search-src-badge').textContent = ''
+    document.getElementById('search-go').disabled = true
+
+    const answerBox  = document.getElementById('search-answer-box')
+    const resultsList = document.getElementById('search-results-list')
+    const statusEl   = document.getElementById('search-status')
+    const badgeEl    = document.getElementById('search-src-badge')
+    let answer = '', numResults = 0
+
+    fetch(SWARM_URL + '/search/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, max_results: parseInt(n) }),
+    }).then(resp => {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status)
+      const reader = resp.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      function pump() {
+        return reader.read().then(({ done, value }) => {
+          if (done) { document.getElementById('search-go').disabled = false; return }
+          buf += dec.decode(value, { stream: true })
+          const parts = buf.split('\n\n'); buf = parts.pop()
+          for (const part of parts) {
+            const line = part.replace(/^data:\s*/, '')
+            if (!line) continue
+            try { handle(JSON.parse(line)) } catch {}
+          }
+          return pump()
+        })
+      }
+      return pump()
+    }).catch(e => {
+      answerBox.textContent = '❌ ' + e.message
+      document.getElementById('search-go').disabled = false
+    })
+
+    function handle(ev) {
+      if (ev.type === 'searching') {
+        statusEl.textContent = `Searching: "${ev.query}"`
+      } else if (ev.type === 'result') {
+        numResults++
+        badgeEl.textContent = `${numResults} result${numResults > 1 ? 's' : ''}`
+        const card = document.createElement('div')
+        card.className = 'search-result-card'
+        card.innerHTML =
+          `<div class="sr-title">[${ev.index+1}] ${escHtml(ev.title)}</div>` +
+          `<div class="sr-url">${escHtml(ev.url)}</div>` +
+          `<div class="sr-snip">${escHtml(ev.snippet)}</div>`
+        resultsList.appendChild(card)
+      } else if (ev.type === 'thinking') {
+        answerBox.textContent = ''; statusEl.textContent = 'Synthesizing…'
+      } else if (ev.type === 'token') {
+        answer += ev.text; answerBox.textContent = answer
+        answerBox.scrollTop = answerBox.scrollHeight
+      } else if (ev.type === 'done') {
+        statusEl.textContent = `✓ ${ev.num_results} result${ev.num_results !== 1 ? 's' : ''}`
+        document.getElementById('search-go').disabled = false
+        if (ev.answer && !answer) answerBox.textContent = ev.answer
+      } else if (ev.type === 'error') {
+        answerBox.textContent = '❌ ' + ev.error
+        statusEl.textContent = 'Error'
+        document.getElementById('search-go').disabled = false
+      }
+    }
+  }
+
+  document.getElementById('search-go').addEventListener('click', go)
+  document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') go()
+  })
+})()
 
 /* ── Escape HTML ──────────────────────────────────────────────── */
 function escHtml(s) {
@@ -1388,17 +1588,20 @@ document.querySelectorAll('.tab-pane').forEach(p => {
 /* ── Top-level page tab switching ───────────────────────────────── */
 (function() {
   const tabs = document.querySelectorAll('.page-tab')
+  const toolsPage = document.getElementById('page-tools')
+  const chatPage  = document.getElementById('page-chat')
+
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
       tabs.forEach(t => t.classList.remove('active'))
       tab.classList.add('active')
       const p = tab.dataset.page
       if (p === 'tools') {
-        document.getElementById('page-tools').classList.add('active')
-        document.getElementById('page-chat').classList.remove('active')
+        toolsPage.classList.add('active')
+        chatPage.classList.remove('active')
       } else {
-        document.getElementById('page-tools').classList.remove('active')
-        document.getElementById('page-chat').classList.add('active')
+        toolsPage.classList.remove('active')
+        chatPage.classList.add('active')
         document.getElementById('jchat-input').focus()
       }
     })
@@ -1517,5 +1720,19 @@ document.querySelectorAll('.tab-pane').forEach(p => {
 })()
 
 </script>
+</div><!-- /page-tools -->
+
+
+<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
+<div id="page-chat">
+  <div id="jchat-messages"></div>
+  <div id="jchat-status"></div>
+  <div id="jchat-input-row">
+    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
+    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
+    <button id="jchat-send">SEND</button>
+  </div>
+</div>
+
 </body>
 </html>
