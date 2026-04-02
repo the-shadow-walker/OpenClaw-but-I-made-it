@@ -384,6 +384,16 @@ CONTEXT RULES — critical:
   explicit requests like "what do you know about me?", "show me my profile", "show preferences".
   NEVER call them on greetings or casual conversation.
 - Simple greetings ("hey", "you there", "hi", "great", "ok", "yes") → 1 sentence only, no commands.
+
+ANTI-HALLUCINATION — these override everything else:
+- ONLY respond to what was directly asked. Never more.
+- NEVER proactively mention emails, meetings, tasks, calendar items, ongoing research,
+  background jobs, or stored facts unless the user explicitly asked about them.
+- NEVER invent or assume details. If you are not certain something is true, do not say it.
+- The context block is reference material only — NOT a script to recite unprompted.
+- If the user says "hello" — one sentence greeting only. Nothing about emails, tasks,
+  meetings, research, or stored data. Just acknowledge and ask what they need.
+- Do not fill silence with invented context. When unsure what was asked, ask.
 """
 
 
@@ -597,9 +607,10 @@ class JarvisServer:
             except Exception as e:
                 logger.warning(f"Journal search failed: {e}")
 
-        # Session history (last 10 messages)
-        session_history = self.sessions.get_history(session_id, limit=10)
-        logger.info(f"[DEBUG][Context] Session history: {len(session_history)} messages")
+        # Session history — fewer turns for simple queries to prevent context bleed/hallucination
+        history_limit = 2 if is_simple_query else 10
+        session_history = self.sessions.get_history(session_id, limit=history_limit)
+        logger.info(f"[DEBUG][Context] Session history: {len(session_history)} messages (simple={is_simple_query})")
 
         # Top email highlights — skip for simple conversational queries
         email_summary = ""
@@ -927,7 +938,7 @@ class JarvisServer:
                         "keep_alive": "30m",
                         "num_predict": 1,
                         "stream": False
-                    }, timeout=60)
+                    }, timeout=120)  # qwen2.5:14b takes ~30s to load 9GB
                     logger.info(f"[LLM] {MODELS['chat']} loaded to VRAM")
             except Exception as e:
                 logger.warning(f"[LLM] Model warm-check failed: {e}")
