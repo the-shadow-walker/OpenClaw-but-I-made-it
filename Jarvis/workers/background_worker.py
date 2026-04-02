@@ -43,7 +43,6 @@ class BackgroundWorker(threading.Thread):
         self._last_refine_time = 0.0
         self._last_user_interaction = time.time()
         self._running = True
-        self._work_lock = threading.Lock()
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -56,8 +55,7 @@ class BackgroundWorker(threading.Thread):
         return elapsed >= self.IDLE_THRESHOLD
 
     def _cooldown_done(self) -> bool:
-        with self._work_lock:
-            return (time.time() - self._last_work_at) >= self.WORK_COOLDOWN
+        return (time.time() - self._last_work_at) >= self.WORK_COOLDOWN
 
     def _first_unchecked_todo(self, md_text: str) -> Optional[str]:
         """Return the first unchecked checkbox line, or None"""
@@ -107,8 +105,7 @@ class BackgroundWorker(threading.Thread):
             print(f"\n🤖 [BG] No todos for '{project_name}'. Generating plan...")
             self._generate_todo_list(project_name, md_text)
 
-        with self._work_lock:
-            self._last_work_at = time.time()
+        self._last_work_at = time.time()
 
     # ── Email Self-Refinement ──────────────────────────────────────────────────
 
@@ -175,9 +172,9 @@ class BackgroundWorker(threading.Thread):
             "No filler. No preamble. JSON only."
         )
 
-        # 5. Call Reasoning Model
+        # 5. Call chat model (keep VRAM free for interactive queries)
         try:
-            raw = self._call_ollama(MODELS["reasoning"], prompt)
+            raw = self._call_ollama(MODELS["chat"], prompt)
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
             raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
         except Exception as e:
@@ -264,7 +261,7 @@ class BackgroundWorker(threading.Thread):
         prompt = f"Research task for project '{project_name}':\n\n{query}\n\nProvide detailed findings with sources where applicable."
 
         try:
-            result = self._call_ollama(MODELS["reasoning"], prompt)
+            result = self._call_ollama(MODELS["chat"], prompt)
             self._save_research_file(project_name, query, result)
             preview = result[:500] + "..." if len(result) > 500 else result
             return f"Research complete. Full results saved to project files.\n\nSummary:\n{preview}"
@@ -279,7 +276,7 @@ class BackgroundWorker(threading.Thread):
         prompt = f"Project context: {project_name}\n\nTask: {query}\n\nWrite clean, well-commented code. Output ONLY the code, no explanation."
 
         try:
-            response = self._call_ollama(MODELS["coding"], prompt)
+            response = self._call_ollama(MODELS["chat"], prompt)
             response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL | re.IGNORECASE).strip()
 
             saved_path = self._save_code_file(project_name, query, response)
@@ -312,7 +309,7 @@ class BackgroundWorker(threading.Thread):
         )
 
         try:
-            response = self._call_ollama(MODELS["reasoning"], prompt)
+            response = self._call_ollama(MODELS["chat"], prompt)
             response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL | re.IGNORECASE).strip()
             return response
         except Exception as e:
@@ -411,7 +408,7 @@ Respond with ONLY the todo list items, like:
 (no preamble, no explanation — just the checkbox lines)"""
 
         try:
-            result = self._call_ollama(MODELS["reasoning"], prompt)
+            result = self._call_ollama(MODELS["chat"], prompt)
             result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL | re.IGNORECASE).strip()
 
             if result:
@@ -438,22 +435,12 @@ Respond with ONLY the todo list items, like:
 
     def run(self):
         """Main background worker loop"""
-        _last_session_cleanup = 0.0
         while self._running:
             try:
                 if self._is_idle() and self._cooldown_done():
                     self.autonomous_mode()
             except Exception as e:
                 print(f"   ⚠️  [BG] Worker error: {e}")
-
-            # Periodic session cleanup every 30 minutes
-            if time.time() - _last_session_cleanup > 1800:
-                try:
-                    self.server.sessions.cleanup_expired_sessions()
-                    _last_session_cleanup = time.time()
-                except Exception as _ce:
-                    pass
-
             time.sleep(self.POLL_INTERVAL)
 
     def stop(self):
