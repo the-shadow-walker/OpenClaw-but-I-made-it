@@ -22,6 +22,7 @@ import re
 import os
 import tempfile
 import subprocess
+import requests as _requests
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -394,23 +395,48 @@ class EngineerModeOrchestrator:
             return ""
 
     async def _llm_query_coder(self, prompt: str, system_prompt: str = "") -> str:
-        """qwen2.5:14b — code generation & technical writing."""
-        if not _HAS_BASE:
-            return ""
+        """Qwen3-coder:30b — streaming code generation with 1800s timeout."""
+        _CODER_MODEL = "Qwen3-coder:30b"
+        sys = system_prompt or (
+            "You are an expert Python programmer and engineer. "
+            "Write complete, correct, directly executable code. "
+            "Never use placeholder syntax like {variable}. /no_think"
+        )
+        full_prompt = f"{sys}\n\n{prompt}"
+        payload = {
+            "model": _CODER_MODEL,
+            "prompt": full_prompt,
+            "stream": True,
+            "keep_alive": 0,
+            "options": {"temperature": 0.1, "num_predict": 4096},
+        }
+        print(f"🤖 Initialized eng_coder (worker) using {_CODER_MODEL}")
         try:
-            agent = BaseAgent(
-                agent_id="eng_coder",
-                agent_type=AgentType.WORKER,
-                model_name="qwen2.5:14b",
-                system_prompt=system_prompt or (
-                    "You are an expert Python programmer and engineer. "
-                    "Write complete, correct, directly executable code. "
-                    "Never use placeholder syntax like {variable}."
-                ),
+            resp = await asyncio.to_thread(
+                lambda: _requests.post(
+                    "http://localhost:11434/api/generate",
+                    json=payload, stream=True, timeout=1800,
+                )
             )
-            return await agent.query_llm(prompt, stream=False)
+            resp.raise_for_status()
+            result = ""
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        d = json.loads(line)
+                        result += d.get("response", "")
+                        if d.get("done"):
+                            break
+                    except Exception:
+                        continue
+            # Strip <think>…</think> blocks (Qwen3 reasoning output)
+            result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+            return result
+        except _requests.exceptions.Timeout:
+            print(f"      ❌ Timeout after 1800s")
+            return ""
         except Exception as e:
-            print(f"⚠️  _llm_query_coder error: {e}")
+            print(f"      ❌ Coder error: {e}")
             return ""
 
     # ── Entry point ───────────────────────────────────────────────────────────
@@ -556,8 +582,8 @@ class EngineerModeOrchestrator:
                 for r in (results or []):
                     if r.snippet:
                         snippets.append(f"[{r.url}] {r.snippet}")
-            self.search_context = "\n".join(snippets[:20])
-            print(f"   Collected {len(snippets)} search snippets")
+            self.search_context = "\n".join(snippets[:8])
+            print(f"   Collected {min(len(snippets), 8)}/{len(snippets)} search snippets (capped at 8)")
         else:
             self.search_context = "(search unavailable)"
 
