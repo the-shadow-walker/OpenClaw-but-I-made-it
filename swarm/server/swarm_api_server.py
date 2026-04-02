@@ -1089,17 +1089,44 @@ def search_stream():
 # =============================================================================
 # ROUTES -- JARVIS Chat API
 # =============================================================================
-# Simple heuristic: questions likely need search, statements/greetings don't.
-_SEARCH_TRIGGERS = re.compile(
-    r'\b(who|what|when|where|why|how|is|are|was|were|does|did|can|will|'
-    r'tell me|explain|define|find|search|look up|latest|current|today|'
-    r'price|weather|news|update)\b|\?',
-    re.IGNORECASE
+
+_JARVIS_SYSTEM = (
+    "You are JARVIS, a sharp and concise AI assistant. "
+    "When given web search results, use them and cite sources as [1], [2] etc. "
+    "Keep answers focused."
 )
+
+_DECIDE_SYSTEM = (
+    "You are a routing assistant. Given a user message, decide if a web search "
+    "is needed to answer it accurately.\n"
+    "If YES: respond with exactly:  SEARCH: <the best search query>\n"
+    "If NO:  respond with exactly:  DIRECT\n"
+    "No other output. One line only."
+)
+
+
+def _ollama(prompt: str, system: str = "", stream: bool = False,
+            model: str = "phi4:14b", max_tokens: int = 1024,
+            temperature: float = 0.5) -> any:
+    """Fire an Ollama /api/generate call. Returns response object."""
+    return _req.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model":   model,
+            "prompt":  prompt,
+            "system":  system,
+            "stream":  stream,
+            "keep_alive": 0,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        },
+        stream=stream,
+        timeout=120,
+    )
+
 
 @app.route('/api/session', methods=['POST'])
 def api_session():
-    """Create a JARVIS session token (stateless — just a UUID for client tracking)."""
+    """Create a JARVIS session token (stateless UUID for client tracking)."""
     import uuid
     return jsonify({'session_token': str(uuid.uuid4())[:16]}), 200
 
@@ -1107,72 +1134,84 @@ def api_session():
 @app.route('/api/chat', methods=['POST'])
 def api_chat():
     """
-    JARVIS chat — searches web for context then streams answer token-by-token.
+    JARVIS chat with tool-use search loop.
     Body: {"message": "...", "session_token": "..."}
-    Streams newline-delimited JSON: {"content": "token"}
+
+    Streams newline-delimited JSON events:
+      {"type":"deciding"}                              LLM routing in progress
+      {"type":"tool_call","tool":"search","query":"…"} JARVIS chose to search
+      {"type":"result","index":N,"title","url","snippet","source"}
+      {"type":"answering"}                             LLM answer starting
+      {"type":"token","text":"…"}                      answer token
+      {"type":"done"}
+      {"type":"error","error":"…"}
     """
     data    = request.json or {}
     message = data.get('message', '').strip()
     if not message:
         return jsonify({'error': 'No message'}), 400
 
-    def generate():
-        # ── Decide whether to search ──────────────────────────────────────────
-        needs_search = bool(_SEARCH_TRIGGERS.search(message))
-        context = ""
+    def _ev(obj):
+        return json.dumps(obj) + "\n"
 
-        if needs_search and _HAS_SEARCH:
+    def generate():
+        # ── Phase 1: JARVIS decides whether it needs to search ────────────────
+        yield _ev({'type': 'deciding'})
+        search_query = None
+        try:
+            r = _ollama(message, system=_DECIDE_SYSTEM,
+                        stream=False, max_tokens=40, temperature=0.0)
+            r.raise_for_status()
+            decision = r.json().get('response', '').strip()
+            if decision.upper().startswith('SEARCH:'):
+                search_query = decision.split(':', 1)[1].strip()
+        except Exception:
+            pass  # fall through to direct answer
+
+        # ── Phase 2: Run search if requested, stream results ─────────────────
+        context = ""
+        if search_query and _HAS_SEARCH:
+            yield _ev({'type': 'tool_call', 'tool': 'search', 'query': search_query})
             try:
                 agent = FlexibleSearchAgent(
                     searxng_url=os.environ.get('SEARXNG_URL', 'http://localhost:8080'),
-                    max_results=3,
+                    max_results=4,
                 )
-                results = agent.search(message)
-                if results:
-                    lines = [f"[{i+1}] {r.title}\n{r.snippet}\n{r.url}"
-                             for i, r in enumerate(results)]
-                    context = "Web search results:\n" + "\n\n".join(lines)
-            except Exception:
-                pass  # search failed — answer without context
+                results = agent.search(search_query)
+                snippets = []
+                for i, r in enumerate(results):
+                    yield _ev({'type': 'result', 'index': i,
+                               'title': r.title, 'url': r.url,
+                               'snippet': r.snippet, 'source': r.source})
+                    snippets.append(f"[{i+1}] {r.title}\n{r.snippet}\nURL: {r.url}")
+                if snippets:
+                    context = "Web search results:\n\n" + "\n\n".join(snippets)
+            except Exception as e:
+                yield _ev({'type': 'error', 'error': f'Search failed: {e}'})
 
-        # ── Build prompt ──────────────────────────────────────────────────────
-        system_prompt = (
-            "You are JARVIS, a concise and knowledgeable AI assistant. "
-            "When web search results are provided, use them to give accurate, "
-            "up-to-date answers and cite sources as [1], [2] etc. "
-            "Keep answers focused and no longer than necessary."
-        )
-        if context:
-            prompt = f"{context}\n\nUser: {message}\nJARVIS:"
-        else:
-            prompt = f"User: {message}\nJARVIS:"
-
-        # ── Stream LLM response ───────────────────────────────────────────────
-        payload = {
-            "model": "phi4:14b",
-            "prompt": prompt,
-            "system": system_prompt,
-            "stream": True,
-            "keep_alive": 0,
-            "options": {"temperature": 0.5, "num_predict": 1024},
-        }
+        # ── Phase 3: Stream answer ────────────────────────────────────────────
+        yield _ev({'type': 'answering'})
+        prompt = (f"{context}\n\nUser: {message}\nJARVIS:" if context
+                  else f"User: {message}\nJARVIS:")
         try:
-            resp = _req.post("http://localhost:11434/api/generate",
-                             json=payload, stream=True, timeout=120)
+            resp = _ollama(prompt, system=_JARVIS_SYSTEM, stream=True,
+                           max_tokens=1024, temperature=0.5)
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if line:
                     try:
                         d = json.loads(line)
-                        tok = d.get("response", "")
+                        tok = d.get('response', '')
                         if tok:
-                            yield json.dumps({"content": tok}) + "\n"
-                        if d.get("done"):
+                            yield _ev({'type': 'token', 'text': tok})
+                        if d.get('done'):
                             break
                     except Exception:
                         continue
         except Exception as e:
-            yield json.dumps({"content": f"\n[Error: {e}]"}) + "\n"
+            yield _ev({'type': 'error', 'error': str(e)})
+
+        yield _ev({'type': 'done'})
 
     return Response(
         stream_with_context(generate()),

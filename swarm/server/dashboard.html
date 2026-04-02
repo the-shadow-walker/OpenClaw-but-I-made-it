@@ -101,6 +101,22 @@ body {
   border: 1px solid rgba(0, 212, 255, 0.18);
   color: var(--text);
 }
+.jmsg-search-status {
+  font-size: 10px; color: var(--dim);
+  margin-bottom: 5px; font-style: italic;
+}
+.jmsg-sources {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-bottom: 8px;
+}
+.jmsg-src-chip {
+  padding: 2px 7px; border-radius: 3px;
+  background: var(--surface2); border: 1px solid var(--border);
+  font-size: 10px; color: var(--text-dim);
+  max-width: 200px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.jmsg-answer { white-space: pre-wrap; }
 
 #jchat-input-row {
   display: flex; gap: 8px; align-items: center;
@@ -1647,6 +1663,26 @@ document.querySelectorAll('.tab-pane').forEach(p => {
     } catch { return false }
   }
 
+  // Build a structured JARVIS bubble with search status, source chips, answer area
+  function makeBubble() {
+    const wrap = document.createElement('div')
+    wrap.className = 'jmsg jarvis'
+    wrap.innerHTML =
+      '<div class="jmsg-who">JARVIS</div>' +
+      '<div class="jmsg-bubble">' +
+        '<div class="jmsg-search-status"></div>' +
+        '<div class="jmsg-sources"></div>' +
+        '<div class="jmsg-answer"></div>' +
+      '</div>'
+    messagesEl.appendChild(wrap)
+    messagesEl.scrollTop = messagesEl.scrollHeight
+    return {
+      status:  wrap.querySelector('.jmsg-search-status'),
+      sources: wrap.querySelector('.jmsg-sources'),
+      answer:  wrap.querySelector('.jmsg-answer'),
+    }
+  }
+
   async function sendMessage() {
     const text = inputEl.value.trim()
     if (!text || jBusy) return
@@ -1662,8 +1698,9 @@ document.querySelectorAll('.tab-pane').forEach(p => {
       jBusy = false; sendBtn.disabled = false; return
     }
 
-    const bubble = addMessage('jarvis', '')
-    statusEl.textContent = 'JARVIS is thinking…'
+    const parts  = makeBubble()
+    parts.status.textContent = '⟳ deciding…'
+    statusEl.textContent = ''
 
     try {
       const r = await fetch(JARVIS_URL + '/api/chat', {
@@ -1675,8 +1712,8 @@ document.querySelectorAll('.tab-pane').forEach(p => {
       if (!r.ok) throw new Error('HTTP ' + r.status)
 
       const reader = r.body.getReader()
-      const dec = new TextDecoder()
-      let buf = '', full = ''
+      const dec    = new TextDecoder()
+      let buf = '', fullAnswer = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -1685,23 +1722,45 @@ document.querySelectorAll('.tab-pane').forEach(p => {
         const lines = buf.split('\n'); buf = lines.pop()
         for (const line of lines) {
           if (!line.trim()) continue
-          try {
-            const c = JSON.parse(line)
-            if (c.content) {
-              full += c.content
-              bubble.textContent = full
-              messagesEl.scrollTop = messagesEl.scrollHeight
-            }
-          } catch {}
+          let ev
+          try { ev = JSON.parse(line) } catch { continue }
+
+          if (ev.type === 'deciding') {
+            parts.status.textContent = '⟳ deciding…'
+
+          } else if (ev.type === 'tool_call' && ev.tool === 'search') {
+            parts.status.textContent = `🔍 searching: "${ev.query}"`
+
+          } else if (ev.type === 'result') {
+            const chip = document.createElement('a')
+            chip.className = 'jmsg-src-chip'
+            chip.href = ev.url; chip.target = '_blank'
+            chip.title = ev.url
+            chip.textContent = `[${ev.index + 1}] ${ev.title}`
+            parts.sources.appendChild(chip)
+            messagesEl.scrollTop = messagesEl.scrollHeight
+
+          } else if (ev.type === 'answering') {
+            parts.status.textContent = ''
+
+          } else if (ev.type === 'token') {
+            fullAnswer += ev.text
+            parts.answer.textContent = fullAnswer
+            messagesEl.scrollTop = messagesEl.scrollHeight
+
+          } else if (ev.type === 'done') {
+            parts.status.textContent = ''
+            if (jTTS && fullAnswer) playTTS(fullAnswer)
+
+          } else if (ev.type === 'error') {
+            parts.status.textContent = '✗ ' + ev.error
+          }
         }
       }
 
-      statusEl.textContent = ''
-      if (jTTS && full) playTTS(full)
-
     } catch(e) {
-      statusEl.textContent = '✗ ' + (e.name === 'TimeoutError' ? 'timed out' : e.message)
-      if (e.message?.includes('401') || e.message?.includes('session')) jSession = null
+      parts.status.textContent = '✗ ' + (e.name === 'TimeoutError' ? 'timed out' : e.message)
+      if (e.message?.includes('session')) jSession = null
     }
 
     jBusy = false; sendBtn.disabled = false
