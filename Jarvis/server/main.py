@@ -982,9 +982,14 @@ class JarvisServer:
 
         if "Message:" not in text:
             logger.warning("[Parse] No Message: found — stripping tags from raw response")
-            # Promote any action tags from the body only if Command: lines didn't already capture them
+            # Promote action tags from the body, deduplicating against what's already captured
             raw_tags = self._ACTION_TAG_RE.findall(text)
-            new_tags = [t for t in raw_tags if t not in commands]
+            seen_set = set(commands)
+            new_tags = []
+            for t in raw_tags:
+                if t not in seen_set:
+                    seen_set.add(t)
+                    new_tags.append(t)
             if new_tags:
                 logger.info(f"[Parse] Fallback: promoted {len(new_tags)} tag(s): {new_tags}")
                 commands.extend(new_tags)
@@ -1002,8 +1007,13 @@ class JarvisServer:
                         r'\n\[No Tool Used\].*', r'\n\[No Action\].*', r'\n---.*']:
             message = re.sub(pattern, '', message, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        # Promote orphaned action tags in the message body to commands (skip duplicates)
-        promoted = [t for t in self._ACTION_TAG_RE.findall(message) if t not in commands]
+        # Promote orphaned action tags in the message body to commands (deduplicated)
+        seen_set = set(commands)
+        promoted = []
+        for t in self._ACTION_TAG_RE.findall(message):
+            if t not in seen_set:
+                seen_set.add(t)
+                promoted.append(t)
         if promoted:
             logger.info(f"[Parse] Promoted {len(promoted)} orphaned tag(s): {promoted}")
             commands.extend(promoted)
