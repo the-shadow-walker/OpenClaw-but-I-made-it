@@ -970,10 +970,15 @@ class JarvisServer:
         Returns (message_text, list_of_command_tag_strings).
         Falls back gracefully if the model didn't follow the format.
         """
-        # Extract Command: lines first (used in both paths)
-        commands = re.findall(r'(?m)^Command:\s*(.+)$', text)
-        commands = [c.strip() for c in commands
-                    if c.strip() and c.strip().lower() not in ('none', '')]
+        # Extract Command: lines first (used in both paths), deduplicated
+        raw_commands = re.findall(r'(?m)^Command:\s*(.+)$', text)
+        seen = set()
+        commands = []
+        for c in raw_commands:
+            c = c.strip()
+            if c and c.lower() not in ('none', '') and c not in seen:
+                seen.add(c)
+                commands.append(c)
 
         if "Message:" not in text:
             logger.warning("[Parse] No Message: found — stripping tags from raw response")
