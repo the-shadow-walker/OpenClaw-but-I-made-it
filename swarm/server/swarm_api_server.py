@@ -1222,6 +1222,59 @@ def api_chat():
 
 
 # =============================================================================
+# ROUTES -- Search API
+# =============================================================================
+
+@app.route('/api/search', methods=['GET', 'POST'])
+def api_search():
+    """
+    Raw search — no LLM, just results streamed as SSE.
+    GET  /api/search?q=query&n=5
+    POST /api/search  {"query": "...", "max_results": 5}
+
+    Streams SSE events:
+      data: {"index":0, "title":"…", "url":"…", "snippet":"…", "source":"searxng"}
+      data: {"done": true, "total": 3}
+    """
+    if request.method == 'POST':
+        data  = request.json or {}
+        query = data.get('query', '').strip()
+        n     = int(data.get('max_results', 5))
+    else:
+        query = request.args.get('q', '').strip()
+        n     = int(request.args.get('n', 5))
+
+    if not query:
+        return jsonify({'error': 'No query — use ?q= or POST {"query":"..."}'}), 400
+
+    def generate():
+        if not _HAS_SEARCH:
+            yield f"data: {json.dumps({'error': 'search unavailable'})}\n\n"
+            return
+        try:
+            agent = FlexibleSearchAgent(
+                searxng_url=os.environ.get('SEARXNG_URL', 'http://localhost:8080'),
+                max_results=n,
+            )
+            results = agent.search(query)
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
+
+        for i, r in enumerate(results):
+            yield f"data: {json.dumps({'index': i, 'title': r.title, 'url': r.url, 'snippet': r.snippet, 'source': r.source})}\n\n"
+
+        yield f"data: {json.dumps({'done': True, 'total': len(results)})}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                 'Connection': 'keep-alive'},
+    )
+
+
+# =============================================================================
 # ROUTES -- Dashboard SPA
 # =============================================================================
 
