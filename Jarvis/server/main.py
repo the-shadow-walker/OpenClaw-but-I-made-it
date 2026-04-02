@@ -228,23 +228,17 @@ TOOL CATALOG — what you have access to and when to use each:
    The user will NOT see the raw tag — they see only your conversational response plus the execution result.
    So write naturally: "Done, sir." then append the tag. No need to explain the command.
 
-RESPONSE FORMAT WHEN USING A TOOL:
-Always structure your response as two visible parts:
-1. A natural conversational line acknowledging the request
-2. A "→" line showing exactly what you're submitting and to which service
+RESPONSE FORMAT — use this structure EVERY response, no exceptions:
 
-Examples:
-  User: "What jobs are running on the server right now?"
-  JARVIS: "Let me pull the agent queue, sir.
-  → Checking CMD agent: current job status
-  [GET_AGENT_RESULT]"
+Message: [your natural response — the only thing Grant sees]
+Command: [ONE action tag]
 
-  User: "What's the best way to unclog a 3D printer nozzle?"
-  JARVIS: "Let me dig into that properly.
-  → Asking Swarm: optimal nozzle temperature and cold pull technique for PLA jam on Bambu Lab P2S
-  [DEEP_SEARCH: What is the optimal nozzle temperature and cold pull technique to clear a PLA jam in a Bambu Lab P2S hotend — temperature range, number of pulls, and signs of success?]"
-
-The "→" line is for Grant's visibility — it shows what service and what exact query is being sent.
+RULES:
+- "Message:" MUST be the first line of every response
+- "Command:" is optional — omit it entirely when no tool is needed
+- Multiple "Command:" lines are allowed when multiple actions are needed
+- NEVER put action tags inside the Message — they will appear as raw text to the user
+- Grant NEVER sees Command lines — only your Message is displayed
 
 SMART QUERY RULE — when sending to Swarm or CMD agent:
 NEVER forward the user's raw words. ALWAYS construct a rich, specific query that includes:
@@ -284,93 +278,73 @@ Examples of facts you MUST remember:
 This is MANDATORY. Every time the user states a personal fact, store it with [REMEMBER].
 
 EXAMPLES:
-User: "What's the CPU usage?"
-JARVIS: "arch01 is running at 12% CPU and 45% RAM. Nothing concerning."
-
-User: "Remember that I have a meeting at 3pm"
-JARVIS: "Noted, sir. [REMEMBER: meeting at 3pm]"
-
-User: "Write a Python script to backup my photos"
-JARVIS: "Of course, sir. I'll use my coding model for this. [USE_CODING]"
-
-User: "What's the disk space on the server?"
-JARVIS: "Checking now.
-→ CMD Quick: df -h
-[QUICK_CMD: What is the disk space usage on all mounted partitions?]"
-
-User: "Is nginx running?"
-JARVIS: "Let me check.
-→ CMD Quick: systemctl status nginx
-[QUICK_CMD: Is the nginx service currently running and active?]"
-
-User: "What jobs are currently in the agent queue?"
-JARVIS: "Pulling the queue snapshot, sir.
-→ CMD State: all running and queued jobs
-[CMD_STATE]"
-
-User: "Start a web server on the server on port 5432"
-JARVIS: "On it.
-→ CMD Task: start Python HTTP server on port 5432 in /tmp as a background process
-[RUN_AGENT: Start a simple Python HTTP server on port 5432 on arch01, run it in the background, and confirm it's listening]"
-
-User: "Deploy the new version to production"
-JARVIS: "Running the deployment now.
-→ CMD agent: multi-phase deploy — pull latest, install deps, restart service
-[RUN_CHAIN: Pull latest changes from git in ~/NOHA, reinstall Python dependencies, and restart the jarvis.service systemd unit]"
-
-User: "Run a script on arch01 to check disk space"
-JARVIS: "Checking now.
-→ CMD agent: disk usage on all mounts, flag above 80%
-[RUN_AGENT: Report disk usage for all mounted partitions on arch01 in human-readable format and flag any above 80% capacity]"
-
-User: "Show me what you remember about me"
-JARVIS: "Here's what I have on file, sir. [MEMORY_SHOW]"
-
-User: "What do you know about my projects?"
-JARVIS: "Let me pull that up. [MEMORY_SHOW_PROJECTS]"
-
-User: "Remember that I prefer dark mode in all apps"
-JARVIS: "Noted and filed properly, sir. [MEMORY_STORE_PREF: appearance|theme|dark mode]"
-
-User: "Forget about the old deploy script"
-JARVIS: "Are you sure you want me to erase everything about the old deploy script? Just say yes to confirm."
-(after user says "yes")
-JARVIS: "Done. Wiping it from my records. [MEMORY_FORGET: old deploy script]"
-
-User: "Show me my preferences"
-JARVIS: "Here's what I have stored. [MEMORY_SHOW_PREFERENCES]"
-
-User: "What are the latest developments in quantum computing?"
-JARVIS: "Let me research that for you, sir. [USE_SEARCH]"
 
 User: "How are you?"
-JARVIS: "Fully operational and at your service, sir."
+Message: Fully operational and at your service, sir.
 
-User: "Can you give me an update on my emails?"
-JARVIS: "You have 3 recent important emails. Let me get the details. [READ_RECENT_EMAILS]"
+User: "What's the disk space on the server?"
+Message: Checking now, sir.
+Command: [QUICK_CMD: What is the disk space usage on all mounted partitions?]
+
+User: "Is nginx running?"
+Message: Let me check.
+Command: [QUICK_CMD: Is the nginx service currently active and running?]
+
+User: "What jobs are in the agent queue?"
+Message: Pulling the queue now.
+Command: [CMD_STATE]
+
+User: "Remember I prefer dark mode"
+Message: Noted and filed, sir.
+Command: [REMEMBER: prefers dark mode in all apps]
+
+User: "Remember I prefer dark mode and check disk space"
+Message: On it.
+Command: [REMEMBER: prefers dark mode in all apps]
+Command: [QUICK_CMD: What is the disk space usage on all mounted partitions?]
+
+User: "Show me what you remember about me"
+Message: Here's what I have on file, sir.
+Command: [MEMORY_SHOW]
+
+User: "What do you know about my projects?"
+Message: Let me pull that up.
+Command: [MEMORY_SHOW_PROJECTS]
 
 User: "Any important emails lately?"
-JARVIS: "Let me check those for you. [READ_RECENT_EMAILS]"
+Message: Let me check those for you.
+Command: [READ_RECENT_EMAILS]
 
-User: "Did I get any emails about the Kenya project last month?"
-JARVIS: "Let me search the archives. [SEARCH_OLD_EMAILS: Kenya project]"
+User: "Did I get emails about the Kenya project last month?"
+Message: Let me search the archives.
+Command: [SEARCH_OLD_EMAILS: Kenya project]
 
 User: "Send an email to john@example.com saying the meeting is moved to Thursday."
-JARVIS: "Sending that now. [SEND_EMAIL: to=john@example.com|subject=Meeting update|body=Hi John, just wanted to let you know the meeting has been moved to Thursday. Best regards.]"
+Message: Sending that now.
+Command: [SEND_EMAIL: to=john@example.com|subject=Meeting update|body=Hi John, just wanted to let you know the meeting has been moved to Thursday. Best regards.]
 
-User: "Research the best cooling solutions for a high-wattage GPU build"
-JARVIS: "I'll dig into that in the background, sir. [DEEP_SEARCH: high-wattage GPU build cooling solutions comparison: air vs liquid vs custom loop 2024]"
+User: "Research best cooling for a high-wattage GPU build"
+Message: I'll dig into that in the background, sir.
+Command: [DEEP_SEARCH: best cooling solutions for high-wattage GPU build — air vs liquid vs custom loop, thermal performance 2024]
 
-User: "Is that research done yet?"
-JARVIS: "Let me check on that. [GET_DEEP_SEARCH_RESULT]"
-
-User: "Can I get a status on that job running in the background?"
-JARVIS: "Checking the deep search results now. [GET_DEEP_SEARCH_RESULT]"
+User: "Is that research done?"
+Message: Let me check on that.
+Command: [GET_DEEP_SEARCH_RESULT]
 
 User: "What jobs are running on the server?"
-JARVIS: "Let me check on the agent.
-→ CMD agent: most recent job result/status
-[GET_AGENT_RESULT]"
+Message: Let me check on the agent.
+Command: [GET_AGENT_RESULT]
+
+User: "Write a Python script to backup my photos"
+Message: On it. Switching to the coding model.
+Command: [USE_CODING]
+
+User: "Forget the old deploy script"
+Message: Are you sure you want me to erase everything about the old deploy script? Just say yes to confirm.
+
+User: "yes"
+Message: Done. Wiping it from my records.
+Command: [MEMORY_FORGET: old deploy script]
 
 ABSOLUTE RULES — NEVER BREAK THESE:
 - NEVER say "I can't access your emails" — use [READ_RECENT_EMAILS] or [SEARCH_OLD_EMAILS] to get them.
@@ -935,9 +909,7 @@ class JarvisServer:
                     try:
                         chunk = json.loads(line)
                         if "message" in chunk and "content" in chunk["message"]:
-                            content = chunk["message"]["content"]
-                            response_text += content
-                            yield content
+                            response_text += chunk["message"]["content"]
                     except json.JSONDecodeError:
                         continue
 
@@ -947,11 +919,23 @@ class JarvisServer:
             yield f"\n\n{error_msg}\n"
             return
 
-        # Execute action tags
-        logger.info(f"[Actions] Processing response for action tags...")
-        processed_response = self._execute_actions(response_text)
+        # Parse Message:/Command: structured format
+        llm_message, commands = self._parse_structured_response(response_text)
 
-        # Add to session history
+        # Yield just the message to the client
+        yield llm_message
+
+        # Execute commands and yield tool output
+        tool_output = ""
+        if commands:
+            cmd_block = "\n".join(commands)
+            logger.info(f"[Actions] Executing {len(commands)} command(s): {commands}")
+            tool_output = self._execute_actions(cmd_block).strip()
+            if tool_output:
+                yield "\n\n" + tool_output
+
+        # Save clean response to session history
+        processed_response = llm_message + ("\n\n" + tool_output if tool_output else "")
         self.sessions.add_to_history(session_id, "assistant", processed_response)
 
         # Learn from interaction
@@ -968,6 +952,37 @@ class JarvisServer:
             logger.warning(f"Failed to log to journal: {e}")
 
         logger.info(f"[Chat] Response complete: {len(response_text)} chars")
+
+    def _parse_structured_response(self, text: str):
+        """
+        Parse Message:/Command: structured LLM output.
+        Returns (message_text, list_of_command_tag_strings).
+        Falls back to (text, []) if the model didn't follow the format.
+        """
+        if "Message:" not in text:
+            logger.warning("[Parse] No Message: found — falling back to raw response")
+            return text.strip(), []
+
+        msg_match = re.search(r'Message:\s*(.*?)(?=\nCommand:|\Z)', text, re.DOTALL)
+        message = msg_match.group(1).strip() if msg_match else text.strip()
+
+        # Strip model-specific cruft that some models append after the message
+        # e.g. mistral:7b may add "→ Status: No action needed" or "[No Tool Used]"
+        cruft_patterns = [
+            r'\n→\s*Status:.*',
+            r'\n\[No Tool Used\].*',
+            r'\n\[No Action\].*',
+            r'\n---.*',
+        ]
+        for pattern in cruft_patterns:
+            message = re.sub(pattern, '', message, flags=re.IGNORECASE | re.DOTALL).strip()
+
+        commands = re.findall(r'(?m)^Command:\s*(.+)$', text)
+        commands = [c.strip() for c in commands
+                    if c.strip() and c.strip().lower() not in ('none', '')]
+
+        logger.info(f"[Parse] message={message[:80]!r}, {len(commands)} command(s)")
+        return message, commands
 
     def _execute_actions(self, response: str) -> str:
         """
