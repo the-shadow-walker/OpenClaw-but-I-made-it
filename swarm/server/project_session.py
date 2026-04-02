@@ -37,7 +37,7 @@ except ImportError:
 @dataclass
 class ProjectSession:
     session_id: str
-    state: str                   # "qa" | "done"
+    state: str                   # "qa" | "done" | "error"
     specs: Dict[str, Any]        # accumulated Q&A answers
     history: List[Dict]          # [{"question": ..., "answer": ...}]
     pending_question: Optional[Dict]  # last question issued to the client
@@ -46,6 +46,7 @@ class ProjectSession:
     requirements: Optional[Dict]
     created_at: float            # unix timestamp
     updated_at: float
+    error_message: Optional[str] = None
 
 
 def _new_session(description: str) -> ProjectSession:
@@ -175,24 +176,44 @@ class ProjectSessionManager:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _advance_question(self, session: ProjectSession):
-        """Ask the LLM for the next question; finalize if done."""
+        """Ask the LLM for the next question; finalize if done, error if LLM unavailable."""
         try:
             nq = get_next_question(session.specs, session.history)
-        except Exception:
-            nq = {"done": True}
+        except Exception as e:
+            session.state = "error"
+            session.error_message = f"LLM call failed: {e}"
+            return
 
-        # Treat a missing/empty question as implicit done (LLM returned malformed JSON)
-        if nq.get("done") or not nq.get("question", "").strip():
+        # Explicit done signal from LLM
+        if nq is None:
+            session.state = "error"
+            session.error_message = "LLM unavailable or returned invalid response — please retry"
+            return
+
+        if nq.get("done") is True:
             self._finalize(session)
-        else:
-            session.pending_question = nq
+            return
+
+        # Empty question means LLM failed (timeout/bad JSON returned as {})
+        if not nq.get("question", "").strip():
+            session.state = "error"
+            session.error_message = "LLM returned no question — it may be busy, please retry in a moment"
+            return
+
+        session.pending_question = nq
 
     def _finalize(self, session: ProjectSession):
         """Compute requirements and render markdown; transition to 'done'."""
         try:
             req = compute_requirements(session.specs)
         except Exception as e:
-            req = {"requirements": {}, "notes": f"compute_requirements error: {e}"}
+            req = None
+
+        if not req:
+            session.state = "error"
+            session.error_message = "LLM unavailable while computing requirements — please retry"
+            session.updated_at = time.time()
+            return
 
         session.requirements = req
         session.result_markdown = _build_result_markdown(session.specs, req)
@@ -224,6 +245,7 @@ class ProjectSessionManager:
             "qa_count":         session.qa_count,
             "result_markdown":  session.result_markdown,
             "requirements":     session.requirements,
+            "error_message":    session.error_message,
             "created_at":       session.created_at,
             "updated_at":       session.updated_at,
         }
@@ -238,6 +260,9 @@ class ProjectSessionManager:
 
         When done:
           {"session_id", "state":"done", "result_markdown", "requirements"}
+
+        On error:
+          {"session_id", "state":"error", "error_message"}
         """
         if session.state == "done":
             return {
@@ -245,6 +270,13 @@ class ProjectSessionManager:
                 "state":           "done",
                 "result_markdown": session.result_markdown,
                 "requirements":    session.requirements,
+            }
+
+        if session.state == "error":
+            return {
+                "session_id":    session.session_id,
+                "state":         "error",
+                "error_message": session.error_message or "Unknown error",
             }
 
         pq = session.pending_question or {}

@@ -818,7 +818,10 @@ def project_start():
         return jsonify({'error': 'No description provided'}), 400
     try:
         session = session_manager.create(description)
-        return jsonify(ProjectSessionManager.to_response(session)), 201
+        resp = ProjectSessionManager.to_response(session)
+        if session.state == 'error':
+            return jsonify(resp), 503
+        return jsonify(resp), 201
     except Exception as e:
         logging.error(f"project/start error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -837,11 +840,14 @@ def project_respond():
     session = session_manager.get(session_id)
     if session is None:
         return jsonify({'error': 'Session not found or expired'}), 404
-    if session.state == 'done':
+    if session.state in ('done', 'error'):
         return jsonify(ProjectSessionManager.to_response(session)), 200
     try:
         session = session_manager.advance(session_id, answer)
-        return jsonify(ProjectSessionManager.to_response(session)), 200
+        resp = ProjectSessionManager.to_response(session)
+        if session.state == 'error':
+            return jsonify(resp), 503
+        return jsonify(resp), 200
     except Exception as e:
         logging.error(f"project/respond error: {e}")
         return jsonify({'error': str(e)}), 500
