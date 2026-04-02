@@ -977,6 +977,26 @@ class JarvisServer:
         for pattern in cruft_patterns:
             message = re.sub(pattern, '', message, flags=re.IGNORECASE | re.DOTALL).strip()
 
+        # Promote any orphaned action tags in the message body to commands
+        # (model put tags directly in message text instead of on Command: lines)
+        orphan_tag_pattern = re.compile(
+            r'(\[(?:REMEMBER|SEARCH_MEMORY|READ_RECENT_EMAILS|SEARCH_OLD_EMAILS'
+            r'|MEMORY_SHOW(?:_[A-Z_]+)?|MEMORY_FORGET|MEMORY_STORE_PREF'
+            r'|SEND_EMAIL|DRAFT_EMAIL|DEEP_SEARCH|GET_DEEP_SEARCH_RESULT'
+            r'|RUN_AGENT|RUN_CHAIN|GET_AGENT_RESULT|QUICK_CMD|CMD_STATE'
+            r'|USE_REASONING|USE_CODING|USE_SEARCH|USE_AGENT|LOCAL)'
+            r'(?::[^\]]+)?\])',
+            re.IGNORECASE
+        )
+        promoted = orphan_tag_pattern.findall(message)
+        if promoted:
+            logger.info(f"[Parse] Promoted {len(promoted)} orphaned tag(s) from message body: {promoted}")
+            commands.extend(promoted)
+            message = orphan_tag_pattern.sub('', message).strip()
+
+        # Clean up any double newlines left by stripping
+        message = re.sub(r'\n\n+', '\n\n', message).strip()
+
         commands = re.findall(r'(?m)^Command:\s*(.+)$', text)
         commands = [c.strip() for c in commands
                     if c.strip() and c.strip().lower() not in ('none', '')]
