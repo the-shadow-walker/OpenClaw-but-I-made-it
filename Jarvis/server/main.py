@@ -368,28 +368,48 @@ Message: Done. Wiping it from my records.
 Command: [MEMORY_FORGET: old deploy script]
 
 TOOL EXECUTION POLICY — critical:
-For [QUICK_CMD], [RUN_AGENT], [RUN_CHAIN], [DEEP_SEARCH], [START_PROJECT], [LOCAL]:
-  NEVER execute automatically. Instead, describe what you would do and ask for confirmation.
-  Only include the Command: tag AFTER the user explicitly says yes/go/run it/do it/sure.
 
-  Pattern:
-    User asks about something that needs a tool.
-    Message: I can check X for you — want me to run that?
+EXECUTE IMMEDIATELY — no confirmation, no "shall I?", just do it:
+  [QUICK_CMD], [CMD_STATE], [GET_AGENT_RESULT], [GET_DEEP_SEARCH_RESULT],
+  [GET_SECURITY_REPORT], [GET_SECURITY_ALERTS], [READ_RECENT_EMAILS], [SEARCH_OLD_EMAILS],
+  [LOCAL], [REMEMBER], [MEMORY_STORE_PREF], [SEARCH_MEMORY], all [MEMORY_SHOW*] tags.
+  User asks → you run the tag in the same response. Period.
+
+CONFIRM BEFORE EXECUTING — ask first, only run after explicit yes/go/sure:
+  [RUN_AGENT], [RUN_CHAIN]    — multi-step autonomous execution on the server
+  [DEEP_SEARCH], [START_PROJECT] — takes 1-3 minutes
+  [SEND_EMAIL]                — irreversible external action
+  [MEMORY_FORGET]             — deletes stored knowledge
+
+  Pattern for confirm-first tools:
+    Message: I can [description] — want me to?
     (no Command: line)
 
     User: "yes" / "go ahead" / "sure"
     Message: On it.
-    Command: [QUICK_CMD: ...]
+    Command: [RUN_AGENT: ...]
 
-For [REMEMBER], [MEMORY_STORE_PREF], [SEARCH_MEMORY]: always execute immediately, no confirmation needed.
+ANTI-HALLUCINATION — TOOL RESULTS:
+- You CANNOT know a tool's result until it appears in your context. NEVER say "I have the
+  information" or "here's what I found" unless the tool output is actually in your context.
+- If you ran [GET_SECURITY_REPORT] and see no result yet, the result hasn't come back yet.
+  Do NOT fabricate a report. Say "I've requested it — it'll appear shortly."
+- When you include a Command: tag, you are SCHEDULING the action. The result arrives in the
+  NEXT turn's context. So after using [QUICK_CMD], the current response won't have the output.
+  Your Message should say "checking now" — NEVER "here's the result" in the same turn.
 
 Examples:
 User: "What's the disk space on the server?"
-Message: I can check that with a quick command — shall I?
-
-User: "yes"
-Message: Pulling that now.
+Message: Checking now, sir.
 Command: [QUICK_CMD: What is the disk space usage on all mounted partitions?]
+
+User: "Is nginx running?"
+Message: Let me check.
+Command: [QUICK_CMD: Is the nginx service currently active and running?]
+
+User: "Pull up the security audit"
+Message: Fetching the latest SENTINEL report.
+Command: [GET_SECURITY_REPORT]
 
 User: "Research best PETG print settings"
 Message: I can run a deep search on that — it'll take a minute or two. Want me to kick that off?
@@ -1096,9 +1116,11 @@ class JarvisServer:
         if commands:
             cmd_block = "\n".join(commands)
             logger.info(f"[Actions] Executing {len(commands)} command(s): {commands}")
-            tool_output = self._execute_actions(cmd_block).strip()
-            if tool_output:
-                yield "\n\n" + tool_output
+            _TOOL = "\x00TOOL\x00"
+            yield _TOOL + json.dumps({"status": "running", "tags": commands})
+            raw_output = self._execute_actions(cmd_block)
+            tool_output = self._ACTION_TAG_RE.sub('', raw_output).strip()
+            yield _TOOL + json.dumps({"status": "done", "content": tool_output})
 
         # Save clean response to session history
         processed_response = llm_message + ("\n\n" + tool_output if tool_output else "")
@@ -2123,12 +2145,16 @@ async def chat_endpoint(request: ChatRequest):
             raise HTTPException(status_code=401, detail="Invalid or expired session")
 
         # Stream response — chunks prefixed with \x00SYS\x00 are system notifications
-        # (shown in UI but excluded from TTS)
+        # (shown in UI but excluded from TTS); \x00TOOL\x00 are tool execution events
         _SYS = "\x00SYS\x00"
+        _TOOL = "\x00TOOL\x00"
         async def generate():
             for chunk in server.chat(request.message, request.session_token):
                 if chunk.startswith(_SYS):
                     yield json.dumps({"type": "system", "content": chunk[len(_SYS):]}) + "\n"
+                elif chunk.startswith(_TOOL):
+                    tool_data = json.loads(chunk[len(_TOOL):])
+                    yield json.dumps({"type": "tool", **tool_data}) + "\n"
                 else:
                     yield json.dumps({"content": chunk}) + "\n"
 
