@@ -977,17 +977,18 @@ class JarvisServer:
 
         if "Message:" not in text:
             logger.warning("[Parse] No Message: found — stripping tags from raw response")
-            # Strip any action tags from the raw text so they don't display
-            clean = self._ACTION_TAG_RE.sub('', text).strip()
-            clean = re.sub(r'\n\n+', '\n\n', clean).strip()
-            # Promote any tags we found in the raw text to commands
+            # Promote any action tags we found in the raw text to commands
             raw_tags = self._ACTION_TAG_RE.findall(text)
             if raw_tags:
                 logger.info(f"[Parse] Fallback: promoted {len(raw_tags)} tag(s): {raw_tags}")
                 commands.extend(raw_tags)
+            # Strip action tags and any "Command: ..." lines the model added
+            clean = self._ACTION_TAG_RE.sub('', text)
+            clean = re.sub(r'(?m)^Command:\s*.*$', '', clean)
+            clean = re.sub(r'\n\n+', '\n\n', clean).strip()
             return clean, commands
 
-        msg_match = re.search(r'Message:\s*(.*?)(?=\nCommand:|\Z)', text, re.DOTALL)
+        msg_match = re.search(r'Message:\s*(.*?)(?=\n+Command:|\Z)', text, re.DOTALL)
         message = msg_match.group(1).strip() if msg_match else text.strip()
 
         # Strip model-specific cruft lines some models append after the message
@@ -1001,6 +1002,9 @@ class JarvisServer:
             logger.info(f"[Parse] Promoted {len(promoted)} orphaned tag(s): {promoted}")
             commands.extend(promoted)
             message = self._ACTION_TAG_RE.sub('', message).strip()
+
+        # Strip any stray "Command: ..." lines that ended up in the message body
+        message = re.sub(r'(?m)^Command:\s*.*$', '', message)
 
         # Clean up leftover whitespace
         message = re.sub(r'\n\n+', '\n\n', message).strip()
