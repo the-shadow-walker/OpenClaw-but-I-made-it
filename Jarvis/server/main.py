@@ -646,29 +646,8 @@ class JarvisServer:
         except Exception as e:
             logger.warning(f"Failed to load stored notes: {e}")
 
-        # PERSONALITY ADAPTATIONS (learned from interactions via PersonalityLearner)
-        try:
-            pref_data = getattr(self.personality, 'data', {}).get('preferences', {})
-            if pref_data:
-                context_parts.append("\nLEARNED PERSONALITY ADAPTATIONS:")
-                style = pref_data.get('communication_style')
-                if style:
-                    context_parts.append(f"- Communication style: {style}")
-                verbosity = pref_data.get('verbosity')
-                if verbosity:
-                    context_parts.append(f"- Preferred verbosity: {verbosity}")
-                humor = pref_data.get('humor_level')
-                if humor:
-                    context_parts.append(f"- Humor level: {humor}")
-                formality = pref_data.get('formality')
-                if formality:
-                    context_parts.append(f"- Formality: {formality}")
-                skip = {'communication_style', 'verbosity', 'humor_level', 'formality'}
-                for k, v in list(pref_data.items())[:5]:
-                    if k not in skip and v:
-                        context_parts.append(f"- {k.replace('_', ' ').title()}: {v}")
-        except Exception as _pe:
-            logger.debug(f"Personality context injection failed: {_pe}")
+        # PERSONALITY ADAPTATIONS — suppressed until personality-apply feature is implemented
+        # (learning.json updated by PersonalityLearner but injecting raw prefs causes model echo)
 
         # EMAIL HIGHLIGHTS (JARVIS answers from these; READ_RECENT_EMAILS only on explicit user request)
         if email_summary:
