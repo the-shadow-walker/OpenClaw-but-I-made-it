@@ -36,6 +36,111 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 
+
+/* ── Top-level page nav ──────────────────────────────────────────── */
+#page-nav {
+  position: fixed; top: 44px; left: 0; right: 0; z-index: 99;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  height: 34px; padding: 0 16px; gap: 4px;
+}
+.page-tab {
+  padding: 4px 14px;
+  background: none; border: none; border-radius: 4px;
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--text-dim); cursor: pointer; letter-spacing: 0.5px;
+  transition: color 0.15s, background 0.15s;
+}
+.page-tab:hover  { color: var(--text); background: var(--surface2); }
+.page-tab.active { color: var(--accent); background: var(--surface2);
+                   box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* ── Page containers ─────────────────────────────────────────────── */
+.page { display: none; }
+.page.active { display: block; }
+
+/* Shift workspace down to make room for nav bar */
+#workspace { margin-top: 78px; }
+
+/* ── JARVIS Chat page ─────────────────────────────────────────────── */
+#page-chat {
+  position: fixed; top: 78px; left: 0; right: 0; bottom: 0;
+  display: none; flex-direction: column;
+  background: var(--bg);
+}
+#page-chat.active { display: flex; }
+
+#jchat-messages {
+  flex: 1; overflow-y: auto;
+  padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+
+.jmsg { display: flex; flex-direction: column; max-width: 72%; }
+.jmsg.user { align-self: flex-end; align-items: flex-end; }
+.jmsg.jarvis { align-self: flex-start; align-items: flex-start; }
+
+.jmsg-who {
+  font-size: 10px; font-weight: 700; letter-spacing: 1px;
+  color: var(--dim); margin-bottom: 4px;
+}
+.jmsg.jarvis .jmsg-who { color: var(--accent); }
+
+.jmsg-bubble {
+  padding: 10px 14px; border-radius: 8px;
+  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.jmsg.user .jmsg-bubble {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.jmsg.jarvis .jmsg-bubble {
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  color: var(--text);
+}
+
+#jchat-input-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+#jchat-input {
+  flex: 1;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 9px 12px;
+  color: var(--text); font-family: var(--mono); font-size: 13px;
+  outline: none; resize: none; height: 40px; max-height: 120px;
+  transition: border-color 0.15s;
+}
+#jchat-input:focus { border-color: var(--accent); }
+#jchat-send {
+  background: var(--accent); color: #000;
+  border: none; border-radius: 6px;
+  padding: 8px 18px; font-family: var(--mono); font-size: 12px;
+  font-weight: 700; cursor: pointer; letter-spacing: 0.5px;
+  transition: opacity 0.15s;
+}
+#jchat-send:hover { opacity: 0.85; }
+#jchat-send:disabled { opacity: 0.4; cursor: default; }
+
+#jchat-tts-toggle {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 10px;
+  color: var(--text-dim); font-family: var(--mono); font-size: 11px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+#jchat-tts-toggle.on { color: var(--accent); border-color: var(--accent); }
+
+#jchat-status {
+  font-size: 11px; color: var(--dim);
+  padding: 0 24px 8px; min-height: 18px;
+}
+
 /* ── Header ─────────────────────────────────────────────────────── */
 #header {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;
@@ -230,6 +335,7 @@ body {
 }
 #answer-copy-btn:hover { color: var(--accent); border-color: var(--accent); }
 
+
 /* ── API Builder widget ──────────────────────────────────────────── */
 #widget-api { width: 340px; height: 400px; }
 
@@ -403,6 +509,11 @@ body {
     <span class="label">Cmd</span>
   </div>
 
+  <div class="badge" id="badge-jarvis">
+    <span class="dot"></span>
+    <span class="label">JARVIS</span>
+  </div>
+
   <div class="badge">
     <span style="color:var(--accent)">GPU</span>
     <span class="val" id="hdr-gpu">—</span>
@@ -421,7 +532,15 @@ body {
   <span id="hdr-clock">--:--:--</span>
 </div>
 
+
+<!-- ── PAGE NAV ─────────────────────────────────────────────────── -->
+<div id="page-nav">
+  <button class="page-tab active" data-page="tools">⬡ Tools</button>
+  <button class="page-tab"        data-page="chat">⯢ JARVIS Chat</button>
+</div>
+
 <!-- ── WORKSPACE ───────────────────────────────────────────────────── -->
+<div id="page-tools" class="page active">
 <div id="workspace">
 
   <!-- Chat Widget -->
@@ -437,6 +556,7 @@ body {
       <select id="chat-service-sel">
         <option value="swarm">Swarm</option>
         <option value="cmd">Execute</option>
+        <option value="jarvis">⯢ JARVIS</option>
       </select>
       <input id="chat-input" placeholder="Ask anything or give a command…" autocomplete="off">
       <button id="chat-submit">↵</button>
@@ -549,13 +669,15 @@ body {
 <script>
 /* ── Config ───────────────────────────────────────────────────── */
 const SWARM_URL = `${location.protocol}//${location.hostname}:5002`
-const CMD_URL   = `${location.protocol}//${location.hostname}:5000`
+const CMD_URL    = `${location.protocol}//${location.hostname}:5000`
+const JARVIS_URL = `${location.protocol}//${location.hostname}:5003`
 const GRID      = 20  // drag snap grid in pixels
 
 /* ── State ────────────────────────────────────────────────────── */
 const state = {
   swarm:  { url: SWARM_URL, online: false, jobs: [] },
   cmd:    { url: CMD_URL,   online: false, jobs: [] },
+  jarvis: { url: JARVIS_URL, online: false, session: null },
   gpu:    {},
   activeStream: null,       // EventSource for current watched job
   activeJobId: null,
@@ -688,6 +810,12 @@ async function poll() {
     const c = await fetchJSON(CMD_URL + '/api/v1/health')
     if (c) { document.getElementById('badge-cmd').className = 'badge online'; state.cmd.online = true }
   } catch { document.getElementById('badge-cmd').className = 'badge offline' }
+
+  // JARVIS health
+  try {
+    const j = await fetchJSON(JARVIS_URL + '/api/status')
+    if (j) { document.getElementById('badge-jarvis').className = 'badge online'; state.jarvis.online = true }
+  } catch { document.getElementById('badge-jarvis').className = 'badge offline' }
 
   renderJobsList()
 }
@@ -1185,8 +1313,9 @@ document.getElementById('chat-submit').addEventListener('click', () => {
   const svc = document.getElementById('chat-service-sel').value
   if (!q) return
   document.getElementById('chat-input').value = ''
-  if (svc === 'swarm') submitSwarm(q)
-  else                 submitCmd(q)
+  if (svc === 'swarm')       submitSwarm(q)
+  else if (svc === 'jarvis') submitJarvis(q)
+  else                       submitCmd(q)
 })
 document.getElementById('chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('chat-submit').click()
@@ -1201,6 +1330,76 @@ document.getElementById('answer-copy-btn').addEventListener('click', () => {
     setTimeout(() => { btn.textContent = 'Copy' }, 1500)
   })
 })
+
+/* ── Piper TTS playback ──────────────────────────────────── */
+async function playTTS(text) {
+  // TTS first sentence only (keep it snappy)
+  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
+  const phrase = m ? m[0].trim() : text.slice(0, 200)
+  if (!phrase) return
+  try {
+    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!resp.ok) return
+    const wav = await resp.arrayBuffer()
+    const ctx = new AudioContext()
+    const buf = await ctx.decodeAudioData(wav)
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.connect(ctx.destination)
+    src.start(0)
+  } catch(e) {
+    console.warn('[TTS]', e.message)
+  }
+}
+
+/* ── Submit JARVIS chat ───────────────────────────────── */
+async function submitJarvis(q) {
+  if (!q.trim()) return
+  appendLog('↗ JARVIS: ' + q.slice(0,80), 'log-wave')
+  // Ensure session
+  if (!state.jarvis.session) {
+    try {
+      const s = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
+      if (!s.ok) { appendLog('JARVIS: session failed', 'log-fail'); return }
+      state.jarvis.session = (await s.json()).session_token
+    } catch(e) { appendLog('JARVIS: ' + e.message, 'log-fail'); return }
+  }
+  // Stream response
+  const answerBox = document.getElementById('answer-box')
+  answerBox.innerHTML = ''
+  document.querySelector('[data-tab="answer"]')?.click()
+  try {
+    const r = await fetch(JARVIS_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: q, session_token: state.jarvis.session }),
+      signal: AbortSignal.timeout(300000),
+    })
+    if (!r.ok) { appendLog('JARVIS HTTP ' + r.status, 'log-fail'); return }
+    const reader = r.body.getReader()
+    const dec    = new TextDecoder()
+    let buf = '', full = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('
+'); buf = lines.pop()
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try { const c = JSON.parse(line); if (c.content) { full += c.content; answerBox.textContent = full } } catch {}
+      }
+    }
+    state.currentJob.answer = full
+    playTTS(full)
+    document.getElementById('chat-job-badge').textContent = '[ JARVIS ]'
+  } catch(e) {
+    appendLog('JARVIS: ' + (e.name === 'TimeoutError' ? 'timed out' : e.message), 'log-fail')
+    state.jarvis.session = null
+  }
+}
 
 /* ── Escape HTML ──────────────────────────────────────────────── */
 function escHtml(s) {
@@ -1225,6 +1424,155 @@ document.querySelectorAll('.tab-pane').forEach(p => {
   if (!p.classList.contains('active')) p.style.display = 'none'
   else p.style.display = 'flex'
 })
+
+/* ── Top-level page tab switching ───────────────────────────────── */
+(function() {
+  const tabs = document.querySelectorAll('.page-tab')
+  const toolsPage = document.getElementById('page-tools')
+  const chatPage  = document.getElementById('page-chat')
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'))
+      tab.classList.add('active')
+      const p = tab.dataset.page
+      if (p === 'tools') {
+        toolsPage.classList.add('active')
+        chatPage.classList.remove('active')
+      } else {
+        toolsPage.classList.remove('active')
+        chatPage.classList.add('active')
+        document.getElementById('jchat-input').focus()
+      }
+    })
+  })
+})()
+
+/* ── JARVIS Chat UI ──────────────────────────────────────────────── */
+;(function() {
+  let jSession = null
+  let jTTS = true
+  let jBusy = false
+
+  const messagesEl = document.getElementById('jchat-messages')
+  const inputEl    = document.getElementById('jchat-input')
+  const sendBtn    = document.getElementById('jchat-send')
+  const statusEl   = document.getElementById('jchat-status')
+  const ttsBtn     = document.getElementById('jchat-tts-toggle')
+
+  ttsBtn.addEventListener('click', () => {
+    jTTS = !jTTS
+    ttsBtn.classList.toggle('on', jTTS)
+    ttsBtn.textContent = jTTS ? '🔊 TTS' : '🔇 TTS'
+  })
+
+  function addMessage(role, text) {
+    const wrap = document.createElement('div')
+    wrap.className = 'jmsg ' + role
+    wrap.innerHTML = '<div class="jmsg-who">' + (role === 'user' ? 'YOU' : 'JARVIS') + '</div>' +
+                     '<div class="jmsg-bubble"></div>'
+    wrap.querySelector('.jmsg-bubble').textContent = text
+    messagesEl.appendChild(wrap)
+    messagesEl.scrollTop = messagesEl.scrollHeight
+    return wrap.querySelector('.jmsg-bubble')
+  }
+
+  async function ensureSession() {
+    if (jSession) return true
+    try {
+      const r = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
+      if (!r.ok) return false
+      jSession = (await r.json()).session_token
+      return true
+    } catch { return false }
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim()
+    if (!text || jBusy) return
+    jBusy = true
+    sendBtn.disabled = true
+    inputEl.value = ''
+    inputEl.style.height = '40px'
+
+    addMessage('user', text)
+
+    if (!await ensureSession()) {
+      statusEl.textContent = '✗ Could not connect to JARVIS'
+      jBusy = false; sendBtn.disabled = false; return
+    }
+
+    const bubble = addMessage('jarvis', '')
+    statusEl.textContent = 'JARVIS is thinking…'
+
+    try {
+      const r = await fetch(JARVIS_URL + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, session_token: jSession }),
+        signal: AbortSignal.timeout(300000),
+      })
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+
+      const reader = r.body.getReader()
+      const dec = new TextDecoder()
+      let buf = '', full = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split('\n'); buf = lines.pop()
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const c = JSON.parse(line)
+            if (c.content) {
+              full += c.content
+              bubble.textContent = full
+              messagesEl.scrollTop = messagesEl.scrollHeight
+            }
+          } catch {}
+        }
+      }
+
+      statusEl.textContent = ''
+      if (jTTS && full) playTTS(full)
+
+    } catch(e) {
+      statusEl.textContent = '✗ ' + (e.name === 'TimeoutError' ? 'timed out' : e.message)
+      if (e.message?.includes('401') || e.message?.includes('session')) jSession = null
+    }
+
+    jBusy = false; sendBtn.disabled = false
+    inputEl.focus()
+  }
+
+  sendBtn.addEventListener('click', sendMessage)
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
+  })
+  // Auto-resize textarea
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = '40px'
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px'
+  })
+})()
+
 </script>
+</div><!-- /page-tools -->
+
+
+<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
+<div id="page-chat">
+  <div id="jchat-messages"></div>
+  <div id="jchat-status"></div>
+  <div id="jchat-input-row">
+    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
+    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
+    <button id="jchat-send">SEND</button>
+  </div>
+</div>
+
 </body>
 </html>
