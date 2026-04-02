@@ -59,7 +59,7 @@ from config.server_config import (
     OLLAMA_CMD_URL, OLLAMA_CMD_API_KEY, OLLAMA_CMD_INBOX,
     DEEP_SEARCH_URL,
     MEMORY_DIR, FACTS_DB_PATH, WORKFLOWS_DB_PATH, LEARNING_FILE,
-    TASKS_DIR, RECENT_EMAILS_FILE,
+    TASKS_DIR, RECENT_EMAILS_FILE, PIPER_MODEL_PATH,
     CONTEXT_BUDGET, MAX_HISTORY_MESSAGES,
     init_directories
 )
@@ -499,6 +499,16 @@ class JarvisServer:
         swarm_ok = self.swarm_client.is_available()
         logger.info(f"{'✓' if cmd_ok else '✗'} ollama-cmd ({OLLAMA_CMD_URL}): {'online' if cmd_ok else 'offline'}")
         logger.info(f"{'✓' if swarm_ok else '✗'} ollama-swarm ({DEEP_SEARCH_URL}): {'online' if swarm_ok else 'offline'}")
+
+        # Initialize Piper TTS
+        logger.info("Initializing Piper TTS...")
+        self.tts_voice = None
+        try:
+            from piper.voice import PiperVoice
+            self.tts_voice = PiperVoice.load(str(PIPER_MODEL_PATH))
+            logger.info(f"✓ Piper TTS ready ({PIPER_MODEL_PATH.name})")
+        except Exception as e:
+            logger.warning(f"Piper TTS unavailable: {e}")
 
         logger.info("=" * 80)
         logger.info("JARVIS SERVER ONLINE")
@@ -1157,14 +1167,10 @@ class JarvisServer:
         if re.search(r'\[READ_RECENT_EMAILS\]', response, re.IGNORECASE):
             if self.email_agent:
                 try:
-                    recent_file = RECENT_EMAILS_FILE
-                    if recent_file.exists():
-                        content = recent_file.read_text()
-                        response = re.sub(r'\[READ_RECENT_EMAILS\]', '', response, flags=re.IGNORECASE).strip()
-                        response = (response + '\n\n' + content).strip()
-                        logger.info(f"[Action] Read recent emails file")
-                    else:
-                        response = re.sub(r'\[READ_RECENT_EMAILS\]', '(No recent emails file found)', response, flags=re.IGNORECASE)
+                    digest = self.email_agent.get_email_digest()
+                    response = re.sub(r'\[READ_RECENT_EMAILS\]', '', response, flags=re.IGNORECASE).strip()
+                    response = (response + '\n\n' + digest).strip()
+                    logger.info("[Action] Injected email digest")
                 except Exception as e:
                     logger.error(f"[Action] Failed to read recent emails: {e}")
 
@@ -1782,6 +1788,32 @@ async def tools_status():
             "available": server.swarm_client.is_available()
         }
     }
+
+@app.get("/api/tts")
+async def tts_endpoint(text: str):
+    """Synthesize text to speech using Piper. Returns WAV audio."""
+    import io
+    import wave
+    import asyncio
+    from fastapi.responses import Response
+
+    if not server.tts_voice:
+        raise HTTPException(status_code=503, detail="TTS not available — piper not loaded")
+
+    def _synthesize():
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(22050)
+            pcm = b"".join(chunk.audio_int16_bytes for chunk in server.tts_voice.synthesize(text))
+            wf.writeframes(pcm)
+        return buf.getvalue()
+
+    loop = asyncio.get_event_loop()
+    wav_bytes = await loop.run_in_executor(None, _synthesize)
+    return Response(content=wav_bytes, media_type="audio/wav")
+
 
 @app.get("/")
 async def root():

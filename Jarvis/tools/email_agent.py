@@ -554,6 +554,31 @@ class EmailAgent:
 
         return f"{count} recent important email(s) available. Use [READ_RECENT_EMAILS] to see full details."
 
+    def get_email_digest(self, days: int = RECENT_DAYS) -> str:
+        """Return compact email digest (subject/from/date/note, NO body) — ~3KB vs 47KB."""
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            """SELECT from_name, subject, date, importance, note
+               FROM email_notes
+               WHERE importance >= 2 AND processed_at > ?
+               ORDER BY importance DESC, processed_at DESC""",
+            (cutoff,),
+        ).fetchall()
+
+        if not rows:
+            return "No recent important emails."
+
+        LABEL = {3: "HIGH", 2: "MED"}
+        lines = [f"{len(rows)} important email(s) in the last {days} days:\n"]
+        for row in rows:
+            label = LABEL.get(row["importance"], "MED")
+            lines.append(f"[{label}] {row['from_name']} — \"{row['subject']}\" ({row['date'][:10]})")
+            if row["note"]:
+                lines.append(f"  → {row['note']}")
+        return "\n".join(lines)
+
     def perform_maintenance(self):
         """Run all maintenance tasks."""
         print("[EmailAgent] Running maintenance...")

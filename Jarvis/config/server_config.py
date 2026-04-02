@@ -65,6 +65,9 @@ EMAIL_BATCH_SIZE = 10
 # Safety Engine
 RISK_THRESHOLD_REQUIRE_CONFIRMATION = 4
 
+# TTS (Piper)
+PIPER_MODEL_PATH = Path("/mnt/storage/NAS/Jarvis/piper_voices/en_US-lessac-medium.onnx")
+
 # Logging
 LOG_LEVEL = "INFO"
 LOG_DIR = BASE_DIR / "logs"
@@ -74,6 +77,8 @@ CORS_ORIGINS = [
     "http://localhost:3000",
     "http://10.0.0.58:3000",
     "http://10.0.0.58:5003",
+    "http://10.0.0.58:5002",  # Swarm dashboard
+    "http://10.0.0.58:5000",  # CMD dashboard
 ]
 
 
