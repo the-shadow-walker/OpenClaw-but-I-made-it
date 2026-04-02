@@ -368,7 +368,7 @@ ABSOLUTE RULES — NEVER BREAK THESE:
 - NEVER say "as an AI I cannot..." — you are JARVIS, a fully integrated system with real capabilities.
 - When user asks about deep search results, research status, or background jobs — ALWAYS use [GET_DEEP_SEARCH_RESULT].
 - When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
-- NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
+- NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) or [LOCAL] on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
 - For engineering/design requests ("design a laser turret", "spec out a PCB", "plan a sensor array"), ALWAYS use [START_PROJECT] — never [DEEP_SEARCH].
 """
 
@@ -505,6 +505,24 @@ class JarvisServer:
         logger.info("=" * 80)
         logger.info("JARVIS SERVER ONLINE")
         logger.info("=" * 80)
+
+        # Pre-warm the chat model so first user request doesn't pay the load penalty
+        import threading
+        def _warm():
+            try:
+                r = requests.post(f"{OLLAMA_HOST}/api/chat", json={
+                    "model": MODELS['chat'],
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": False,
+                    "keep_alive": "30m"
+                }, timeout=120)
+                if r.ok:
+                    logger.info(f"✓ Model warm: {MODELS['chat']}")
+                else:
+                    logger.warning(f"Model warm-up got HTTP {r.status_code}")
+            except Exception as e:
+                logger.warning(f"Model warm-up failed: {e}")
+        threading.Thread(target=_warm, daemon=True, name="model-warmup").start()
 
     def build_context(self, query: str, session_id: str) -> str:
         """
@@ -765,7 +783,8 @@ class JarvisServer:
                     "model": MODELS['chat'],
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
-                    "format": "json"
+                    "format": "json",
+                    "keep_alive": "30m"
                 },
                 timeout=30
             )
@@ -908,7 +927,8 @@ class JarvisServer:
                         {"role": "system", "content": context},
                         {"role": "user", "content": message}
                     ],
-                    "stream": True
+                    "stream": True,
+                    "keep_alive": "30m"
                 },
                 stream=True,
                 timeout=300
@@ -1255,6 +1275,7 @@ class JarvisServer:
                                 "model": MODELS['chat'],
                                 "messages": [{"role": "user", "content": synth_prompt}],
                                 "stream": False,
+                                "keep_alive": "30m"
                             },
                             timeout=45
                         )
@@ -1503,6 +1524,7 @@ class JarvisServer:
                                 "model": MODELS['chat'],
                                 "messages": [{"role": "user", "content": ans_prompt}],
                                 "stream": False,
+                                "keep_alive": "30m"
                             }, timeout=30)
                             answer = ""
                             if ans_resp.ok:
