@@ -539,20 +539,36 @@ class EmailAgent:
         return [dict(row) for row in rows]
 
     def get_recent_email_summary(self) -> str:
-        """Get brief summary for context (not full emails)."""
+        """Get brief email highlights for context injection (JARVIS can answer from these directly)."""
         from datetime import datetime, timedelta
 
         cutoff = (datetime.now() - timedelta(days=RECENT_DAYS)).isoformat()
 
-        count = self.conn.execute(
-            """SELECT COUNT(*) FROM email_notes WHERE importance >= 2 AND processed_at > ?""",
+        rows = self.conn.execute(
+            """SELECT from_name, subject, importance, note
+               FROM email_notes
+               WHERE importance >= 2 AND processed_at > ?
+               ORDER BY importance DESC, processed_at DESC
+               LIMIT 5""",
+            (cutoff,),
+        ).fetchall()
+
+        if not rows:
+            return "No recent important emails."
+
+        total = self.conn.execute(
+            "SELECT COUNT(*) FROM email_notes WHERE importance >= 2 AND processed_at > ?",
             (cutoff,),
         ).fetchone()[0]
 
-        if count == 0:
-            return "No recent important emails."
+        LABEL = {3: "HIGH", 2: "MED"}
+        lines = [f"Top {len(rows)} of {total} recent emails (use [READ_RECENT_EMAILS] only if user asks for full list):"]
+        for row in rows:
+            label = LABEL.get(row["importance"], "MED")
+            note = (row["note"] or row["subject"])[:120]
+            lines.append(f"[{label}] {row['from_name']}: {note}")
 
-        return f"{count} recent important email(s) available. Use [READ_RECENT_EMAILS] to see full details."
+        return "\n".join(lines)
 
     def get_email_digest(self, days: int = RECENT_DAYS) -> str:
         """Return compact email digest (subject/from/date/note, NO body) — ~3KB vs 47KB."""

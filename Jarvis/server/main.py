@@ -142,10 +142,18 @@ TOOL CATALOG — what you have access to and when to use each:
    USER PROFILE is pre-loaded in your context. When asked identity questions, read from there directly.
 
 2. EMAIL TOOLS
-   [READ_RECENT_EMAILS]                    — inject last 7 days of important emails
+   [READ_RECENT_EMAILS]                    — fetch and synthesize last 7 days of important emails
    [SEARCH_OLD_EMAILS: query]              — search archived emails (older than 7 days)
    [SEND_EMAIL: to=...|subject=...|body=...] — send an email (write a complete, natural body)
    [DRAFT_EMAIL: to=...|subject=...|body=...] — save as draft instead of sending
+
+   EMAIL BEHAVIOR RULES:
+   - Your context already has the top 5 email highlights under RECENT EMAILS — use those to answer
+     questions about emails WITHOUT calling [READ_RECENT_EMAILS]
+   - Only use [READ_RECENT_EMAILS] when the user explicitly asks to see/read their emails
+   - NEVER use [READ_RECENT_EMAILS] on greetings or general conversation
+   - For specific topics ("what about the Kenya project?") use [SEARCH_OLD_EMAILS: Kenya]
+   - When [READ_RECENT_EMAILS] IS used, its output is a synthesized summary — reference it naturally
 
 3. SWARM (deep research, 1–3 min, async)
    [DEEP_SEARCH: question]                 — submit research job to Swarm 3.0
@@ -312,7 +320,10 @@ Message: Let me pull that up.
 Command: [MEMORY_SHOW_PROJECTS]
 
 User: "Any important emails lately?"
-Message: Let me check those for you.
+Message: You've got a meeting tonight with Jordan at Klahaya at 8pm for the lifeguard interview. Also a CAP membership renewal due April 30th ($39).
+
+User: "Read me my emails" / "Show me all my emails"
+Message: Pulling your full email digest now.
 Command: [READ_RECENT_EMAILS]
 
 User: "Did I get emails about the Kenya project last month?"
@@ -347,7 +358,7 @@ Message: Done. Wiping it from my records.
 Command: [MEMORY_FORGET: old deploy script]
 
 ABSOLUTE RULES — NEVER BREAK THESE:
-- NEVER say "I can't access your emails" — use [READ_RECENT_EMAILS] or [SEARCH_OLD_EMAILS] to get them.
+- NEVER say "I can't access your emails" — the RECENT EMAILS in your context has the key items; use [SEARCH_OLD_EMAILS] for specific topics or [READ_RECENT_EMAILS] only when user explicitly asks for the full list.
 - NEVER say "I don't have access to your files" — you DO. Use the action tags.
 - NEVER say "as an AI I cannot..." — you are JARVIS, a fully integrated system with real capabilities.
 - When user asks about deep search results, research status, or background jobs — ALWAYS use [GET_DEEP_SEARCH_RESULT].
@@ -539,7 +550,7 @@ class JarvisServer:
         session_history = self.sessions.get_history(session_id, limit=10)
         logger.info(f"[DEBUG][Context] Session history: {len(session_history)} messages")
 
-        # Brief email summary (not full emails - use [READ_RECENT_EMAILS] for details)
+        # Top email highlights — JARVIS answers from these directly
         email_summary = ""
         if self.email_agent:
             try:
@@ -554,10 +565,7 @@ class JarvisServer:
         # CURRENT DATE/TIME (so JARVIS knows "today", "now", etc.)
         from datetime import datetime
         now = datetime.now()
-        context_parts.append("CURRENT DATE & TIME:")
-        context_parts.append(f"Date: {now.strftime('%A, %B %d, %Y')}")
-        context_parts.append(f"Time: {now.strftime('%I:%M %p %Z')}")
-        context_parts.append(f"Timestamp: {now.isoformat()}")
+        context_parts.append(f"DATE/TIME: {now.strftime('%A, %B %d, %Y at %I:%M %p')}")
 
         # USER PROFILE section (matches format from Jarvis.py _build_profile_section at line 4307)
         if profile:
@@ -588,27 +596,27 @@ class JarvisServer:
         # RECENT MEMORIES section (vector search results)
         if vector_results:
             context_parts.append("\nRECENT MEMORIES:")
-            for result in vector_results[:3]:
+            for result in vector_results[:2]:
                 text = result.get('text', '')
-                if len(text) > 300:
-                    text = text[:300] + "..."
+                if len(text) > 150:
+                    text = text[:150] + "..."
                 context_parts.append(f"- {text}")
 
         # JOURNAL ENTRIES section (exact text matches)
         if journal_results:
             context_parts.append("\nJOURNAL ENTRIES:")
-            for entry in journal_results[:5]:
+            for entry in journal_results[:3]:
                 # entry is already a formatted string like "[2026-02-17 12:34] text..."
-                context_parts.append(entry[:500] if len(entry) > 500 else entry)
+                context_parts.append(entry[:250] if len(entry) > 250 else entry)
 
         # STORED NOTES section (facts remembered via [REMEMBER] tag)
         try:
             stored_notes = self.facts_db.get_entities(entity_type="note")
             if stored_notes:
                 context_parts.append("\nSTORED FACTS & NOTES:")
-                for note in stored_notes[-10:]:  # Last 10 notes
+                for note in stored_notes[-7:]:  # Last 7 notes
                     details = note.get('details', note.get('name', ''))
-                    context_parts.append(f"- {details[:200]}")
+                    context_parts.append(f"- {details[:120]}")
                 logger.info(f"[DEBUG][Context] Stored notes: {len(stored_notes)}")
         except Exception as e:
             logger.warning(f"Failed to load stored notes: {e}")
@@ -637,7 +645,7 @@ class JarvisServer:
         except Exception as _pe:
             logger.debug(f"Personality context injection failed: {_pe}")
 
-        # EMAIL SUMMARY (brief - use [READ_RECENT_EMAILS] for full details)
+        # EMAIL HIGHLIGHTS (JARVIS answers from these; READ_RECENT_EMAILS only on explicit user request)
         if email_summary:
             context_parts.append("\nRECENT EMAILS:")
             context_parts.append(email_summary)
@@ -654,10 +662,6 @@ class JarvisServer:
                     content = content[:200] + "..."
                 context_parts.append(f"{role}: {content}")
 
-        # Add current datetime
-        now = datetime.now()
-        datetime_info = f"CURRENT TIME: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        context_parts.insert(0, datetime_info)
 
         # Build final context with base prompt
         context = SYSTEM_PROMPT + "\n\n" + "\n".join(context_parts)
@@ -1223,14 +1227,40 @@ class JarvisServer:
             except Exception as e:
                 logger.error(f"[Action] Failed to draft email: {e}")
 
-        # [READ_RECENT_EMAILS]
+        # [READ_RECENT_EMAILS] — synthesize digest via LLM before showing
         if re.search(r'\[READ_RECENT_EMAILS\]', response, re.IGNORECASE):
             if self.email_agent:
                 try:
                     digest = self.email_agent.get_email_digest()
+                    # Synthesize digest into key highlights (don't dump raw list)
+                    synth_result = digest  # fallback
+                    try:
+                        synth_prompt = (
+                            f"Today is {datetime.now().strftime('%A, %B %d, %Y')}. "
+                            f"You are JARVIS. Summarize these emails into 2-4 sentences covering "
+                            f"only the most important action items or upcoming events for Grant. "
+                            f"Be concise and natural — no bullet points, no headers, no lists. "
+                            f"Skip low-priority items.\n\n{digest}"
+                        )
+                        synth_resp = requests.post(
+                            f"{OLLAMA_HOST}/api/chat",
+                            json={
+                                "model": MODELS['chat'],
+                                "messages": [{"role": "user", "content": synth_prompt}],
+                                "stream": False,
+                            },
+                            timeout=45
+                        )
+                        if synth_resp.ok:
+                            content = synth_resp.json().get('message', {}).get('content', '').strip()
+                            content = self._ACTION_TAG_RE.sub('', content).strip()
+                            if content:
+                                synth_result = content
+                    except Exception as se:
+                        logger.warning(f"[Action] Email synthesis failed, using raw digest: {se}")
                     response = re.sub(r'\[READ_RECENT_EMAILS\]', '', response, flags=re.IGNORECASE).strip()
-                    response = (response + '\n\n' + digest).strip()
-                    logger.info("[Action] Injected email digest")
+                    response = (response + '\n\n' + synth_result).strip()
+                    logger.info("[Action] Injected synthesized email digest")
                 except Exception as e:
                     logger.error(f"[Action] Failed to read recent emails: {e}")
 
