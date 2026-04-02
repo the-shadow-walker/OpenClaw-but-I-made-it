@@ -976,6 +976,14 @@ def dashboard():
         return '<h1>dashboard.html not found</h1><p>Deploy server/dashboard.html next to swarm_api_server.py</p>', 404
     return send_file(html_path, mimetype='text/html')
 
+@app.route('/jarvis')
+def jarvis_chat():
+    """Serve the standalone JARVIS chat page."""
+    html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jarvis.html')
+    if not os.path.exists(html_path):
+        return '<h1>jarvis.html not found</h1>', 404
+    return send_file(html_path, mimetype='text/html')
+
 
 # =============================================================================
 # ERROR HANDLERS
