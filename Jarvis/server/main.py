@@ -916,7 +916,7 @@ class JarvisServer:
                 loaded_names = [m['name'] for m in ps.get('models', [])]
                 if MODELS['chat'] not in loaded_names:
                     logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading (displacing competing model)")
-                    yield "⏳ Loading model to GPU...\n\n"
+                    yield "Terribly sorry for the delay, sir. A competing model has taken over the GPU — reloading my model, just one moment...\n\n"
                     requests.post(f"{OLLAMA_HOST}/api/generate", json={
                         "model": MODELS['chat'],
                         "prompt": "",

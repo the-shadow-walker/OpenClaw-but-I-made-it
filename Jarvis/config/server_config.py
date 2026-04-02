@@ -55,7 +55,7 @@ MAX_VECTOR_RESULTS = 3
 JOURNAL_SEARCH_DAYS = 30
 
 # Background Worker
-IDLE_THRESHOLD_SECONDS = 60
+IDLE_THRESHOLD_SECONDS = 1800  # 30 minutes — keep VRAM free for interactive queries
 WORKER_CHECK_INTERVAL = 30
 
 # Email Agent
