@@ -920,7 +920,7 @@ class JarvisServer:
                 loaded_names = [m['name'] for m in ps.get('models', [])]
                 if MODELS['chat'] not in loaded_names:
                     logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading")
-                    yield "Terribly sorry for the delay, sir. A competing model has taken over the GPU — reloading my model, just one moment...\n\n"
+                    yield "\x00SYS\x00Terribly sorry for the delay, sir. A competing model has taken over the GPU — reloading my model, just one moment..."
                     requests.post(f"{OLLAMA_HOST}/api/generate", json={
                         "model": MODELS['chat'],
                         "prompt": "",
@@ -1003,9 +1003,11 @@ class JarvisServer:
                                     stream_done = True
                                 else:
                                     new_end = len(response_text)
-                                    if new_end > msg_streamed:
-                                        yield response_text[msg_streamed:new_end]
-                                        msg_streamed = new_end
+                                    # Hold back 12 chars to avoid yielding partial "\nCommand:" tokens
+                                    safe_end = max(msg_streamed, new_end - 12)
+                                    if safe_end > msg_streamed:
+                                        yield response_text[msg_streamed:safe_end]
+                                        msg_streamed = safe_end
                     except json.JSONDecodeError:
                         continue
 
@@ -1014,6 +1016,17 @@ class JarvisServer:
             logger.error(f"[LLM] {error_msg}")
             yield f"\n\n{error_msg}\n"
             return
+
+        # Flush lookahead buffer — any chars held back during streaming to prevent sentinel leakage
+        if msg_start >= 0 and not stream_done:
+            stops = []
+            p = response_text.find("\nCommand:", msg_start)
+            if p >= 0: stops.append(p)
+            p = response_text.find("\n[CONTEXT]", msg_start)
+            if p >= 0: stops.append(p)
+            flush_end = min(stops) if stops else len(response_text)
+            if flush_end > msg_streamed:
+                yield response_text[msg_streamed:flush_end]
 
         # Parse full response for commands (and llm_message for history/logging)
         llm_message, commands = self._parse_structured_response(response_text)
@@ -1025,15 +1038,12 @@ class JarvisServer:
         # Execute commands and yield tool output
         # For simple conversational queries, suppress shell/agent commands — only allow memory ops.
         if commands and is_simple_query:
-            # Block shell/agent/memory-dump commands on simple conversational queries.
-            # REMEMBER and MEMORY_STORE_PREF are still allowed (storing facts always makes sense).
-            _invoke_tag = re.compile(
-                r'\[(QUICK_CMD|RUN_AGENT|RUN_CHAIN|LOCAL|MEMORY_SHOW(?:_\w+)?|MEMORY_FORGET)[\]:]',
-                re.IGNORECASE
-            )
-            filtered = [c for c in commands if not _invoke_tag.search(c)]
+            # Whitelist only: REMEMBER, MEMORY_STORE_PREF, SEARCH_MEMORY are safe on any query.
+            # Everything else (CMD_STATE, QUICK_CMD, RUN_AGENT, MEMORY_SHOW*, etc.) is blocked.
+            _allowed = re.compile(r'\[(REMEMBER|MEMORY_STORE_PREF|SEARCH_MEMORY):', re.IGNORECASE)
+            filtered = [c for c in commands if _allowed.search(c)]
             if len(filtered) < len(commands):
-                logger.info(f"[Actions] Suppressed {len(commands)-len(filtered)} cmd(s) on simple query")
+                logger.info(f"[Actions] Whitelist suppressed {len(commands)-len(filtered)} cmd(s) on simple query")
             commands = filtered
 
         tool_output = ""
@@ -2060,10 +2070,15 @@ async def chat_endpoint(request: ChatRequest):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
 
-        # Stream response
+        # Stream response — chunks prefixed with \x00SYS\x00 are system notifications
+        # (shown in UI but excluded from TTS)
+        _SYS = "\x00SYS\x00"
         async def generate():
             for chunk in server.chat(request.message, request.session_token):
-                yield json.dumps({"content": chunk}) + "\n"
+                if chunk.startswith(_SYS):
+                    yield json.dumps({"type": "system", "content": chunk[len(_SYS):]}) + "\n"
+                else:
+                    yield json.dumps({"content": chunk}) + "\n"
 
         return StreamingResponse(generate(), media_type="application/x-ndjson")
 
