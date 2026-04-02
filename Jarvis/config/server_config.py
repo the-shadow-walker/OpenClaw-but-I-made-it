@@ -23,7 +23,7 @@ DEEP_SEARCH_URL = "http://10.0.0.58:5002"
 
 # Model Selection
 MODELS = {
-    "chat":      "huihui_ai/phi4-abliterated:latest",
+    "chat":      "mistral:7b",
     "reasoning": "qwen3:30b",
     "coding":    "qwen3-coder:30b"
 }
@@ -66,7 +66,7 @@ EMAIL_BATCH_SIZE = 10
 RISK_THRESHOLD_REQUIRE_CONFIRMATION = 4
 
 # TTS (Piper)
-PIPER_MODEL_PATH = Path("/mnt/storage/NAS/Jarvis/piper_voices/en_US-lessac-medium.onnx")
+PIPER_MODEL_PATH = Path("/mnt/storage/NAS/Jarvis/piper_voices/en_GB-alan-medium.onnx")
 
 # Logging
 LOG_LEVEL = "INFO"
