@@ -1367,7 +1367,12 @@ class JarvisServer:
                     if state:
                         active = state.get('active_jobs', [])
                         queued = state.get('queued_jobs', state.get('queue', []))
-                        lines = [f"\n\n📋 CMD Agent Queue — {len(active)} active, {len(queued)} queued"]
+                        # API may return counts (int) or lists depending on version
+                        active_count = active if isinstance(active, int) else len(active)
+                        queued_count = queued if isinstance(queued, int) else len(queued)
+                        active = active if isinstance(active, list) else []
+                        queued = queued if isinstance(queued, list) else []
+                        lines = [f"\n\n📋 CMD Agent Queue — {active_count} active, {queued_count} queued"]
                         if active:
                             lines.append("Running:")
                             for j in active[:5]:
