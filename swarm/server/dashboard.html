@@ -665,6 +665,20 @@ body {
 
 </div><!-- /workspace -->
 
+</div><!-- /page-tools -->
+
+
+<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
+<div id="page-chat">
+  <div id="jchat-messages"></div>
+  <div id="jchat-status"></div>
+  <div id="jchat-input-row">
+    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
+    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
+    <button id="jchat-send">SEND</button>
+  </div>
+</div>
+
 <script>
 
 /* ── Piper TTS playback ───────────────────────────────────────── */
@@ -1508,19 +1522,5 @@ document.querySelectorAll('.tab-pane').forEach(p => {
 })()
 
 </script>
-</div><!-- /page-tools -->
-
-
-<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
-<div id="page-chat">
-  <div id="jchat-messages"></div>
-  <div id="jchat-status"></div>
-  <div id="jchat-input-row">
-    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
-    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
-    <button id="jchat-send">SEND</button>
-  </div>
-</div>
-
 </body>
 </html>
