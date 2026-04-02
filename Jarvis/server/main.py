@@ -915,8 +915,11 @@ class JarvisServer:
         # Add to session history
         self.sessions.add_to_history(session_id, "user", message)
 
-        # Stream from Ollama
+        # Stream from Ollama — yield Message: content as tokens arrive (don't wait for full response)
         response_text = ""
+        msg_start = -1    # index in response_text where message content begins
+        msg_streamed = 0  # index up to which we've already yielded to client
+        stream_done = False  # True once \nCommand: boundary has been passed
         try:
             logger.info(f"[LLM] Calling Ollama with model: {model}")
             response = requests.post(
@@ -940,7 +943,33 @@ class JarvisServer:
                     try:
                         chunk = json.loads(line)
                         if "message" in chunk and "content" in chunk["message"]:
-                            response_text += chunk["message"]["content"]
+                            token = chunk["message"]["content"]
+                            response_text += token
+
+                            if stream_done:
+                                continue
+
+                            # Detect start of Message: content
+                            if msg_start == -1 and "Message:" in response_text:
+                                idx = response_text.index("Message:") + len("Message:")
+                                while idx < len(response_text) and response_text[idx] in (' ', '\n', '\r'):
+                                    idx += 1
+                                msg_start = idx
+                                msg_streamed = idx
+
+                            # Stream message content in real time
+                            if msg_start >= 0:
+                                cmd_pos = response_text.find("\nCommand:", msg_start)
+                                if cmd_pos >= 0:
+                                    # Yield remaining message up to Command: boundary
+                                    if cmd_pos > msg_streamed:
+                                        yield response_text[msg_streamed:cmd_pos]
+                                    stream_done = True
+                                else:
+                                    new_end = len(response_text)
+                                    if new_end > msg_streamed:
+                                        yield response_text[msg_streamed:new_end]
+                                        msg_streamed = new_end
                     except json.JSONDecodeError:
                         continue
 
@@ -950,11 +979,12 @@ class JarvisServer:
             yield f"\n\n{error_msg}\n"
             return
 
-        # Parse Message:/Command: structured format
+        # Parse full response for commands (and llm_message for history/logging)
         llm_message, commands = self._parse_structured_response(response_text)
 
-        # Yield just the message to the client
-        yield llm_message
+        # If model didn't use Message: format, yield the cleaned message now
+        if msg_start == -1:
+            yield llm_message
 
         # Execute commands and yield tool output
         tool_output = ""
