@@ -75,6 +75,9 @@ LOG_DIR = BASE_DIR / "logs"
 # API Settings
 CORS_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:5002",  # Swarm dashboard via SSH tunnel
+    "http://localhost:5003",
+    "http://localhost:5000",
     "http://10.0.0.58:3000",
     "http://10.0.0.58:5003",
     "http://10.0.0.58:5002",  # Swarm dashboard
