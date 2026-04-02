@@ -587,9 +587,9 @@ class JarvisServer:
         session_history = self.sessions.get_history(session_id, limit=10)
         logger.info(f"[DEBUG][Context] Session history: {len(session_history)} messages")
 
-        # Top email highlights — JARVIS answers from these directly
+        # Top email highlights — skip for simple conversational queries
         email_summary = ""
-        if self.email_agent:
+        if self.email_agent and not is_simple_query:
             try:
                 email_summary = self.email_agent.get_recent_email_summary()
                 logger.info(f"[DEBUG][Context] Email summary: {email_summary[:50]}")
@@ -666,8 +666,6 @@ class JarvisServer:
         if email_summary:
             context_parts.append("\nRECENT EMAILS:")
             context_parts.append(email_summary)
-        else:
-            context_parts.append("\nRECENT EMAILS: None")
 
         # CONVERSATION HISTORY section
         if session_history:
