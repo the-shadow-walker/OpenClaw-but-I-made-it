@@ -1059,22 +1059,15 @@ class JarvisServer:
                 commands.append(c)
 
         if "Message:" not in text:
-            logger.warning("[Parse] No Message: found — stripping tags from raw response")
-            # Promote action tags from the body, deduplicating against what's already captured
-            raw_tags = self._ACTION_TAG_RE.findall(text)
-            seen_set = set(commands)
-            new_tags = []
-            for t in raw_tags:
-                if t not in seen_set:
-                    seen_set.add(t)
-                    new_tags.append(t)
-            if new_tags:
-                logger.info(f"[Parse] Fallback: promoted {len(new_tags)} tag(s): {new_tags}")
-                commands.extend(new_tags)
-            # Strip action tags and any "Command: ..." lines the model added
+            logger.warning("[Parse] No Message: found — stripping tags, NOT promoting to commands")
+            # Do NOT promote bare action tags — executing tags from a malformatted response
+            # causes silent data dumps (e.g. model returns just "[MEMORY_SHOW]" with no message).
+            # Only commands from explicit "Command: ..." lines are executed.
             clean = self._ACTION_TAG_RE.sub('', text)
             clean = re.sub(r'(?m)^Command:\s*.*$', '', clean)
             clean = re.sub(r'\n\n+', '\n\n', clean).strip()
+            if not clean:
+                clean = "Apologies sir, I didn't quite catch that. Could you rephrase?"
             return clean, commands
 
         msg_match = re.search(r'Message:\s*(.*?)(?=\n+Command:|\Z)', text, re.DOTALL)

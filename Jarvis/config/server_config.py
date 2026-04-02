@@ -23,7 +23,7 @@ DEEP_SEARCH_URL = "http://10.0.0.58:5002"
 
 # Model Selection
 MODELS = {
-    "chat":      "qwen2.5:3b",
+    "chat":      "mistral:7b",
     "reasoning": "qwen3:30b",
     "coding":    "qwen3-coder:30b"
 }
