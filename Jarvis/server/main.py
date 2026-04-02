@@ -894,28 +894,23 @@ class JarvisServer:
         if compressed and compress_msg:
             yield compress_msg + "\n\n"
 
-        # Build context — static system prompt (KV cached) + dynamic context (fresh each request)
-        system_prompt, dynamic_context = self.build_context(message, session_id)
+        # Determine if this is a simple conversational query (no deep context needed)
+        _deep_kw = {'remember', 'memory', 'email', 'project', 'search', 'show',
+                    'find', 'what did', 'last time', 'earlier', 'yesterday', 'ago'}
+        is_simple_query = len(message) < 80 and not any(w in message.lower() for w in _deep_kw)
 
-        # Safety check
-        risk_level, risk_explanation = self.safety.assess_risk(message)
-        if risk_level.value >= 4:  # RiskLevel is an enum
-            warning = f"⚠️ {risk_explanation}\n"
-            logger.warning(f"[Safety] High risk detected: {risk_explanation}")
-            yield warning
-
-        # Route to model
+        # Route to model FIRST (fast — just inspects message text)
         routing = self.agent_router.route(message)
         model = self._select_model(routing)
 
-        # Ensure chat model is in VRAM — competing models (Swarm/CMD) frequently displace it.
-        # If not loaded, force-reload now (evicts competing model) rather than silently running on CPU.
+        # VRAM check — do this before slow context building so the apology appears immediately.
+        # Competing models (Swarm/CMD qwen2.5-coder:14b) frequently displace mistral from VRAM.
         if model == MODELS['chat']:
             try:
                 ps = requests.get(f"{OLLAMA_HOST}/api/ps", timeout=3).json()
                 loaded_names = [m['name'] for m in ps.get('models', [])]
                 if MODELS['chat'] not in loaded_names:
-                    logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading (displacing competing model)")
+                    logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading")
                     yield "Terribly sorry for the delay, sir. A competing model has taken over the GPU — reloading my model, just one moment...\n\n"
                     requests.post(f"{OLLAMA_HOST}/api/generate", json={
                         "model": MODELS['chat'],
@@ -927,6 +922,16 @@ class JarvisServer:
                     logger.info(f"[LLM] {MODELS['chat']} loaded to VRAM")
             except Exception as e:
                 logger.warning(f"[LLM] Model warm-check failed: {e}")
+
+        # Build context — static system prompt (KV cached) + dynamic context (fresh each request)
+        system_prompt, dynamic_context = self.build_context(message, session_id)
+
+        # Safety check
+        risk_level, risk_explanation = self.safety.assess_risk(message)
+        if risk_level.value >= 4:  # RiskLevel is an enum
+            warning = f"⚠️ {risk_explanation}\n"
+            logger.warning(f"[Safety] High risk detected: {risk_explanation}")
+            yield warning
 
         # Add to session history
         self.sessions.add_to_history(session_id, "user", message)
@@ -1003,6 +1008,14 @@ class JarvisServer:
             yield llm_message
 
         # Execute commands and yield tool output
+        # For simple conversational queries, suppress shell/agent commands — only allow memory ops.
+        if commands and is_simple_query:
+            _shell_tag = re.compile(r'\[(QUICK_CMD|RUN_AGENT|RUN_CHAIN|LOCAL):', re.IGNORECASE)
+            filtered = [c for c in commands if not _shell_tag.search(c)]
+            if len(filtered) < len(commands):
+                logger.info(f"[Actions] Suppressed {len(commands)-len(filtered)} shell cmd(s) on simple query")
+            commands = filtered
+
         tool_output = ""
         if commands:
             cmd_block = "\n".join(commands)
