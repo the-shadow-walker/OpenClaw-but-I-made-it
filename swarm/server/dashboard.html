@@ -556,7 +556,6 @@ body {
       <select id="chat-service-sel">
         <option value="swarm">Swarm</option>
         <option value="cmd">Execute</option>
-        <option value="jarvis">⯢ JARVIS</option>
       </select>
       <input id="chat-input" placeholder="Ask anything or give a command…" autocomplete="off">
       <button id="chat-submit">↵</button>
@@ -667,6 +666,29 @@ body {
 </div><!-- /workspace -->
 
 <script>
+
+/* ── Piper TTS playback ───────────────────────────────────────── */
+async function playTTS(text) {
+  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
+  const phrase = m ? m[0].trim() : text.slice(0, 200)
+  if (!phrase) return
+  try {
+    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!resp.ok) return
+    const wav = await resp.arrayBuffer()
+    const ctx = new AudioContext()
+    const buf = await ctx.decodeAudioData(wav)
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.connect(ctx.destination)
+    src.start(0)
+  } catch(e) {
+    console.warn('[TTS]', e.message)
+  }
+}
+
 /* ── Config ───────────────────────────────────────────────────── */
 const SWARM_URL = `${location.protocol}//${location.hostname}:5002`
 const CMD_URL    = `${location.protocol}//${location.hostname}:5000`
@@ -1314,7 +1336,6 @@ document.getElementById('chat-submit').addEventListener('click', () => {
   if (!q) return
   document.getElementById('chat-input').value = ''
   if (svc === 'swarm')       submitSwarm(q)
-  else if (svc === 'jarvis') submitJarvis(q)
   else                       submitCmd(q)
 })
 document.getElementById('chat-input').addEventListener('keydown', e => {
@@ -1330,76 +1351,6 @@ document.getElementById('answer-copy-btn').addEventListener('click', () => {
     setTimeout(() => { btn.textContent = 'Copy' }, 1500)
   })
 })
-
-/* ── Piper TTS playback ──────────────────────────────────── */
-async function playTTS(text) {
-  // TTS first sentence only (keep it snappy)
-  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
-  const phrase = m ? m[0].trim() : text.slice(0, 200)
-  if (!phrase) return
-  try {
-    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
-      signal: AbortSignal.timeout(8000)
-    })
-    if (!resp.ok) return
-    const wav = await resp.arrayBuffer()
-    const ctx = new AudioContext()
-    const buf = await ctx.decodeAudioData(wav)
-    const src = ctx.createBufferSource()
-    src.buffer = buf
-    src.connect(ctx.destination)
-    src.start(0)
-  } catch(e) {
-    console.warn('[TTS]', e.message)
-  }
-}
-
-/* ── Submit JARVIS chat ───────────────────────────────── */
-async function submitJarvis(q) {
-  if (!q.trim()) return
-  appendLog('↗ JARVIS: ' + q.slice(0,80), 'log-wave')
-  // Ensure session
-  if (!state.jarvis.session) {
-    try {
-      const s = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
-      if (!s.ok) { appendLog('JARVIS: session failed', 'log-fail'); return }
-      state.jarvis.session = (await s.json()).session_token
-    } catch(e) { appendLog('JARVIS: ' + e.message, 'log-fail'); return }
-  }
-  // Stream response
-  const answerBox = document.getElementById('answer-box')
-  answerBox.innerHTML = ''
-  document.querySelector('[data-tab="answer"]')?.click()
-  try {
-    const r = await fetch(JARVIS_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: q, session_token: state.jarvis.session }),
-      signal: AbortSignal.timeout(300000),
-    })
-    if (!r.ok) { appendLog('JARVIS HTTP ' + r.status, 'log-fail'); return }
-    const reader = r.body.getReader()
-    const dec    = new TextDecoder()
-    let buf = '', full = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
-      const lines = buf.split('
-'); buf = lines.pop()
-      for (const line of lines) {
-        if (!line.trim()) continue
-        try { const c = JSON.parse(line); if (c.content) { full += c.content; answerBox.textContent = full } } catch {}
-      }
-    }
-    state.currentJob.answer = full
-    playTTS(full)
-    document.getElementById('chat-job-badge').textContent = '[ JARVIS ]'
-  } catch(e) {
-    appendLog('JARVIS: ' + (e.name === 'TimeoutError' ? 'timed out' : e.message), 'log-fail')
-    state.jarvis.session = null
-  }
-}
 
 /* ── Escape HTML ──────────────────────────────────────────────── */
 function escHtml(s) {
@@ -1428,20 +1379,17 @@ document.querySelectorAll('.tab-pane').forEach(p => {
 /* ── Top-level page tab switching ───────────────────────────────── */
 (function() {
   const tabs = document.querySelectorAll('.page-tab')
-  const toolsPage = document.getElementById('page-tools')
-  const chatPage  = document.getElementById('page-chat')
-
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
       tabs.forEach(t => t.classList.remove('active'))
       tab.classList.add('active')
       const p = tab.dataset.page
       if (p === 'tools') {
-        toolsPage.classList.add('active')
-        chatPage.classList.remove('active')
+        document.getElementById('page-tools').classList.add('active')
+        document.getElementById('page-chat').classList.remove('active')
       } else {
-        toolsPage.classList.remove('active')
-        chatPage.classList.add('active')
+        document.getElementById('page-tools').classList.remove('active')
+        document.getElementById('page-chat').classList.add('active')
         document.getElementById('jchat-input').focus()
       }
     })
