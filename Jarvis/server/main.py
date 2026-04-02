@@ -367,6 +367,37 @@ User: "yes"
 Message: Done. Wiping it from my records.
 Command: [MEMORY_FORGET: old deploy script]
 
+TOOL EXECUTION POLICY — critical:
+For [QUICK_CMD], [RUN_AGENT], [RUN_CHAIN], [DEEP_SEARCH], [START_PROJECT], [LOCAL]:
+  NEVER execute automatically. Instead, describe what you would do and ask for confirmation.
+  Only include the Command: tag AFTER the user explicitly says yes/go/run it/do it/sure.
+
+  Pattern:
+    User asks about something that needs a tool.
+    Message: I can check X for you — want me to run that?
+    (no Command: line)
+
+    User: "yes" / "go ahead" / "sure"
+    Message: On it.
+    Command: [QUICK_CMD: ...]
+
+For [REMEMBER], [MEMORY_STORE_PREF], [SEARCH_MEMORY]: always execute immediately, no confirmation needed.
+
+Examples:
+User: "What's the disk space on the server?"
+Message: I can check that with a quick command — shall I?
+
+User: "yes"
+Message: Pulling that now.
+Command: [QUICK_CMD: What is the disk space usage on all mounted partitions?]
+
+User: "Research best PETG print settings"
+Message: I can run a deep search on that — it'll take a minute or two. Want me to kick that off?
+
+User: "go for it"
+Message: Starting that research now, sir.
+Command: [DEEP_SEARCH: Best PETG print settings 2024 — temperature, speed, cooling, retraction for dimensional accuracy]
+
 ABSOLUTE RULES — NEVER BREAK THESE:
 - NEVER say "I can't access your emails" — the RECENT EMAILS in your context has the key items; use [SEARCH_OLD_EMAILS] for specific topics or [READ_RECENT_EMAILS] only when user explicitly asks for the full list.
 - NEVER say "I don't have access to your files" — you DO. Use the action tags.
@@ -918,6 +949,7 @@ class JarvisServer:
         _deep_kw = {'remember', 'memory', 'email', 'project', 'search', 'show',
                     'find', 'what did', 'last time', 'earlier', 'yesterday', 'ago'}
         is_simple_query = len(message) < 80 and not any(w in message.lower() for w in _deep_kw)
+        logger.info(f"[Chat] message={message[:80]!r} | len={len(message)} | simple_query={is_simple_query}")
 
         # Route to model FIRST (fast — just inspects message text)
         routing = self.agent_router.route(message)
@@ -1053,8 +1085,11 @@ class JarvisServer:
             # Everything else (CMD_STATE, QUICK_CMD, RUN_AGENT, MEMORY_SHOW*, etc.) is blocked.
             _allowed = re.compile(r'\[(REMEMBER|MEMORY_STORE_PREF|SEARCH_MEMORY):', re.IGNORECASE)
             filtered = [c for c in commands if _allowed.search(c)]
-            if len(filtered) < len(commands):
-                logger.info(f"[Actions] Whitelist suppressed {len(commands)-len(filtered)} cmd(s) on simple query")
+            for c in commands:
+                if not _allowed.search(c):
+                    logger.info(f"[Actions] BLOCKED (simple query whitelist): {c}")
+                else:
+                    logger.info(f"[Actions] ALLOWED (whitelisted): {c}")
             commands = filtered
 
         tool_output = ""
@@ -1104,6 +1139,8 @@ class JarvisServer:
         """
         # Extract Command: lines first (used in both paths), deduplicated
         raw_commands = re.findall(r'(?m)^Command:\s*(.+)$', text)
+        logger.info(f"[Parse] Raw Command: lines from LLM: {raw_commands}")
+        logger.debug(f"[Parse] Raw LLM response (500 chars): {text[:500]!r}")
         seen = set()
         commands = []
         for c in raw_commands:
@@ -1154,7 +1191,11 @@ class JarvisServer:
         # Clean up leftover whitespace
         message = re.sub(r'\n\n+', '\n\n', message).strip()
 
-        logger.info(f"[Parse] message={message[:80]!r}, {len(commands)} command(s)")
+        logger.info(f"[Parse] message={message[:80]!r}")
+        if commands:
+            logger.info(f"[Parse] Commands to execute: {commands}")
+        else:
+            logger.info("[Parse] No commands to execute")
         return message, commands
 
     def _execute_actions(self, response: str) -> str:
