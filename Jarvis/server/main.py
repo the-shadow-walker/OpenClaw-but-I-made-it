@@ -903,6 +903,26 @@ class JarvisServer:
         routing = self.agent_router.route(message)
         model = self._select_model(routing)
 
+        # Ensure chat model is in VRAM — competing models (Swarm/CMD) frequently displace it.
+        # If not loaded, force-reload now (evicts competing model) rather than silently running on CPU.
+        if model == MODELS['chat']:
+            try:
+                ps = requests.get(f"{OLLAMA_HOST}/api/ps", timeout=3).json()
+                loaded_names = [m['name'] for m in ps.get('models', [])]
+                if MODELS['chat'] not in loaded_names:
+                    logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading (displacing competing model)")
+                    yield "⏳ Loading model to GPU...\n\n"
+                    requests.post(f"{OLLAMA_HOST}/api/generate", json={
+                        "model": MODELS['chat'],
+                        "prompt": "",
+                        "keep_alive": "30m",
+                        "num_predict": 1,
+                        "stream": False
+                    }, timeout=60)
+                    logger.info(f"[LLM] {MODELS['chat']} loaded to VRAM")
+            except Exception as e:
+                logger.warning(f"[LLM] Model warm-check failed: {e}")
+
         # Add to session history
         self.sessions.add_to_history(session_id, "user", message)
 
