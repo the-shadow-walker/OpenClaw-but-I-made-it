@@ -1087,6 +1087,102 @@ def search_stream():
 
 
 # =============================================================================
+# ROUTES -- JARVIS Chat API
+# =============================================================================
+# Simple heuristic: questions likely need search, statements/greetings don't.
+_SEARCH_TRIGGERS = re.compile(
+    r'\b(who|what|when|where|why|how|is|are|was|were|does|did|can|will|'
+    r'tell me|explain|define|find|search|look up|latest|current|today|'
+    r'price|weather|news|update)\b|\?',
+    re.IGNORECASE
+)
+
+@app.route('/api/session', methods=['POST'])
+def api_session():
+    """Create a JARVIS session token (stateless — just a UUID for client tracking)."""
+    import uuid
+    return jsonify({'session_token': str(uuid.uuid4())[:16]}), 200
+
+
+@app.route('/api/chat', methods=['POST'])
+def api_chat():
+    """
+    JARVIS chat — searches web for context then streams answer token-by-token.
+    Body: {"message": "...", "session_token": "..."}
+    Streams newline-delimited JSON: {"content": "token"}
+    """
+    data    = request.json or {}
+    message = data.get('message', '').strip()
+    if not message:
+        return jsonify({'error': 'No message'}), 400
+
+    def generate():
+        # ── Decide whether to search ──────────────────────────────────────────
+        needs_search = bool(_SEARCH_TRIGGERS.search(message))
+        context = ""
+
+        if needs_search and _HAS_SEARCH:
+            try:
+                agent = FlexibleSearchAgent(
+                    searxng_url=os.environ.get('SEARXNG_URL', 'http://localhost:8080'),
+                    max_results=3,
+                )
+                results = agent.search(message)
+                if results:
+                    lines = [f"[{i+1}] {r.title}\n{r.snippet}\n{r.url}"
+                             for i, r in enumerate(results)]
+                    context = "Web search results:\n" + "\n\n".join(lines)
+            except Exception:
+                pass  # search failed — answer without context
+
+        # ── Build prompt ──────────────────────────────────────────────────────
+        system_prompt = (
+            "You are JARVIS, a concise and knowledgeable AI assistant. "
+            "When web search results are provided, use them to give accurate, "
+            "up-to-date answers and cite sources as [1], [2] etc. "
+            "Keep answers focused and no longer than necessary."
+        )
+        if context:
+            prompt = f"{context}\n\nUser: {message}\nJARVIS:"
+        else:
+            prompt = f"User: {message}\nJARVIS:"
+
+        # ── Stream LLM response ───────────────────────────────────────────────
+        payload = {
+            "model": "phi4:14b",
+            "prompt": prompt,
+            "system": system_prompt,
+            "stream": True,
+            "keep_alive": 0,
+            "options": {"temperature": 0.5, "num_predict": 1024},
+        }
+        try:
+            resp = _req.post("http://localhost:11434/api/generate",
+                             json=payload, stream=True, timeout=120)
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        d = json.loads(line)
+                        tok = d.get("response", "")
+                        if tok:
+                            yield json.dumps({"content": tok}) + "\n"
+                        if d.get("done"):
+                            break
+                    except Exception:
+                        continue
+        except Exception as e:
+            yield json.dumps({"content": f"\n[Error: {e}]"}) + "\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='application/x-ndjson',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                 'Connection': 'keep-alive'},
+    )
+
+
+# =============================================================================
 # ROUTES -- Dashboard SPA
 # =============================================================================
 

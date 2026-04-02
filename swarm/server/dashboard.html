@@ -743,9 +743,9 @@ body {
 
 <script>
 /* ── Config ───────────────────────────────────────────────────── */
-const SWARM_URL = `${location.protocol}//${location.hostname}:5002`
+const SWARM_URL  = `${location.protocol}//${location.hostname}:5002`
 const CMD_URL    = `${location.protocol}//${location.hostname}:5000`
-const JARVIS_URL = `${location.protocol}//${location.hostname}:5003`
+const JARVIS_URL = SWARM_URL   // /api/session + /api/chat live on swarm server
 const GRID      = 20  // drag snap grid in pixels
 
 /* ── State ────────────────────────────────────────────────────── */
