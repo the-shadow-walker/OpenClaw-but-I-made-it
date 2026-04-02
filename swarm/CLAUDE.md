@@ -147,3 +147,65 @@ All agents communicate through `SharedMemory` (defined in `core/core.py`, extend
 - **Graceful degradation**: Search falls back; computation falls back to simpler methods
 - **No requirements.txt**: Dependencies in `setup.sh`, installed manually
 - **Zero-touch imports**: No existing imports changed; `_paths.py` handles sys.path
+
+---
+
+## Feature Manifest (updated each commit — verify these files exist before committing)
+
+### Orchestration (server/)
+| Feature | File | What it does |
+|---|---|---|
+| OrchestratorV3 | `server/orchestrator_v3.py` | Top-level dispatcher: HYBRID/MATH→ReAct, THEORETICAL→V2_1, ENGINEERING→engineer_mode |
+| OrchestratorV2_1 | `server/orchestrator_v2_1.py` | Legacy orchestrator for THEORETICAL questions; delegated to by V3 |
+| API Server | `server/swarm_api_server.py` | Flask REST API on :5002; /query_async, /query_stream (SSE), /result, /jobs, /logs, /metrics, /dashboard |
+| Dashboard SPA | `server/dashboard.html` | Command Station web UI; phases/SPs/GPU/jobs widgets; zero CDN deps |
+| Project Mode | `server/project_mode.py` | Multi-phase hardware project planner (BOM, safety, firmware) |
+| Project Session | `server/project_session.py` | Stateless HTTP session wrapper for project Q&A; 2h TTL |
+
+### ReAct Solver Pipeline (compute/)
+| Feature | File | What it does |
+|---|---|---|
+| ReactSolver | `compute/react_solver.py` | Per-SP ReAct loop (qwen2.5-coder:14b, MAX_TURNS=15); tool dispatch: run_code/search/rag |
+| Context Anchor | `compute/react_solver.py` | Injects problem given-values box + FORBIDDEN constants at top of every SP system prompt |
+| Locked Results Ledger | `compute/react_solver.py` | `_locked_results` dict: RESULT: lines captured from code, re-injected each turn, never dropped |
+| Force-inject given values | `compute/react_solver.py` | SP.inputs prepended to every code block as `# === GIVEN VALUES ===` constants |
+| Loop detection | `compute/react_solver.py` | Breaks early if 3 consecutive turns have identical-length responses (stuck loop) |
+| [LLMTOK] streaming | `compute/react_solver.py` | Batches tokens into `[LLMTOK]escaped` print lines for live terminal streaming |
+| RAG tool | `compute/rag_tool.py` | ChromaDB wrapper (BAAI/bge-large-en-v1.5); `rag_search(query, domain, n)` |
+
+### Planning (core/)
+| Feature | File | What it does |
+|---|---|---|
+| PlannerV2 | `core/planner_v2.py` | Decomposes question into SolvePlan with dependency-ordered SubProblems |
+| Requirement Shredder (Lock A) | `core/planner_v2.py` | Extracts all distinct requirements before planning; enforces 1:1 SP mapping |
+| Question Classifier | `core/question_classifier.py` | THEORETICAL/MATHEMATICAL/HYBRID/ENGINEERING_DESIGN; CRITICAL RULES prevent numerical→THEORETICAL misclassification |
+| THEORETICAL→HYBRID override | `server/orchestrator_v3.py` | Regex safety net: if question has numeric assignments + compute verbs, upgrades classification |
+
+### Safety Locks (Prometheus)
+| Feature | File | What it does |
+|---|---|---|
+| Lock A: Requirement Shredder | `core/planner_v2.py` | 1:1 SP-to-requirement mapping; warns if planner drops requirements |
+| Lock B: Code Enforcement | `compute/react_solver.py` | FINAL_ANSWER before first run_code → REJECTED; Rule 0 in system prompt |
+| Lock C: Negative Constraint Filter | `server/orchestrator_v3.py` | `_enforce_negative_constraints()`: scans for violations (no_formulas etc), rewrites offending sections |
+| Writer Gag | `server/orchestrator_v3.py` | Writer receives ONLY verified RESULT: lines; never sees question text with numbers |
+| Phase 3C fallback | `server/orchestrator_v3.py` | If constraint rewrite fails/times out, returns original answer untouched |
+
+### Client (run_me.py)
+| Feature | File | What it does |
+|---|---|---|
+| Token streaming (-t / :tokens) | `run_me.py` | `cmd_stream_tokens()`: color-coded live LLM output; THOUGHT=dim, ACTION=purple, RESULT=green |
+| Rich Live panel | `run_me.py` | `_cmd_stream_rich()`: phases/SPs/wave tracker using rich.live.Live |
+| Watch command (:watch) | `run_me.py` | `cmd_watch()`: tail-f style reconnect to running job via disk log polling |
+| Logs command (:logs) | `run_me.py` | Fetch full disk log for any job (tail=N, grep=pat supported) |
+| Result command (:result) | `run_me.py` | Fetch completed job answer; :results alias works too |
+| Disk persistence | `server/swarm_api_server.py` | Final answer written to `swarm_results/<job_id>.log` immediately on completion |
+| /result fallback | `server/swarm_api_server.py` | `get_result()` reads from disk log when job not in memory (survives restarts) |
+
+### Infrastructure
+| Feature | File | What it does |
+|---|---|---|
+| base_agent 600s timeout | `base_agent.py` | requests.post timeout=600 so qwen2.5 has time to load after deepseek unloads |
+| VRAM handoff prints | `server/orchestrator_v3.py` | Prints `🔄 VRAM handoff: phi4→deepseek` at model transitions |
+| _ProgressRouter | `server/swarm_api_server.py` | Captures stdout per-job; routes to SSE queue + disk log |
+| JobAwareExecutor | `server/swarm_api_server.py` | Thread pool that stamps job_id before async tasks (fixes routing for run_in_executor) |
+| /metrics endpoint | `server/swarm_api_server.py` | Returns GPU (nvidia-smi) + CPU/RAM (psutil) JSON for dashboard widget |

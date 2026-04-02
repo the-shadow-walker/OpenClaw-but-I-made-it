@@ -91,9 +91,30 @@ class SolverResult:
     raw_log: str = ""                  # full ReAct transcript (archived)
 
 
+# ── Context anchor (injected at top of system prompt) ─────────────────────────
+
+_CONTEXT_ANCHOR_TEMPLATE = """\
+╔══════════════════════════════════════════════════════════════════════╗
+║  PROBLEM PARAMETER ANCHOR — READ THIS BEFORE ANYTHING ELSE          ║
+║  These are the ONLY numerical values for this problem.              ║
+╠══════════════════════════════════════════════════════════════════════╣
+{anchor_values}
+╠══════════════════════════════════════════════════════════════════════╣
+║  ⛔ FORBIDDEN — DO NOT define or import these in your code:          ║
+║    G  = 6.67e-11  (gravitational constant — NOT in this problem)    ║
+║    M_Earth / M_sun / M_planet / M_body  (no astronomical masses)    ║
+║    R_earth, orbital_radius_earth  (no astronomical distances)       ║
+║    c  = 3e8  (speed of light — NOT in this problem)                 ║
+║  If you use ANY of these without them appearing in INPUTS above,    ║
+║  your answer is WRONG. Re-read the problem and use ONLY the anchor. ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+
+
 # ── System prompt template ────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT_TEMPLATE = """\
+{context_anchor}
 You are an expert scientific problem solver working inside a ReAct loop.
 You MUST follow the exact tool format below — no deviations.
 
@@ -166,7 +187,9 @@ RULES:
    least one code block. If you output FINAL_ANSWER without first using
    run_code, it will be REJECTED and you must try again with code.
 1. Each RESULT line: one variable, one numeric value, one unit (no text).
-2. Code must be complete and self-contained (imports + values inlined).
+2. Code must be complete and self-contained. ALL numerical constants MUST come
+   from the PROBLEM PARAMETER ANCHOR above. NEVER introduce G=6.67e-11, M_Earth,
+   M_planet, astronomical radii, c=3e8, or any constant not in the anchor.
 3. Print each computed result as: print(f"RESULT: var_name = {{value:.6g}} unit")
 4. Never skip the END_INPUT or END_ANSWER marker.
 5. Use SymPy or scipy for solving; numpy for arrays.
@@ -181,6 +204,10 @@ RULES:
    differently, rename variables, or omit any locked result.
 10. NEVER invent a number. If your code did not print it as RESULT:, it does
     not exist. Write STATUS: failed rather than guess.
+11. SCALE SANITY CHECK: Before STATUS: solved, verify computed values are
+    plausible given the input scale. If inputs are O(1)–O(10) and your result
+    is 1e5 or larger, you almost certainly introduced a forbidden constant.
+    Re-run the code with ONLY the anchor values.
 """
 
 
@@ -188,23 +215,14 @@ RULES:
 
 class ReactSolver:
     MAX_TURNS = 15
-    MODEL = "deepseek-r1:14b"
+    # qwen2.5-coder:14b: fast, code-focused, no native think blocks, strong format adherence.
+    # Alternatives: "Qwen3-coder:30b" (better reasoning, 2× slower), "qwq:32b" (best reasoning, 5× slower)
+    MODEL = "qwen2.5-coder:14b"
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn; 2048 tokens @ ~2 tok/s = ~17 min worst case
+    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn
 
-    # ── Thinking controls (experiment by changing these) ──────────────────
-    # NUM_PREDICT: max tokens for the response (with THINKING_ENABLED=False, all tokens
-    #   go to THOUGHT+ACTION content, not hidden reasoning).
-    #   2048 → ~30-90s/turn (enough for THOUGHT + code block + END_INPUT)
-    #   1024 → ~15-45s/turn (may clip very long code blocks)
+    # NUM_PREDICT: max tokens per response. 2048 is enough for THOUGHT + code + END_INPUT.
     NUM_PREDICT: int = 2048
-
-    # THINKING_ENABLED: controls deepseek-r1's native <think> block.
-    #   True  → model pre-reasons in a hidden <think> block before each turn (~2-8 min/turn)
-    #   False → skip <think> entirely; use only our structured THOUGHT: markers (~30s-2 min/turn)
-    #   NOTE: The ReAct THOUGHT blocks we parse already serve as the reasoning scaffold,
-    #   so native thinking is redundant overhead. False is the recommended default.
-    THINKING_ENABLED: bool = False
 
     def __init__(
         self,
@@ -226,6 +244,7 @@ class ReactSolver:
         self._ran_code: bool = False              # Lock B: set True on first run_code
         self._tool_counts: Dict[str, int] = {"run_code": 0, "search": 0, "rag": 0}
         self._locked_results: Dict[str, str] = {}  # Ledger: var → "value unit" (never overwritten once set)
+        self._recent_lens: List[int] = []         # Loop detection: last 3 response lengths
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -236,11 +255,13 @@ class ReactSolver:
         print(f"   Model: {self.MODEL}  |  Max turns: {self.MAX_TURNS}")
         print(f"{'─'*60}")
 
-        # Seed with the sub-problem statement
+        # Seed with the sub-problem statement — repeat given values for emphasis
+        _seed_given = {**(self.plan.given_values if self.plan else {}), **sp.inputs}
+        _seed_given_str = ", ".join(f"{k}={v}" for k, v in _seed_given.items()) or "(see problem)"
         seed_msg = (
             f"Solve {sp.id}: {sp.description}\n"
             f"Domain: {sp.domain}\n"
-            f"Given: {json.dumps(sp.inputs)}\n"
+            f"⚠️  GIVEN VALUES (use ONLY these — no G, no M_Earth): {_seed_given_str}\n"
             f"Expected outputs: {sp.expected_outputs}\n"
             f"Begin your ReAct reasoning now."
         )
@@ -273,6 +294,23 @@ class ReactSolver:
 
             self._log(f"\n[TURN {turn} — ASSISTANT]\n{response}")
             self._history.append({"role": "assistant", "content": response})
+
+            # Loop detection: if last 3 responses are same length (±50 chars) and short,
+            # the model is stuck in a repetitive pattern — break early.
+            self._recent_lens.append(len(response))
+            if len(self._recent_lens) > 3:
+                self._recent_lens.pop(0)
+            if len(self._recent_lens) == 3:
+                _spread = max(self._recent_lens) - min(self._recent_lens)
+                if _spread <= 50 and max(self._recent_lens) <= 1500:
+                    print(f"  ⚡ [{sp.id}] Loop detected (3×~{max(self._recent_lens)} chars) — breaking early")
+                    return SolverResult(
+                        sub_problem_id=sp.id,
+                        status="failed",
+                        turn_count=turn,
+                        raw_log="\n".join(self._log_parts),
+                        verification_note="Loop detected: 3 consecutive identical-length responses",
+                    )
 
             # Search the FULL response first (qwq sometimes puts FINAL_ANSWER
             # inside <think> blocks), then fall back to the stripped version.
@@ -397,12 +435,14 @@ class ReactSolver:
     async def _llm_call(self) -> str:
         """Call {MODEL} via Ollama /api/chat (streaming)."""
         messages = [{"role": "system", "content": self._system}] + self._history
+        # Include "think": False only for deepseek/qwq models (ignored by others)
+        _is_thinker = any(x in self.MODEL for x in ("deepseek", "qwq", "qwen3"))
         payload = {
             "model": self.MODEL,
             "messages": messages,
             "stream": True,   # streaming keeps the connection alive for slow models
             "keep_alive": 600,  # keep loaded between turns — explicit unload after phase
-            "think": self.THINKING_ENABLED,  # False = skip <think> blocks (faster, ~same quality)
+            **( {"think": False} if _is_thinker else {} ),
             "options": {
                 "temperature": 0.6,
                 "num_predict": self.NUM_PREDICT,
@@ -581,7 +621,34 @@ class ReactSolver:
         else:
             ctx_block = "(no pre-fetched research — use search/rag tools as needed)"
 
+        # Build context anchor: plan-level → SP-level → regex-scanned from problem text
+        given_vals: Dict[str, Any] = {}
+        if self.plan and self.plan.given_values:
+            given_vals.update(self.plan.given_values)
+        given_vals.update(sp.inputs)  # SP-level overrides plan-level
+
+        # Also regex-scan the full problem description for "var = numeric" patterns
+        # (catches values the planner missed, e.g. "m = 2 kg", "L = 3 kg·m²/s")
+        _problem_text = self.plan.problem if self.plan else sp.description
+        for m_obj in re.finditer(
+            r'\b([A-Za-z_]\w{0,6})\s*=\s*([\d]+\.?[\d]*(?:e[+-]?\d+)?)',
+            _problem_text
+        ):
+            var, val_str = m_obj.group(1), m_obj.group(2)
+            if var not in given_vals and var not in ("e",):  # skip Euler's e
+                try:
+                    given_vals[var] = float(val_str)
+                except ValueError:
+                    pass
+
+        if given_vals:
+            anchor_lines = "\n".join(f"║  {k} = {v}" for k, v in given_vals.items())
+        else:
+            anchor_lines = "║  (use ONLY values explicitly stated in the problem description)"
+        context_anchor = _CONTEXT_ANCHOR_TEMPLATE.format(anchor_values=anchor_lines)
+
         return _SYSTEM_PROMPT_TEMPLATE.format(
+            context_anchor=context_anchor,
             sp_id=sp.id,
             sp_description=sp.description,
             sp_domain=sp.domain,
