@@ -1120,7 +1120,8 @@ class JarvisServer:
                 r'|SEARCH|QUICK_CMD|CMD_STATE|LOCAL'
                 r'|GET_AGENT_RESULT|GET_DEEP_SEARCH_RESULT'
                 r'|GET_SECURITY_REPORT|GET_SECURITY_ALERTS'
-                r'|READ_RECENT_EMAILS|SEARCH_OLD_EMAILS|MEMORY_SHOW):',
+                r'|READ_RECENT_EMAILS|SEARCH_OLD_EMAILS|MEMORY_SHOW'
+                r')(?::|])',
                 re.IGNORECASE
             )
             filtered = [c for c in commands if _allowed.search(c)]
