@@ -1169,11 +1169,54 @@ class JarvisServer:
                         search_results.append(event)
                     if event.get("type") == "done":
                         break
-                # Append results to tool_output for session history
+                # Summarize results and stream back into the bubble
                 if search_results:
+                    results_ctx = "\n".join(
+                        f"[{i+1}] {r.get('title','')} — {r.get('snippet','')[:250]}\n    URL: {r.get('url','')}"
+                        for i, r in enumerate(search_results)
+                    )
+                    summary_prompt = (
+                        f"The user asked: \"{message}\"\n\n"
+                        f"Live search results for \"{query}\":\n{results_ctx}\n\n"
+                        f"Give a direct 1-3 sentence answer based on these results. "
+                        f"Be specific — use actual numbers, names, dates from the results. "
+                        f"Do not say 'based on the results' or 'according to'. Just answer."
+                    )
+                    summary_tokens = []
+                    try:
+                        sresp = requests.post(
+                            f"{OLLAMA_HOST}/api/chat",
+                            json={
+                                "model": MODELS['chat'],
+                                "messages": [
+                                    {"role": "system", "content": "You are JARVIS. Answer in 1-3 sentences max. Be direct and specific."},
+                                    {"role": "user", "content": summary_prompt}
+                                ],
+                                "stream": True,
+                                "keep_alive": "30m"
+                            },
+                            stream=True, timeout=60
+                        )
+                        if sresp.ok:
+                            yield "\n\n"
+                            for sline in sresp.iter_lines():
+                                if sline:
+                                    try:
+                                        sc = json.loads(sline)
+                                        token = sc.get("message", {}).get("content", "")
+                                        if token:
+                                            summary_tokens.append(token)
+                                            yield token
+                                    except Exception:
+                                        pass
+                    except Exception as se:
+                        logger.warning(f"[Action] Search summary failed: {se}")
+                    # Save results + summary to tool_output for session history
                     tool_output += f"\nSearch '{query}':\n"
                     for r in search_results:
                         tool_output += f"• {r.get('title','')} — {r.get('snippet','')[:120]}\n  {r.get('url','')}\n"
+                    if summary_tokens:
+                        tool_output += "Summary: " + "".join(summary_tokens) + "\n"
             except Exception as e:
                 logger.error(f"[Action] SEARCH error: {e}")
                 yield _TOOL + json.dumps({"status": "search_event", "event": {"type": "error", "backend": "search", "msg": str(e)}})
