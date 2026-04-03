@@ -379,9 +379,14 @@ EXECUTE IMMEDIATELY — no confirmation, no "shall I?", just do it:
   [LOCAL], [REMEMBER], [MEMORY_STORE_PREF], [SEARCH_MEMORY], all [MEMORY_SHOW*] tags.
   User asks → you run the tag in the same response. Period.
 
+EXECUTE IMMEDIATELY (no confirmation) when user explicitly says "use the swarm", "swarm it",
+"swarm this", "swarm:", or similar — treat that as consent:
+  [DEEP_SEARCH: <full detailed query>]
+  [START_PROJECT: <description>]
+
 CONFIRM BEFORE EXECUTING — ask first, only run after explicit yes/go/sure:
   [RUN_AGENT], [RUN_CHAIN]    — multi-step autonomous execution on the server
-  [DEEP_SEARCH], [START_PROJECT] — takes 1-3 minutes
+  [DEEP_SEARCH], [START_PROJECT] — takes 1-3 minutes (UNLESS user already said "use the swarm")
   [SEND_EMAIL]                — irreversible external action
   [MEMORY_FORGET]             — deletes stored knowledge
 
@@ -438,6 +443,7 @@ ABSOLUTE RULES — NEVER BREAK THESE:
 - When the user asks you to do something you have an action tag for, USE THE TAG. Every time. No exceptions.
 - NEVER use CMD tools ([QUICK_CMD], [RUN_AGENT], [RUN_CHAIN]) or [LOCAL] on casual greetings or general conversation ("hey", "what's up", "what's going on", "how are you", etc.) — just respond conversationally.
 - For engineering/design requests ("design a laser turret", "spec out a PCB", "plan a sensor array"), ALWAYS use [START_PROJECT] — never [DEEP_SEARCH].
+- If user says "use the swarm", "swarm it", "swarm:", "run this through swarm", or similar → you MUST use [DEEP_SEARCH: <full detailed query>] immediately. No confirmation. No answering directly. Send the FULL problem statement as the query.
 
 CONTEXT RULES — critical:
 - User messages begin with a [CONTEXT]...[/CONTEXT] block. It is BACKGROUND INFORMATION only.
@@ -756,13 +762,16 @@ class JarvisServer:
             context_parts.append(email_summary)
 
         # CONVERSATION HISTORY section
+        # Tool results (security reports, CMD output etc.) can be long — keep up to 1500 chars
+        # so the LLM can actually see the findings in the next turn.
         if session_history:
             context_parts.append("\nRECENT CONVERSATION:")
             for msg in session_history[-5:]:  # Last 5 turns
                 role = msg.get('role', '').capitalize()
                 content = msg.get('content', '')
-                if len(content) > 200:
-                    content = content[:200] + "..."
+                limit = 1500 if role == 'Assistant' else 400
+                if len(content) > limit:
+                    content = content[:limit] + "..."
                 context_parts.append(f"{role}: {content}")
 
 

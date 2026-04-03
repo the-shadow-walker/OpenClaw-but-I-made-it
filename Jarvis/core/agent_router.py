@@ -79,7 +79,9 @@ class AgentRouter:
                 'search the web', 'find me', 'look into', 'investigate',
                 'comprehensive', 'detailed research', 'market research',
                 'lightest but', 'strongest but', 'most efficient',
-                'bullet proof', 'what are the options', 'alternatives'
+                'bullet proof', 'what are the options', 'alternatives',
+                'use the swarm', 'swarm it', 'swarm this', 'send to swarm',
+                'use swarm', 'run through swarm', 'swarm:'
             ],
             'contexts': ['research', 'web', 'internet', 'search', 'comparison'],
             'priority': 8
@@ -157,7 +159,23 @@ class AgentRouter:
             RoutingDecision with agent selection and parameters
         """
         message_lower = user_message.lower()
-        
+
+        # Hard override: explicit swarm/deep-research request → always DEEP_SEARCH
+        swarm_triggers = ['use the swarm', 'swarm it', 'swarm this', 'send to swarm',
+                          'use swarm', 'run through swarm', 'swarm:']
+        if any(t in message_lower for t in swarm_triggers):
+            return RoutingDecision(
+                primary_agent=AgentType.DEEP_SEARCH,
+                secondary_agents=[AgentType.REASONING],
+                confidence=1.0,
+                reason="Explicit swarm request",
+                async_execution=True,
+                estimated_time="1-5 minutes",
+                prompt_modifications=self._generate_prompt_modifications(
+                    AgentType.DEEP_SEARCH, user_message, context
+                )
+            )
+
         # Score each agent
         scores = {}
         reasons = {}
