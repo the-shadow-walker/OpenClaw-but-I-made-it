@@ -163,7 +163,60 @@ class FlexibleSearchAgent:
         
         print(f"   ⚠️ All backends failed")
         return []
-    
+
+    def search_stream(self, query: str):
+        """
+        Generator — yields status + result dicts as each backend responds.
+
+        Yields dicts with a "type" key:
+          {"type": "status", "backend": "searxng",    "msg": "Trying SearXNG…"}
+          {"type": "result", "index": 0, "title": …,  "url": …, "snippet": …, "source": …}
+          {"type": "error",  "backend": "duckduckgo", "msg": "0 results"}
+          {"type": "done",   "total": N}
+
+        Stops after the first backend that returns ≥1 result (same fallback
+        logic as search()).  Results are yielded one-by-one immediately after
+        the backend HTTP call returns, so the caller can forward them live via
+        SSE without waiting for all results.
+        """
+        backends = []
+        if self.prefer_searxng and self.searxng_url:
+            backends.append(('searxng',    'SearXNG',    self._search_searxng))
+        backends.extend([
+            ('duckduckgo', 'DuckDuckGo', self._search_duckduckgo),
+            ('google',     'Google',     self._search_google),
+        ])
+
+        idx = 0
+        for key, name, func in backends:
+            yield {"type": "status", "backend": key, "msg": f"Trying {name}…"}
+            try:
+                results = func(query)
+            except requests.exceptions.ConnectionError:
+                yield {"type": "error", "backend": key, "msg": "connection refused"}
+                continue
+            except Exception as e:
+                yield {"type": "error", "backend": key, "msg": str(e)}
+                continue
+
+            if not results:
+                yield {"type": "error", "backend": key, "msg": "0 results"}
+                continue
+
+            for r in results[:self.max_results]:
+                yield {
+                    "type":    "result",
+                    "index":   idx,
+                    "title":   r.title,
+                    "url":     r.url,
+                    "snippet": r.snippet,
+                    "source":  r.source,
+                }
+                idx += 1
+            break  # stop on first successful backend
+
+        yield {"type": "done", "total": idx}
+
     def _search_searxng(self, query: str) -> List[SearchResult]:
         """
         Search using SearXNG instance.

@@ -1256,15 +1256,10 @@ def api_search():
                 searxng_url=os.environ.get('SEARXNG_URL', 'http://localhost:8080'),
                 max_results=n,
             )
-            results = agent.search(query)
+            for event in agent.search_stream(query):
+                yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            return
-
-        for i, r in enumerate(results):
-            yield f"data: {json.dumps({'index': i, 'title': r.title, 'url': r.url, 'snippet': r.snippet, 'source': r.source})}\n\n"
-
-        yield f"data: {json.dumps({'done': True, 'total': len(results)})}\n\n"
 
     return Response(
         stream_with_context(generate()),
