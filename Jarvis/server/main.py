@@ -1113,9 +1113,16 @@ class JarvisServer:
         # Execute commands and yield tool output
         # For simple conversational queries, suppress shell/agent commands — only allow memory ops.
         if commands and is_simple_query:
-            # Whitelist only: REMEMBER, MEMORY_STORE_PREF, SEARCH_MEMORY are safe on any query.
-            # Everything else (CMD_STATE, QUICK_CMD, RUN_AGENT, MEMORY_SHOW*, etc.) is blocked.
-            _allowed = re.compile(r'\[(REMEMBER|MEMORY_STORE_PREF|SEARCH_MEMORY):', re.IGNORECASE)
+            # Block only expensive/destructive tools on simple (short) queries.
+            # Safe read-only tools are always allowed even on short messages.
+            _allowed = re.compile(
+                r'\[(REMEMBER|MEMORY_STORE_PREF|SEARCH_MEMORY'
+                r'|SEARCH|QUICK_CMD|CMD_STATE|LOCAL'
+                r'|GET_AGENT_RESULT|GET_DEEP_SEARCH_RESULT'
+                r'|GET_SECURITY_REPORT|GET_SECURITY_ALERTS'
+                r'|READ_RECENT_EMAILS|SEARCH_OLD_EMAILS|MEMORY_SHOW):',
+                re.IGNORECASE
+            )
             filtered = [c for c in commands if _allowed.search(c)]
             for c in commands:
                 if not _allowed.search(c):
@@ -2336,19 +2343,19 @@ async def tts_endpoint(text: str):
 
 @app.get("/api/debug")
 async def debug_endpoint(n: int = 200):
-    """Return recent JARVIS service logs (journalctl -u jarvis).
+    """Return last N lines from the JARVIS log file.
     Usage: curl http://10.0.0.58:5003/api/debug?n=300
     """
     from fastapi.responses import Response as FastAPIResponse
+    log_path = Path(__file__).parent.parent / "logs" / "jarvis.log"
     try:
         result = subprocess.run(
-            ["journalctl", "-u", "jarvis", "-n", str(min(n, 1000)),
-             "--no-pager", "--output=short-precise"],
+            ["tail", "-n", str(min(n, 2000)), str(log_path)],
             capture_output=True, text=True, timeout=10
         )
-        output = result.stdout or result.stderr or "(no logs available)"
+        output = result.stdout or f"(log file empty or missing: {log_path})"
     except Exception as e:
-        output = f"Could not read logs: {e}"
+        output = f"Could not read log: {e}"
     return FastAPIResponse(content=output, media_type="text/plain")
 
 
