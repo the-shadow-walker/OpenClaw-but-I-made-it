@@ -155,12 +155,16 @@ TOOL CATALOG — what you have access to and when to use each:
    - For specific topics ("what about the Kenya project?") use [SEARCH_OLD_EMAILS: Kenya]
    - When [READ_RECENT_EMAILS] IS used, its output is a synthesized summary — reference it naturally
 
-3. SWARM (deep research, 1–3 min, async)
-   [DEEP_SEARCH: question]                 — submit research job to Swarm 3.0
+3. SWARM (web search & deep research)
+   [SEARCH: query]                         — instant web search with live streaming results
+   Results stream back in ~2-5 seconds directly in the chat.
+   EXECUTE IMMEDIATELY — no confirmation needed. Use for: quick facts, current prices,
+   news, definitions, anything you'd Google. This is your default search tool.
+
+   [DEEP_SEARCH: question]                 — in-depth research via Swarm 3.0 (1–3 min, async)
    [GET_DEEP_SEARCH_RESULT]                — fetch most recent Swarm result
    [GET_DEEP_SEARCH_RESULT: job_id]        — fetch specific result by ID
-   USE WHEN: user needs current events, in-depth research, comparisons, technical specs,
-             best practices — anything requiring web search or comprehensive information.
+   USE WHEN: user needs comprehensive research, comparisons, technical deep-dives.
    IMPORTANT: When asked about search results/status, ALWAYS use [GET_DEEP_SEARCH_RESULT].
 
    [START_PROJECT: description]            — start an autonomous engineering design session
@@ -370,7 +374,7 @@ Command: [MEMORY_FORGET: old deploy script]
 TOOL EXECUTION POLICY — critical:
 
 EXECUTE IMMEDIATELY — no confirmation, no "shall I?", just do it:
-  [QUICK_CMD], [CMD_STATE], [GET_AGENT_RESULT], [GET_DEEP_SEARCH_RESULT],
+  [SEARCH], [QUICK_CMD], [CMD_STATE], [GET_AGENT_RESULT], [GET_DEEP_SEARCH_RESULT],
   [GET_SECURITY_REPORT], [GET_SECURITY_ALERTS], [READ_RECENT_EMAILS], [SEARCH_OLD_EMAILS],
   [LOCAL], [REMEMBER], [MEMORY_STORE_PREF], [SEARCH_MEMORY], all [MEMORY_SHOW*] tags.
   User asks → you run the tag in the same response. Period.
@@ -410,6 +414,14 @@ Command: [QUICK_CMD: Is the nginx service currently active and running?]
 User: "Pull up the security audit"
 Message: Fetching the latest SENTINEL report.
 Command: [GET_SECURITY_REPORT]
+
+User: "What's the current price of copper?"
+Message: Looking that up now.
+Command: [SEARCH: current copper price per pound 2025]
+
+User: "What's happening in the news today?"
+Message: Searching now, sir.
+Command: [SEARCH: top news headlines today April 2025]
 
 User: "Research best PETG print settings"
 Message: I can run a deep search on that — it'll take a minute or two. Want me to kick that off?
@@ -1112,15 +1124,60 @@ class JarvisServer:
                     logger.info(f"[Actions] ALLOWED (whitelisted): {c}")
             commands = filtered
 
+        _TOOL = "\x00TOOL\x00"
+        _SEARCH_RE = re.compile(r'^\[SEARCH:\s*(.+)\]$', re.IGNORECASE)
+
+        # Split commands: live-search vs everything else
+        search_cmds = [c for c in commands if _SEARCH_RE.match(c)]
+        other_cmds  = [c for c in commands if not _SEARCH_RE.match(c)]
+
         tool_output = ""
-        if commands:
-            cmd_block = "\n".join(commands)
-            logger.info(f"[Actions] Executing {len(commands)} command(s): {commands}")
-            _TOOL = "\x00TOOL\x00"
-            yield _TOOL + json.dumps({"status": "running", "tags": commands})
+
+        # Execute non-search commands (QUICK_CMD, memory, email, etc.)
+        if other_cmds:
+            cmd_block = "\n".join(other_cmds)
+            logger.info(f"[Actions] Executing {len(other_cmds)} command(s): {other_cmds}")
+            yield _TOOL + json.dumps({"status": "running", "tags": other_cmds})
             raw_output = self._execute_actions(cmd_block)
             tool_output = self._ACTION_TAG_RE.sub('', raw_output).strip()
             yield _TOOL + json.dumps({"status": "done", "content": tool_output})
+
+        # Execute SEARCH commands via Swarm /api/search SSE stream
+        for cmd in search_cmds:
+            m = _SEARCH_RE.match(cmd)
+            query = m.group(1).strip()
+            logger.info(f"[Actions] Live search: {query}")
+            yield _TOOL + json.dumps({"status": "search_start", "query": query})
+            try:
+                resp = requests.get(
+                    f"{DEEP_SEARCH_URL}/api/search",
+                    params={"q": query, "n": 5},
+                    stream=True,
+                    timeout=30
+                )
+                resp.raise_for_status()
+                search_results = []
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+                    if not line.startswith("data:"):
+                        continue
+                    event = json.loads(line[5:])
+                    yield _TOOL + json.dumps({"status": "search_event", "event": event})
+                    if event.get("type") == "result":
+                        search_results.append(event)
+                    if event.get("type") == "done":
+                        break
+                # Append results to tool_output for session history
+                if search_results:
+                    tool_output += f"\nSearch '{query}':\n"
+                    for r in search_results:
+                        tool_output += f"• {r.get('title','')} — {r.get('snippet','')[:120]}\n  {r.get('url','')}\n"
+            except Exception as e:
+                logger.error(f"[Action] SEARCH error: {e}")
+                yield _TOOL + json.dumps({"status": "search_event", "event": {"type": "error", "backend": "search", "msg": str(e)}})
+                yield _TOOL + json.dumps({"status": "done", "content": f"Search failed: {e}"})
 
         # Save clean response to session history
         processed_response = llm_message + ("\n\n" + tool_output if tool_output else "")
@@ -1148,7 +1205,7 @@ class JarvisServer:
         r'|SEND_EMAIL|DRAFT_EMAIL|DEEP_SEARCH|GET_DEEP_SEARCH_RESULT|START_PROJECT'
         r'|RUN_AGENT|RUN_CHAIN|GET_AGENT_RESULT|QUICK_CMD|CMD_STATE'
         r'|GET_SECURITY_REPORT|GET_SECURITY_ALERTS'
-        r'|USE_REASONING|USE_CODING|USE_SEARCH|USE_AGENT|LOCAL)'
+        r'|USE_REASONING|USE_CODING|USE_SEARCH|USE_AGENT|LOCAL|SEARCH)'
         r'(?::[^\]]+)?\])',
         re.IGNORECASE
     )
@@ -2232,6 +2289,24 @@ async def tts_endpoint(text: str):
     loop = asyncio.get_event_loop()
     wav_bytes = await loop.run_in_executor(None, _synthesize)
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.get("/api/debug")
+async def debug_endpoint(n: int = 200):
+    """Return recent JARVIS service logs (journalctl -u jarvis).
+    Usage: curl http://10.0.0.58:5003/api/debug?n=300
+    """
+    from fastapi.responses import Response as FastAPIResponse
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "jarvis", "-n", str(min(n, 1000)),
+             "--no-pager", "--output=short-precise"],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout or result.stderr or "(no logs available)"
+    except Exception as e:
+        output = f"Could not read logs: {e}"
+    return FastAPIResponse(content=output, media_type="text/plain")
 
 
 @app.get("/")
