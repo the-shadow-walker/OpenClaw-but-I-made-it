@@ -761,18 +761,10 @@ class JarvisServer:
             context_parts.append("\nRECENT EMAILS:")
             context_parts.append(email_summary)
 
-        # CONVERSATION HISTORY section
-        # Tool results (security reports, CMD output etc.) can be long — keep up to 1500 chars
-        # so the LLM can actually see the findings in the next turn.
-        if session_history:
-            context_parts.append("\nRECENT CONVERSATION:")
-            for msg in session_history[-5:]:  # Last 5 turns
-                role = msg.get('role', '').capitalize()
-                content = msg.get('content', '')
-                limit = 1500 if role == 'Assistant' else 400
-                if len(content) > limit:
-                    content = content[:limit] + "..."
-                context_parts.append(f"{role}: {content}")
+        # CONVERSATION HISTORY is NOT injected here.
+        # It is passed as proper Ollama user/assistant message turns in chat()
+        # so there is no per-message character truncation and the model natively
+        # understands conversational context.
 
 
         # Return (static_system_prompt, dynamic_context) separately so the caller
@@ -1026,8 +1018,27 @@ class JarvisServer:
             logger.warning(f"[Safety] High risk detected: {risk_explanation}")
             yield warning
 
-        # Add to session history
+        # Retrieve prior conversation turns BEFORE adding the current message,
+        # so the history contains only completed exchanges (not the current query).
+        _is_simple = len(message) < 80 and not any(k in message.lower() for k in [
+            'search', 'email', 'remember', 'project', 'swarm', 'security', 'agent',
+            'memory', 'quick_cmd', 'run', 'deep', 'research'
+        ])
+        _history_limit = 2 if _is_simple else 8
+        prior_history = self.sessions.get_history(session_id, limit=_history_limit)
+
+        # Add current message to session history
         self.sessions.add_to_history(session_id, "user", message)
+
+        # Build Ollama messages array:
+        #   [system] + [prior user/assistant turns — full content, no truncation] + [current user+context]
+        ollama_messages = [{"role": "system", "content": system_prompt}]
+        for h in prior_history:
+            ollama_messages.append({"role": h["role"], "content": h["content"]})
+        ollama_messages.append({
+            "role": "user",
+            "content": f"[CONTEXT]\n{dynamic_context}\n[/CONTEXT]\n\n{message}"
+        })
 
         # Stream from Ollama — yield Message: content as tokens arrive (don't wait for full response)
         response_text = ""
@@ -1035,15 +1046,12 @@ class JarvisServer:
         msg_streamed = 0  # index up to which we've already yielded to client
         stream_done = False  # True once \nCommand: boundary has been passed
         try:
-            logger.info(f"[LLM] Calling Ollama with model: {model}")
+            logger.info(f"[LLM] Calling Ollama with model: {model}, history={len(prior_history)} turns")
             response = requests.post(
                 f"{OLLAMA_HOST}/api/chat",
                 json={
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"[CONTEXT]\n{dynamic_context}\n[/CONTEXT]\n\n{message}"}
-                    ],
+                    "messages": ollama_messages,
                     "stream": True,
                     "keep_alive": "30m"
                 },
