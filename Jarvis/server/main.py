@@ -1133,14 +1133,27 @@ class JarvisServer:
 
         _TOOL = "\x00TOOL\x00"
         _SEARCH_RE = re.compile(r'^\[SEARCH:\s*(.+)\]$', re.IGNORECASE)
+        # All commands that have live SSE streaming — kept out of _execute_actions
+        _STREAM_RE = re.compile(
+            r'^\[(SEARCH|QUICK_CMD|GET_DEEP_SEARCH_RESULT|GET_AGENT_RESULT)(?::[^\]]+)?\]$',
+            re.IGNORECASE
+        )
 
-        # Split commands: live-search vs everything else
-        search_cmds = [c for c in commands if _SEARCH_RE.match(c)]
-        other_cmds  = [c for c in commands if not _SEARCH_RE.match(c)]
+        # Helper: parse an SSE response line iterator into event dicts
+        def _sse_events(resp):
+            for raw in resp.iter_lines():
+                if not raw: continue
+                line = raw.decode() if isinstance(raw, bytes) else raw
+                if not line.startswith("data:"): continue
+                try: yield json.loads(line[5:])
+                except Exception: continue
+
+        stream_cmds = [c for c in commands if _STREAM_RE.match(c)]
+        other_cmds  = [c for c in commands if not _STREAM_RE.match(c)]
 
         tool_output = ""
 
-        # Execute non-search commands (QUICK_CMD, memory, email, etc.)
+        # Execute non-streaming commands (REMEMBER, memory, email, CMD_STATE, etc.)
         if other_cmds:
             cmd_block = "\n".join(other_cmds)
             logger.info(f"[Actions] Executing {len(other_cmds)} command(s): {other_cmds}")
@@ -1149,85 +1162,134 @@ class JarvisServer:
             tool_output = self._ACTION_TAG_RE.sub('', raw_output).strip()
             yield _TOOL + json.dumps({"status": "done", "content": tool_output})
 
-        # Execute SEARCH commands via Swarm /api/search SSE stream
-        for cmd in search_cmds:
-            m = _SEARCH_RE.match(cmd)
-            query = m.group(1).strip()
-            logger.info(f"[Actions] Live search: {query}")
-            yield _TOOL + json.dumps({"status": "search_start", "query": query})
-            try:
-                resp = requests.get(
-                    f"{DEEP_SEARCH_URL}/api/search",
-                    params={"q": query, "n": 5},
-                    stream=True,
-                    timeout=30
-                )
-                resp.raise_for_status()
-                search_results = []
-                for raw_line in resp.iter_lines():
-                    if not raw_line:
-                        continue
-                    line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
-                    if not line.startswith("data:"):
-                        continue
-                    event = json.loads(line[5:])
-                    yield _TOOL + json.dumps({"status": "search_event", "event": event})
-                    if event.get("type") == "result":
-                        search_results.append(event)
-                    if event.get("type") == "done":
-                        break
-                # Summarize results and stream back into the bubble
-                if search_results:
-                    results_ctx = "\n".join(
-                        f"[{i+1}] {r.get('title','')} — {r.get('snippet','')[:250]}\n    URL: {r.get('url','')}"
-                        for i, r in enumerate(search_results)
-                    )
-                    summary_prompt = (
-                        f"The user asked: \"{message}\"\n\n"
-                        f"Live search results for \"{query}\":\n{results_ctx}\n\n"
-                        f"Give a direct 1-3 sentence answer based on these results. "
-                        f"Be specific — use actual numbers, names, dates from the results. "
-                        f"Do not say 'based on the results' or 'according to'. Just answer."
-                    )
-                    summary_tokens = []
-                    try:
-                        sresp = requests.post(
-                            f"{OLLAMA_HOST}/api/chat",
-                            json={
-                                "model": MODELS['chat'],
-                                "messages": [
-                                    {"role": "system", "content": "You are JARVIS. Answer in 1-3 sentences max. Be direct and specific."},
-                                    {"role": "user", "content": summary_prompt}
-                                ],
-                                "stream": True,
-                                "keep_alive": "30m"
-                            },
-                            stream=True, timeout=60
-                        )
-                        if sresp.ok:
-                            yield "\n\n"
-                            for sline in sresp.iter_lines():
-                                if sline:
-                                    try:
-                                        sc = json.loads(sline)
-                                        token = sc.get("message", {}).get("content", "")
-                                        if token:
-                                            summary_tokens.append(token)
-                                            yield token
-                                    except Exception:
-                                        pass
-                    except Exception as se:
-                        logger.warning(f"[Action] Search summary failed: {se}")
-                    # Save results + summary to tool_output for session history
-                    tool_output += f"\nSearch '{query}':\n"
-                    for r in search_results:
-                        tool_output += f"• {r.get('title','')} — {r.get('snippet','')[:120]}\n  {r.get('url','')}\n"
-                    if summary_tokens:
-                        tool_output += "Summary: " + "".join(summary_tokens) + "\n"
-            except Exception as e:
-                logger.error(f"[Action] SEARCH error: {e}")
-                yield _TOOL + json.dumps({"status": "search_event", "event": {"type": "error", "backend": "search", "msg": str(e)}})
-                yield _TOOL + json.dumps({"status": "done", "content": f"Search failed: {e}"})
+        # Execute streaming commands — each dispatched by tag type
+        for cmd in stream_cmds:
+
+            # ── [SEARCH: query] ── Swarm live web search ──────────────────────────
+            if _SEARCH_RE.match(cmd):
+                query = _SEARCH_RE.match(cmd).group(1).strip()
+                logger.info(f"[Actions] Live search: {query}")
+                yield _TOOL + json.dumps({"status": "search_start", "query": query})
+                try:
+                    resp = requests.get(f"{DEEP_SEARCH_URL}/api/search",
+                                        params={"q": query, "n": 5}, stream=True, timeout=30)
+                    resp.raise_for_status()
+                    search_results = []
+                    for event in _sse_events(resp):
+                        yield _TOOL + json.dumps({"status": "search_event", "event": event})
+                        if event.get("type") == "result": search_results.append(event)
+                        if event.get("type") == "done": break
+                    if search_results:
+                        results_ctx = "\n".join(
+                            f"[{i+1}] {r.get('title','')} — {r.get('snippet','')[:250]}\n    URL: {r.get('url','')}"
+                            for i, r in enumerate(search_results))
+                        summary_prompt = (
+                            f"The user asked: \"{message}\"\n\nLive search results for \"{query}\":\n{results_ctx}\n\n"
+                            f"Give a direct 1-3 sentence answer. Be specific — use actual numbers/names/dates. "
+                            f"Do not say 'based on the results' or 'according to'. Just answer.")
+                        summary_tokens = []
+                        try:
+                            sresp = requests.post(f"{OLLAMA_HOST}/api/chat",
+                                json={"model": MODELS['chat'], "stream": True, "keep_alive": "30m",
+                                      "messages": [
+                                          {"role": "system", "content": "You are JARVIS. Answer in 1-3 sentences max."},
+                                          {"role": "user", "content": summary_prompt}]},
+                                stream=True, timeout=60)
+                            if sresp.ok:
+                                yield "\n\n"
+                                for sline in sresp.iter_lines():
+                                    if sline:
+                                        try:
+                                            token = json.loads(sline).get("message", {}).get("content", "")
+                                            if token: summary_tokens.append(token); yield token
+                                        except Exception: pass
+                        except Exception as se:
+                            logger.warning(f"[Action] Search summary failed: {se}")
+                        tool_output += f"\nSearch '{query}':\n"
+                        for r in search_results:
+                            tool_output += f"• {r.get('title','')} — {r.get('snippet','')[:120]}\n  {r.get('url','')}\n"
+                        if summary_tokens: tool_output += "Summary: " + "".join(summary_tokens) + "\n"
+                except Exception as e:
+                    logger.error(f"[Action] SEARCH error: {e}")
+                    yield _TOOL + json.dumps({"status": "search_event", "event": {"type": "error", "backend": "search", "msg": str(e)}})
+
+            # ── [QUICK_CMD: question] ── CMD agent streaming terminal ─────────────
+            elif re.match(r'^\[QUICK_CMD:', cmd, re.IGNORECASE):
+                m2 = re.match(r'^\[QUICK_CMD:\s*(.+)\]$', cmd, re.IGNORECASE)
+                if not m2: continue
+                question = m2.group(1).strip()
+                logger.info(f"[Actions] QUICK_CMD stream: {question}")
+                yield _TOOL + json.dumps({"status": "cmd_start", "question": question})
+                try:
+                    resp = requests.post(f"{OLLAMA_CMD_URL}/api/v1/quick/stream",
+                                         json={"question": question}, stream=True, timeout=20)
+                    resp.raise_for_status()
+                    cmd_lines = []
+                    for event in _sse_events(resp):
+                        yield _TOOL + json.dumps({"status": "cmd_event", "event": event})
+                        if event.get("type") == "output": cmd_lines.append(event.get("data", ""))
+                        if event.get("type") in ("done", "error"): break
+                    tool_output += "\n" + "".join(cmd_lines)
+                except Exception as e:
+                    logger.error(f"[Action] QUICK_CMD stream error: {e}")
+                    yield _TOOL + json.dumps({"status": "cmd_event", "event": {"type": "error", "msg": str(e)}})
+
+            # ── [GET_DEEP_SEARCH_RESULT] ── Swarm research result stream ──────────
+            elif re.match(r'^\[GET_DEEP_SEARCH_RESULT', cmd, re.IGNORECASE):
+                m2 = re.match(r'^\[GET_DEEP_SEARCH_RESULT(?::\s*([^\]]+))?\]$', cmd, re.IGNORECASE)
+                job_id = m2.group(1).strip() if (m2 and m2.group(1)) else None
+                if not job_id:
+                    job_files = sorted(TASKS_DIR.glob("deep_search_*.json"),
+                                       key=lambda p: p.stat().st_mtime, reverse=True)
+                    if job_files:
+                        job_id = json.loads(job_files[0].read_text()).get('job_id')
+                if not job_id:
+                    yield _TOOL + json.dumps({"status": "done", "content": "No deep search jobs found."})
+                    continue
+                logger.info(f"[Actions] Streaming deep search result: {job_id}")
+                yield _TOOL + json.dumps({"status": "research_start", "job_id": job_id})
+                try:
+                    resp = requests.get(f"{DEEP_SEARCH_URL}/api/result/{job_id}/stream",
+                                        stream=True, timeout=15)
+                    resp.raise_for_status()
+                    chunks = []
+                    for event in _sse_events(resp):
+                        yield _TOOL + json.dumps({"status": "research_event", "event": event})
+                        if event.get("type") == "chunk": chunks.append(event.get("data", ""))
+                        if event.get("type") in ("done", "error", "status"): break
+                    full_answer = "".join(chunks)
+                    if full_answer: tool_output += f"\nDeep search result:\n{full_answer[:500]}...\n"
+                except Exception as e:
+                    logger.error(f"[Action] GET_DEEP_SEARCH_RESULT stream error: {e}")
+                    yield _TOOL + json.dumps({"status": "research_event", "event": {"type": "error", "msg": str(e)}})
+
+            # ── [GET_AGENT_RESULT] ── CMD agent job stream ────────────────────────
+            elif re.match(r'^\[GET_AGENT_RESULT', cmd, re.IGNORECASE):
+                m2 = re.match(r'^\[GET_AGENT_RESULT(?::\s*([^\]]+))?\]$', cmd, re.IGNORECASE)
+                job_id = m2.group(1).strip() if (m2 and m2.group(1)) else None
+                if not job_id:
+                    job_files = sorted(TASKS_DIR.glob("agent_job_*.json"),
+                                       key=lambda p: p.stat().st_mtime, reverse=True)
+                    if job_files:
+                        job_id = json.loads(job_files[0].read_text()).get('job_id')
+                if not job_id:
+                    yield _TOOL + json.dumps({"status": "done", "content": "No agent jobs found."})
+                    continue
+                logger.info(f"[Actions] Streaming agent result: {job_id}")
+                yield _TOOL + json.dumps({"status": "agent_start", "job_id": job_id})
+                try:
+                    resp = requests.get(f"{OLLAMA_CMD_URL}/api/v1/jobs/{job_id}/stream",
+                                        stream=True, timeout=300)
+                    resp.raise_for_status()
+                    result_text = ""
+                    for event in _sse_events(resp):
+                        yield _TOOL + json.dumps({"status": "agent_event", "event": event})
+                        if event.get("type") == "result": result_text = event.get("content", "")
+                        if event.get("type") in ("done", "complete", "error"): break
+                    if result_text: tool_output += f"\nAgent result:\n{result_text}\n"
+                except Exception as e:
+                    logger.error(f"[Action] GET_AGENT_RESULT stream error: {e}")
+                    yield _TOOL + json.dumps({"status": "agent_event", "event": {"type": "error", "msg": str(e)}})
 
         # Save clean response to session history
         processed_response = llm_message + ("\n\n" + tool_output if tool_output else "")
