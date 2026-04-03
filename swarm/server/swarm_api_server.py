@@ -523,6 +523,71 @@ def get_result(job_id: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/result/<job_id>/stream', methods=['GET'])
+def stream_result(job_id: str):
+    """
+    SSE stream of a completed deep-research result.
+
+    If still processing: emits one status event and closes — caller should retry.
+    If done: streams answer in paragraph chunks then emits done.
+
+    Events:
+      {"type": "status", "msg": "still processing"}
+      {"type": "chunk",  "data": "## Overview\\nCopper prices..."}
+      {"type": "done",   "total_chars": 4821}
+      {"type": "error",  "msg": "job not found"}
+    """
+    def generate():
+        job = job_manager.get_job(job_id)
+
+        if job is not None:
+            if job['status'] not in ('completed', 'failed'):
+                yield f"data: {json.dumps({'type': 'status', 'msg': 'still processing'})}\n\n"
+                return
+            if job['status'] == 'failed':
+                yield f"data: {json.dumps({'type': 'error', 'msg': job.get('error', 'job failed')})}\n\n"
+                return
+            answer = job.get('answer') or ''
+        else:
+            # fall back to disk log — survives service restarts
+            log_path = Config.RESULTS_DIR / f"{job_id}.log"
+            if not log_path.exists():
+                yield f"data: {json.dumps({'type': 'error', 'msg': 'job not found'})}\n\n"
+                return
+            text = log_path.read_text(errors='replace')
+            answer = None
+            if 'FINAL ANSWER' in text:
+                parts = text.split('=' * 70)
+                for i, p in enumerate(parts):
+                    if 'FINAL ANSWER' in p and i + 1 < len(parts):
+                        answer = parts[i + 1].strip()
+                        break
+            if not answer:
+                # log exists but no FINAL ANSWER block yet — still running
+                yield f"data: {json.dumps({'type': 'status', 'msg': 'still processing'})}\n\n"
+                return
+
+        if not answer:
+            yield f"data: {json.dumps({'type': 'error', 'msg': 'no answer available'})}\n\n"
+            return
+
+        # stream in paragraph-sized chunks so markdown renders progressively
+        total = 0
+        for para in answer.split('\n\n'):
+            chunk = para + '\n\n'
+            yield f"data: {json.dumps({'type': 'chunk', 'data': chunk})}\n\n"
+            total += len(chunk)
+
+        yield f"data: {json.dumps({'type': 'done', 'total_chars': total})}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+                 'Connection': 'keep-alive'},
+    )
+
+
 # =============================================================================
 # ROUTES -- Query
 # =============================================================================
