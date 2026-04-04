@@ -193,10 +193,9 @@ class OrchestratorV3:
             return await self._delegate_v2(question)
 
         except Exception as e:
+            import traceback as _tb
             print(f"\n❌ OrchestratorV3 error: {e}")
-            if self.debug:
-                import traceback
-                traceback.print_exc()
+            _tb.print_exc()   # always print full traceback so we can diagnose
             # For MATHEMATICAL/HYBRID questions do NOT fall back to V2_1 — it will
             # hallucinate convincing-looking but wrong numbers.  Return an honest
             # failure so the user knows to retry rather than trust fabricated output.
@@ -299,7 +298,9 @@ class OrchestratorV3:
 
             # Inject outputs from previous waves into inputs for this wave
             for sp_id in wave:
-                sp = sp_map[sp_id]
+                sp = sp_map.get(sp_id)
+                if sp is None:
+                    continue
                 for dep_id in sp.depends_on:
                     dep_result = solver_results.get(dep_id)
                     if dep_result and dep_result.results:
@@ -309,8 +310,12 @@ class OrchestratorV3:
 
             # Run this wave in parallel
             tasks = []
+            task_sp_ids = []
             for sp_id in wave:
-                sp = sp_map[sp_id]
+                sp = sp_map.get(sp_id)
+                if sp is None:
+                    print(f"  ⚠️  Skipping unknown SP id '{sp_id}' (not in plan)")
+                    continue
                 ctx = research_contexts.get(sp_id, "")
                 if _HAS_REACT:
                     solver = ReactSolver(
@@ -322,8 +327,20 @@ class OrchestratorV3:
                     tasks.append(solver.solve())
                 else:
                     tasks.append(self._stub_solve(sp))
+                task_sp_ids.append(sp_id)
 
-            wave_results = await asyncio.gather(*tasks)
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            wave_results = []
+            for sp_id, res in zip(task_sp_ids, raw_results):
+                if isinstance(res, Exception):
+                    print(f"  ⚠️  SP '{sp_id}' raised exception: {res}")
+                    from react_solver import SolverResult as _SR
+                    wave_results.append(_SR(
+                        sub_problem_id=sp_id, status="failed",
+                        verification_note=str(res),
+                    ))
+                else:
+                    wave_results.append(res)
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result
 
@@ -413,13 +430,17 @@ class OrchestratorV3:
                 and all(dep in completed for dep in sp_map[sp_id].depends_on)
             ]
             if not wave:
-                # Break cycles — just dump everything left
-                wave = remaining[:]
+                # Break cycles — dump remaining, but only IDs that exist in sp_map.
+                # Stray IDs (e.g. "result_R5") from LLM hallucination would cause
+                # KeyError when sp_map[sp_id] is accessed in the wave executor.
+                wave = [x for x in remaining if x in sp_map]
+                if not wave:
+                    break   # truly nothing runnable — stop rather than spin
             waves.append(wave)
             completed.update(wave)
             remaining = [sp_id for sp_id in remaining if sp_id not in completed]
 
-        return waves if waves else [plan.dependency_order]
+        return waves if waves else [[sp.id for sp in plan.sub_problems]]
 
     # ── Targeted research ─────────────────────────────────────────────────────
 
