@@ -132,6 +132,7 @@ class OrchestratorV3:
         """Answer any question. Drop-in interface for OrchestratorV2_1."""
         self.status = status
         t0 = datetime.now()
+        _qtype_val: str = "unknown"   # track before try so except can read it
 
         print("\n" + "="*70)
         print("🚀 SWARM 3.1 — OrchestratorV3")
@@ -148,6 +149,7 @@ class OrchestratorV3:
                 self.status.set_phase(1, "Classification")
             classification = await self._classify(question)
             qtype = classification.question_type if classification else None
+            _qtype_val = qtype.value if qtype else "unknown"
             print(f"  → {qtype.value.upper() if qtype else 'UNKNOWN'} "
                   f"({time.time()-t_classify:.1f}s)")
 
@@ -195,9 +197,21 @@ class OrchestratorV3:
             if self.debug:
                 import traceback
                 traceback.print_exc()
-            # Last-resort fallback
+            # For MATHEMATICAL/HYBRID questions do NOT fall back to V2_1 — it will
+            # hallucinate convincing-looking but wrong numbers.  Return an honest
+            # failure so the user knows to retry rather than trust fabricated output.
+            if _qtype_val in ("mathematical", "hybrid"):
+                print("⛔  Refusing V2_1 fallback for math question — returning failure")
+                return (
+                    "⚠️ The ReAct solver encountered an error and could not compute "
+                    "a verified answer for this mathematical question.\n\n"
+                    f"Error: {e}\n\n"
+                    "Please retry — transient LLM timeouts or planning failures are "
+                    "common on first attempt."
+                )
+            # Theoretical / unknown → V2_1 is safe (no math to hallucinate)
             if _HAS_V2:
-                print("↩️  Falling back to V2_1 due to error")
+                print("↩️  Falling back to V2_1 (non-math question)")
                 return await self._delegate_v2(question)
             return f"Unable to answer: {e}"
 

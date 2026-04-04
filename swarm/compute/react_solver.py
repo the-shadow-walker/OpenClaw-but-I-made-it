@@ -236,9 +236,9 @@ class ReactSolver:
     MAX_TURNS = 15
     # qwen2.5-coder:14b: fast, code-focused, no native think blocks, strong format adherence.
     # Alternatives: "Qwen3-coder:30b" (better reasoning, 2× slower), "qwq:32b" (best reasoning, 5× slower)
-    MODEL = "qwen2.5-coder:14b"
+    MODEL = "qwq:32b"
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn
+    LLM_TIMEOUT = 1800  # seconds — 30 min cap per turn (qwq generates long think blocks)
 
     # NUM_PREDICT: max tokens per response. 2048 is enough for THOUGHT + code + END_INPUT.
     NUM_PREDICT: int = 2048
