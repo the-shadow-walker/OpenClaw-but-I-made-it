@@ -208,6 +208,25 @@ RULES:
     plausible given the input scale. If inputs are O(1)–O(10) and your result
     is 1e5 or larger, you almost certainly introduced a forbidden constant.
     Re-run the code with ONLY the anchor values.
+12. EQUATION SOLVING STRATEGY: sympy.solve() often returns [] or only complex
+    roots for polynomials degree ≥ 3 or transcendental equations — do NOT give
+    up when it returns empty. ALWAYS follow this sequence:
+      (a) Try sympy.solve(expr, var) — if real positive roots found, done.
+      (b) If empty/complex: switch to scipy.optimize.brentq(f, a, b) where f
+          is a plain Python lambda and [a, b] is a bracket you confirm has
+          opposite signs. Example bracket search:
+            import numpy as np
+            xs = np.logspace(-2, 2, 500)
+            sign_changes = np.where(np.diff(np.sign([f(x) for x in xs])))[0]
+            a, b = xs[sign_changes[0]], xs[sign_changes[0]+1]
+            r0 = scipy.optimize.brentq(f, a, b)
+      (c) Prefer brentq over fsolve — it is guaranteed to converge in a bracket.
+    DERIVATIVE SIGN CHECK: for V(r) = A/r^n, dV/dr = -nA/r^(n+1). Verify
+    signs before solving: d/dr(-5/r) = +5/r², d/dr(3r²) = 6r.
+13. NEVER write placeholder syntax like <value_from_R3> or {result_R5} in
+    code. If a required value is not in the PROBLEM PARAMETER ANCHOR, use
+    1.0 as a stand-in, output STATUS: partial, and name the missing dependency
+    in your VERIFICATION line. Do not produce syntactically invalid code.
 """
 
 
