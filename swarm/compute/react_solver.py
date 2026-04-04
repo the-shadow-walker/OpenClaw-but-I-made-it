@@ -223,7 +223,7 @@ RULES:
       (c) Prefer brentq over fsolve — it is guaranteed to converge in a bracket.
     DERIVATIVE SIGN CHECK: for V(r) = A/r^n, dV/dr = -nA/r^(n+1). Verify
     signs before solving: d/dr(-5/r) = +5/r², d/dr(3r²) = 6r.
-13. NEVER write placeholder syntax like <value_from_R3> or {result_R5} in
+13. NEVER write placeholder syntax like <value_from_R3> or {{result_R5}} in
     code. If a required value is not in the PROBLEM PARAMETER ANCHOR, use
     1.0 as a stand-in, output STATUS: partial, and name the missing dependency
     in your VERIFICATION line. Do not produce syntactically invalid code.
