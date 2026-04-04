@@ -227,6 +227,21 @@ RULES:
     code. If a required value is not in the PROBLEM PARAMETER ANCHOR, use
     1.0 as a stand-in, output STATUS: partial, and name the missing dependency
     in your VERIFICATION line. Do not produce syntactically invalid code.
+14. ON CODE ERROR: When OBSERVATION reports a code failure, do NOT rewrite the
+    entire script. Instead:
+    (a) Read the error line number and message carefully.
+    (b) Isolate the ONE failing expression or function call.
+    (c) Produce a new run_code block with ONLY that section corrected.
+    (d) Keep all GIVEN VALUES, imports, constants, and working sections verbatim.
+    Rewrites from scratch waste turns and lose verified intermediate results.
+15. VERIFICATION SIMULATION (for physics/mechanics/orbital problems):
+    After solving analytically, add a brief validation block:
+      - 50-100 step numerical simulation (Euler or scipy.integrate.solve_ivp)
+      - Compare simulation output to analytical result
+      - If disagreement > 1%: your formula has an error — debug before finalizing
+    Print: VERIFICATION: analytical=X, simulation=Y, error=Z%
+    This is MANDATORY for any result involving differential equations,
+    circular motion, stability analysis, or energy conservation.
 """
 
 
@@ -234,11 +249,11 @@ RULES:
 
 class ReactSolver:
     MAX_TURNS = 15
-    # qwen2.5-coder:14b: fast, code-focused, no native think blocks, strong format adherence.
-    # Alternatives: "Qwen3-coder:30b" (better reasoning, 2× slower), "qwq:32b" (best reasoning, 5× slower)
-    MODEL = "qwq:32b"
+    # qwen2.5-coder:32b: fast, code-focused, no think loops, strong format adherence.
+    # Alternatives: "qwen2.5-coder:14b" (3× faster, weaker), "qwq:32b" (best reasoning, 5× slower)
+    MODEL = "qwen2.5-coder:32b"
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    LLM_TIMEOUT = 1800  # seconds — 30 min cap per turn (qwq generates long think blocks)
+    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn (no think loops)
 
     # NUM_PREDICT: max tokens per response. 2048 is enough for THOUGHT + code + END_INPUT.
     NUM_PREDICT: int = 2048
@@ -553,7 +568,7 @@ class ReactSolver:
 
         print("    [run_code]", end=" ", flush=True)
         try:
-            result = await EquationExecutor.execute(code, given_values={}, timeout=90)
+            result = await EquationExecutor.execute(code, given_values={}, timeout=300)
             self._ran_code = True   # Lock B: any execution attempt satisfies Rule 0
             if result.success:
                 print(f"OK ({len(result.output)} chars)")
@@ -567,7 +582,17 @@ class ReactSolver:
                 return result.output[:4000] or "(no output)"
             else:
                 print(f"FAILED")
-                return f"EXECUTION ERROR:\n{result.error}\n\nOUTPUT:\n{result.output[:2000]}"
+                lineno_m = re.search(r'line (\d+)', result.error or "")
+                lineno_hint = lineno_m.group(1) if lineno_m else "?"
+                obs = (
+                    f"CODE EXECUTION FAILED.\n"
+                    f"Error (line {lineno_hint}):\n{(result.error or '')[:1500]}\n\n"
+                    f"STDOUT before crash:\n{(result.output or '')[:500]}\n\n"
+                    f"⚠️  FIX INSTRUCTIONS: Identify the SINGLE failing line/expression. "
+                    f"Keep all imports, GIVEN VALUES block, and working code unchanged. "
+                    f"Do NOT rewrite the entire script. Produce a corrected run_code block with the minimal fix."
+                )
+                return obs
         except Exception as e:
             print(f"EXC: {e}")
             return f"EXCEPTION running code: {e}"

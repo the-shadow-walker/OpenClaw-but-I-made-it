@@ -296,17 +296,40 @@ class OrchestratorV3:
         for wave_idx, wave in enumerate(waves):
             print(f"\n  Wave {wave_idx+1}/{len(waves)}: {wave}  │ {_elapsed()}")
 
-            # Inject outputs from previous waves into inputs for this wave
+            # ── Build global manifest from ALL solved SPs so far ────────────────
+            global_manifest: Dict[str, str] = {}  # var → "value unit"
+            for prior_id, prior_res in solver_results.items():
+                if prior_res.status == "solved":
+                    if getattr(prior_res, "results_with_units", None):
+                        for var, meta in prior_res.results_with_units.items():
+                            v = meta.get("value", "")
+                            u = meta.get("unit", "")
+                            global_manifest[var] = f"{v} {u}".strip()
+                    elif prior_res.results:
+                        for var, val in prior_res.results.items():
+                            global_manifest[var] = str(val)
+
+            # ── Build manifest text block and inject numeric values into SP inputs ─
+            manifest_block = ""
+            if global_manifest:
+                mlines = [f"  {k} = {v}" for k, v in global_manifest.items()]
+                manifest_block = (
+                    "\n🔒 COMPUTED FACTS FROM PRIOR STEPS — USE THESE DIRECTLY, DO NOT RECOMPUTE:\n"
+                    + "\n".join(mlines) + "\n"
+                )
+                print(f"  📋 Manifest: {len(global_manifest)} computed value(s) → all wave SPs")
+
             for sp_id in wave:
                 sp = sp_map.get(sp_id)
                 if sp is None:
                     continue
-                for dep_id in sp.depends_on:
-                    dep_result = solver_results.get(dep_id)
-                    if dep_result and dep_result.results:
-                        for var, val in dep_result.results.items():
-                            if var not in sp.inputs:
-                                sp.inputs[var] = val
+                # Inject numeric values into sp.inputs (for code constant injection)
+                for var, val_str in global_manifest.items():
+                    if var not in sp.inputs:
+                        try:
+                            sp.inputs[var] = float(val_str.split()[0])
+                        except (ValueError, IndexError):
+                            pass  # non-numeric (string results) — skip
 
             # Run this wave in parallel
             tasks = []
@@ -317,11 +340,12 @@ class OrchestratorV3:
                     print(f"  ⚠️  Skipping unknown SP id '{sp_id}' (not in plan)")
                     continue
                 ctx = research_contexts.get(sp_id, "")
+                ctx_with_manifest = manifest_block + (ctx or "")
                 if _HAS_REACT:
                     solver = ReactSolver(
                         sub_problem=sp,
                         plan=plan,
-                        research_context=ctx,
+                        research_context=ctx_with_manifest,
                         searxng_url=self.searxng_url,
                     )
                     tasks.append(solver.solve())
@@ -356,7 +380,7 @@ class OrchestratorV3:
                     retry_solver = ReactSolver(
                         sub_problem=sp,
                         plan=plan,
-                        research_context=research_contexts.get(sp_id, ""),
+                        research_context=manifest_block + research_contexts.get(sp_id, ""),
                         searxng_url=self.searxng_url,
                     )
                     # Inject a mandatory-code message at the top of history
@@ -658,8 +682,8 @@ RULES — you MUST follow these:
         Scan answer for violations of negative constraints extracted from
         requirements (e.g. no_formulas, no_math).  Calls phi4:14b to detect
         violations, then qwen2.5:14b to rewrite only the offending sections.
-        Returns the answer unchanged if no constraints are defined or no
-        violations are found.
+        Retries rewrite up to 2 times with a rescan between attempts.
+        Prepends a warning if both attempts fail.
         """
         if not requirements:
             print("  → OK (no requirements)")
@@ -681,6 +705,43 @@ RULES — you MUST follow these:
             for rid, c, rtxt in constraint_items
         )
 
+        # Initial violation scan
+        check_result = await self._scan_violations_text(answer, constraints_str)
+
+        if "VIOLATION:" not in check_result:
+            print("  → OK (no violations detected)")
+            return answer
+
+        violations = re.findall(r"VIOLATION:", check_result)
+        print(f"  → {len(violations)} violation(s) found — rewriting (up to 2 attempts)…")
+
+        # 2-retry rewrite loop with rescan between attempts
+        current = answer
+        last_check = check_result
+        for attempt in range(2):
+            corrected = await self._rewrite_violations_text(current, last_check, constraints_str)
+            if corrected and len(corrected.strip()) > 100 and not corrected.strip().startswith("Error:"):
+                rescan = await self._scan_violations_text(corrected, constraints_str)
+                if "VIOLATION:" not in rescan:
+                    print(f"  → Constraint rewrite complete (attempt {attempt+1}, {len(corrected)} chars)")
+                    return corrected
+                print(f"  ⚠️  Attempt {attempt+1}: violations remain — retrying…")
+                current = corrected
+                last_check = rescan
+            else:
+                print(f"  ⚠️  Attempt {attempt+1}: rewrite failed or too short")
+
+        # Both rewrites failed — flag answer with warning
+        warning = (
+            "⚠️ **Note**: This answer may contain content that violates a stated "
+            "constraint (e.g., symbolic formulas where plain language was requested). "
+            "The constraint enforcement system was unable to fully correct it.\n\n"
+        )
+        print(f"  ⚠️  Both rewrite attempts failed — prepending warning to original")
+        return warning + answer
+
+    async def _scan_violations_text(self, answer: str, constraints_str: str) -> str:
+        """phi4:14b scan for constraint violations. Returns raw LLM output."""
         check_prompt = f"""\
 Scan this answer for violations of these constraints:
 {constraints_str}
@@ -700,18 +761,15 @@ VIOLATION: <section_title> | <constraint> | <offending_text_snippet>
 
 If no violations, output only: OK
 """
-        check_result = await self._llm_query_coder(
+        return await self._llm_query_coder(
             check_prompt,
             "You are a constraint checker. Be precise. Only report genuine violations."
         )
 
-        if "VIOLATION:" not in check_result:
-            print("  → OK (no violations detected)")
-            return answer
-
-        violations = re.findall(r"VIOLATION:", check_result)
-        print(f"  → {len(violations)} violation(s) found — rewriting offending sections…")
-
+    async def _rewrite_violations_text(
+        self, answer: str, check_result: str, constraints_str: str
+    ) -> str:
+        """qwen2.5:14b rewrite of offending sections only."""
         rewrite_prompt = f"""\
 Rewrite the answer below to fix these constraint violations:
 
@@ -730,19 +788,10 @@ Rules:
 - Keep all other sections, headers, tables, and numerical results unchanged.
 - Return the complete corrected answer in full.
 """
-        corrected = await self._llm_query_coder(
+        return await self._llm_query_coder(
             rewrite_prompt,
             "You are a technical editor. Enforce the listed constraints while preserving meaning.",
         )
-
-        is_error = (not corrected.strip() or
-                    corrected.strip().startswith("Error:") or
-                    len(corrected.strip()) < 50)
-        if is_error:
-            print(f"  ⚠️  Constraint rewrite failed — returning original answer")
-            return answer
-        print(f"  → Constraint rewrite complete ({len(corrected)} chars)")
-        return corrected
 
     # ── Delegation helpers ────────────────────────────────────────────────────
 
