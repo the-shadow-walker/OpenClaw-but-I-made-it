@@ -117,6 +117,62 @@ body {
   background: rgba(0,212,255,0.06);
   border: 1px solid rgba(0,212,255,0.18);
 }
+.tool-box {
+  margin-top: 6px;
+  background: #07070d;
+  border: 1px solid #1e1e2e;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #778aaa;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+}
+.tool-tag { color: #00d4ff; font-weight: 700; }
+@keyframes blink { 50% { opacity: 0; } }
+.tool-spinner { color: #555577; animation: blink 0.9s step-start infinite; }
+.search-status { color: #778aaa; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.search-results-list { display: flex; flex-direction: column; }
+.search-result-card { padding: 6px 0; border-top: 1px solid #1e1e2e; }
+.search-result-card a { color: #00d4ff; text-decoration: none; font-weight: 500; display: block; margin-bottom: 2px; }
+.search-result-card a:hover { text-decoration: underline; }
+.search-result-card p { color: #ccd6f6; margin: 0 0 2px; font-size: 10px; line-height: 1.4; }
+.search-result-card small { color: #555577; font-size: 10px; }
+/* cmd terminal box */
+.cmd-header { color: #00d4ff; font-size: 11px; font-weight: 700; margin-bottom: 4px; }
+.cmd-pre { background: #03030a; border: 1px solid #1e1e2e; border-radius: 4px; padding: 6px 10px;
+           font-family: var(--mono); font-size: 11px; color: #a8d8a8; white-space: pre-wrap;
+           word-break: break-word; max-height: 240px; overflow-y: auto; margin: 0; }
+/* agent log box */
+.agent-header { color: #00d4ff; font-size: 11px; font-weight: 700; margin-bottom: 4px; }
+.agent-log { display: flex; flex-direction: column; gap: 3px; max-height: 280px; overflow-y: auto; }
+.agent-thinking { color: #778aaa; font-size: 10px; font-style: italic; }
+.agent-action   { color: #e0a84f; font-size: 10px; font-family: var(--mono); }
+.agent-output   { color: #a8d8a8; font-size: 10px; font-family: var(--mono); }
+.agent-result   { color: #ccd6f6; font-size: 11px; font-weight: 600; }
+/* research streaming box */
+.research-header  { color: #00d4ff; font-size: 11px; font-weight: 700; margin-bottom: 4px; }
+.research-content { color: #ccd6f6; font-size: 11px; line-height: 1.6; }
+/* markdown rendering */
+.md h1,.md h2,.md h3 { color: var(--accent); margin: 10px 0 4px; letter-spacing: 0.5px; }
+.md h1 { font-size: 14px; } .md h2 { font-size: 13px; } .md h3 { font-size: 12px; }
+.md p { margin: 4px 0; }
+.md pre { background: #07070d; border: 1px solid #1e1e2e; border-radius: 4px; padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+.md code { font-family: var(--mono); font-size: 11px; }
+.md pre code { color: #a8d8a8; }
+.md :not(pre) > code { background: #1a1a2e; border-radius: 3px; padding: 1px 4px; color: #7ec8e3; font-size: 11px; }
+.md ul,.md ol { padding-left: 18px; margin: 4px 0; }
+.md li { margin: 2px 0; line-height: 1.5; }
+.md strong { color: #e0e8ff; font-weight: 700; }
+.md em { color: #aabbd4; font-style: italic; }
+.md hr { border: none; border-top: 1px solid #1e1e2e; margin: 8px 0; }
+.md a { color: var(--accent); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md blockquote { border-left: 2px solid var(--accent); padding-left: 10px; color: var(--text-dim); margin: 4px 0; }
+.md table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 11px; }
+.md th,.md td { border: 1px solid #1e1e2e; padding: 4px 8px; text-align: left; }
+.md th { background: #12121a; color: var(--accent); }
 
 /* ── Status bar ── */
 #status-bar {
@@ -204,14 +260,52 @@ const statusEl   = document.getElementById('status-bar')
 const ttsBtn     = document.getElementById('tts-toggle')
 const dot        = document.getElementById('status-dot')
 
+/* ── Markdown renderer ── */
+function md(text) {
+  if (!text) return ''
+  let s = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // fenced code blocks (use [\s\S] to avoid literal newline in regex)
+  s = s.replace(/```[\s\S]*?```/g, m => {
+    const inner = m.replace(/^```[^\r\n]*[\r\n]?/, '').replace(/```$/, '')
+    return '<pre><code>' + inner.trimEnd() + '</code></pre>'
+  })
+  // inline code
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
+  // bold + italic
+  s = s.replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>')
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  // headers
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>')
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>')
+  // hr
+  s = s.replace(/^---+$/gm, '<hr>')
+  // blockquote
+  s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+  // bullet lists
+  s = s.replace(/^[•\-\*]\s+(.+)$/gm, '<li>$1</li>')
+  s = s.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => '<ul>' + m + '</ul>')
+  // numbered lists
+  s = s.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
+  // links
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+  // paragraphs & line breaks
+  const blocks = s.split(/\n{2,}/)
+  s = blocks.map(b => {
+    b = b.trim(); if (!b) return ''
+    if (/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(b)) return b
+    return '<p>' + b.replace(/\n/g, '<br>') + '</p>'
+  }).filter(Boolean).join('\n')
+  return s
+}
+
 /* ── TTS ── */
 async function playTTS(text) {
-  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
-  const phrase = m ? m[0].trim() : text.slice(0, 200)
+  const phrase = text.slice(0, 600).trim()
   if (!phrase) return
   try {
     const r = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(20000)
     })
     if (!r.ok) return
     const wav = await r.arrayBuffer()
@@ -233,10 +327,16 @@ function addMessage(role, text) {
   const wrap = document.createElement('div')
   wrap.className = 'msg ' + role
   wrap.innerHTML = `<div class="msg-who">${role === 'user' ? 'YOU' : 'JARVIS'}</div><div class="msg-bubble"></div>`
+  if (role === 'jarvis') {
+    const tb = document.createElement('div')
+    tb.className = 'tool-box'
+    tb.style.display = 'none'
+    wrap.appendChild(tb)
+  }
   wrap.querySelector('.msg-bubble').textContent = text
   messagesEl.appendChild(wrap)
   messagesEl.scrollTop = messagesEl.scrollHeight
-  return wrap.querySelector('.msg-bubble')
+  return wrap
 }
 
 /* ── Session ── */
@@ -267,7 +367,9 @@ async function sendMessage() {
     busy = false; sendBtn.disabled = false; return
   }
 
-  const bubble = addMessage('jarvis', '')
+  const jarvisWrap = addMessage('jarvis', '')
+  const bubble = jarvisWrap.querySelector('.msg-bubble')
+  const toolBox = jarvisWrap.querySelector('.tool-box')
   statusEl.textContent = 'Thinking…'
 
   try {
@@ -291,11 +393,140 @@ async function sendMessage() {
         if (!line.trim()) continue
         try {
           const c = JSON.parse(line)
-          if (c.content) { full += c.content; bubble.textContent = full; messagesEl.scrollTop = messagesEl.scrollHeight }
+          if (c.content) {
+            full += c.content; bubble.textContent = full; messagesEl.scrollTop = messagesEl.scrollHeight
+          } else if (c.type === 'tool') {
+            if (c.status === 'running') {
+              const names = c.tags.map(t => { const m = t.match(/\[([A-Z_]+)/); return m ? m[1] : t })
+              toolBox.innerHTML = '<span class="tool-tag">→ ' + names.join(', ') + '</span>  <span class="tool-spinner">▇</span>'
+              toolBox.style.display = 'block'
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'search_start') {
+              toolBox.innerHTML = '<div class="search-status"><span class="tool-spinner">▇</span><span class="search-status-text">Searching for “' + c.query + '”…</span></div><div class="search-results-list"></div>'
+              toolBox.style.display = 'block'
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'search_event') {
+              const ev = c.event
+              const stEl = toolBox.querySelector('.search-status-text')
+              const rl   = toolBox.querySelector('.search-results-list')
+              const sp   = toolBox.querySelector('.tool-spinner')
+              if (stEl) {
+                if (ev.type === 'status') {
+                  stEl.textContent = '[' + ev.backend + '] ' + ev.msg
+                } else if (ev.type === 'result') {
+                  const card = document.createElement('div')
+                  card.className = 'search-result-card'
+                  const snippet = (ev.snippet || '').slice(0, 160)
+                  card.innerHTML = '<a href="' + ev.url + '" target="_blank" rel="noopener">' + ev.title + '</a><p>' + snippet + '</p><small>' + ev.source + ' · ' + ev.url + '</small>'
+                  rl.appendChild(card)
+                } else if (ev.type === 'error') {
+                  stEl.textContent = '✗ ' + ev.backend + ': ' + ev.msg
+                } else if (ev.type === 'done') {
+                  if (sp) sp.textContent = '✓'
+                  stEl.textContent = ev.total + ' result' + (ev.total !== 1 ? 's' : '')
+                }
+              }
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'cmd_start') {
+              toolBox.innerHTML = '<div class="cmd-header">$ ' + (c.question || '') + ' <span class="tool-spinner">&#x2587;</span></div><pre class="cmd-pre"></pre>'
+              toolBox.style.display = 'block'
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'cmd_event') {
+              const ev = c.event
+              const pre = toolBox.querySelector('.cmd-pre')
+              const hdr = toolBox.querySelector('.cmd-header')
+              if (pre) {
+                if (ev.type === 'start') {
+                  if (hdr) hdr.innerHTML = '$ ' + (ev.command || c.question || '') + ' <span class="tool-spinner">&#x2587;</span>'
+                } else if (ev.type === 'output') {
+                  pre.textContent += ev.data
+                  pre.scrollTop = pre.scrollHeight
+                } else if (ev.type === 'done') {
+                  if (hdr) hdr.innerHTML = '$ ' + (ev.command || '') + ' <span style="color:#a8d8a8">&#x2713;</span>'
+                  if (ev.elapsed_ms) hdr.innerHTML += ' <span style="color:#555577;font-weight:400">(' + (ev.elapsed_ms / 1000).toFixed(2) + 's)</span>'
+                } else if (ev.type === 'error') {
+                  if (hdr) hdr.innerHTML = '$ error <span style="color:#e06c75">&#x2717;</span>'
+                  pre.textContent += '\n[error] ' + (ev.error || ev.msg || '')
+                }
+              }
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'agent_start') {
+              toolBox.innerHTML = '<div class="agent-header">[agent] <span class="tool-spinner">&#x2587;</span></div><div class="agent-log"></div>'
+              toolBox.style.display = 'block'
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'agent_event') {
+              const ev = c.event
+              const log = toolBox.querySelector('.agent-log')
+              const hdr = toolBox.querySelector('.agent-header')
+              if (log) {
+                const d = document.createElement('div')
+                if (ev.type === 'thinking') {
+                  d.className = 'agent-thinking'; d.textContent = '... ' + ev.content
+                } else if (ev.type === 'action') {
+                  d.className = 'agent-action'; d.textContent = '> ' + ev.command
+                } else if (ev.type === 'output') {
+                  d.className = 'agent-output'; d.textContent = ev.content
+                } else if (ev.type === 'result') {
+                  d.className = 'agent-result'; d.textContent = ev.content
+                  if (hdr) hdr.innerHTML = '[agent] <span style="color:#a8d8a8">&#x2713;</span>'
+                } else if (ev.type === 'done' || ev.type === 'complete') {
+                  if (hdr) hdr.innerHTML = '[agent] done <span style="color:#a8d8a8">&#x2713;</span>'
+                } else if (ev.type === 'error') {
+                  d.className = 'agent-output'; d.textContent = '[error] ' + (ev.error || ev.msg || '')
+                  if (hdr) hdr.innerHTML = '[agent] <span style="color:#e06c75">&#x2717;</span>'
+                }
+                if (d.textContent) log.appendChild(d)
+                log.scrollTop = log.scrollHeight
+              }
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'research_start') {
+              toolBox.innerHTML = '<div class="research-header">[research] <span class="tool-spinner">&#x2587;</span></div><div class="research-content md"></div>'
+              toolBox.style.display = 'block'
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'research_event') {
+              const ev = c.event
+              const rc  = toolBox.querySelector('.research-content')
+              const hdr = toolBox.querySelector('.research-header')
+              if (rc) {
+                if (ev.type === 'chunk') {
+                  rc.innerHTML = md((rc.getAttribute('data-raw') || '') + ev.data)
+                  rc.setAttribute('data-raw', (rc.getAttribute('data-raw') || '') + ev.data)
+                  rc.scrollTop = rc.scrollHeight
+                } else if (ev.type === 'status') {
+                  if (hdr) hdr.textContent = '[research] ' + ev.msg
+                } else if (ev.type === 'done') {
+                  if (hdr) hdr.innerHTML = '[research] done <span style="color:#a8d8a8">&#x2713;</span>'
+                } else if (ev.type === 'error') {
+                  if (hdr) hdr.innerHTML = '[research] <span style="color:#e06c75">&#x2717;</span>'
+                  rc.textContent += '\n[error] ' + (ev.error || ev.msg || '')
+                }
+              }
+              messagesEl.scrollTop = messagesEl.scrollHeight
+
+            } else if (c.status === 'done') {
+              if (c.content && c.content.trim()) {
+                toolBox.innerHTML = md(c.content.trim())
+                toolBox.classList.add('md')
+                toolBox.style.display = 'block'
+              } else if (!toolBox.querySelector('.search-results-list') && !toolBox.querySelector('.cmd-pre') && !toolBox.querySelector('.agent-log') && !toolBox.querySelector('.research-content')) {
+                toolBox.style.display = 'none'
+              }
+              messagesEl.scrollTop = messagesEl.scrollHeight
+            }
+          }
         } catch {}
       }
     }
     statusEl.textContent = ''
+    if (full) { bubble.innerHTML = md(full); bubble.classList.add('md') }
     if (ttsOn && full) playTTS(full)
 
   } catch(e) {
