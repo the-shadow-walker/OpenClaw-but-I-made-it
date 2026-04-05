@@ -18,7 +18,7 @@ Environment:
   SWARM_API_KEY  Bearer token (optional)
 """
 
-import sys, os, json, time, textwrap, argparse, re
+import sys, os, json, time, textwrap, argparse, re, threading
 import urllib.request, urllib.error, urllib.parse
 
 DEFAULT_SERVER = os.environ.get("SWARM_SERVER", "http://10.0.0.58:5002")
@@ -746,35 +746,49 @@ def cmd_stream(server: str, question: str):
     spin         = ["|", "/", "-", "\\"]
     tick         = 0
     last_log     = ""
+    _last_lines  = 0               # how many lines spinner currently occupies
+    _draw_lock   = threading.Lock()
+    _stop_spin   = threading.Event()
 
     if VERBOSITY >= 1:
         print(f"\n{BOLD('Swarm 3.4')}  {DIM(question[:80])}")
         print(DIM("-" * 60))
 
-    # ── spinner/status line (VERBOSITY == 1) ─────────────────────────────────
+    # ── spinner/status line — driven by background thread every 0.15s ────────
     def _draw():
-        nonlocal tick
+        nonlocal tick, _last_lines
         if VERBOSITY != 1:
             return
-        tick += 1
-        s = spin[tick % len(spin)]
-        phase_col = _phase_color(phase_id) if phase_id else CYAN
-        phase_str = phase_col(f"Phase {phase_id}: {phase_name}") if phase_id else CYAN(phase_name)
-        toks_str  = (f"{GREEN(f'{toks_ps:.1f}')} tok/s"
-                     if toks_ps > 0 and (time.time()-last_toks_t) < 10
-                     else DIM("-- tok/s"))
-        agent_str = (f"{DIM(agent_name)}{DIM('@')}{DIM(model_name)}"
-                     if agent_name else DIM("waiting"))
-        status_line = f"  {s} {phase_str}  {toks_str}  {DIM(f'{elapsed:.0f}s')}  {agent_str}"
-        log_line    = f"  {DIM(last_log[:width-4])}" if last_log else ""
-        if _USE_COLOR:
-            print(f"\033[2A" if last_log else "", end="")
-            print(f"{CLEAR}{status_line}", flush=True)
-            if last_log:
-                print(f"{CLEAR}{log_line}", flush=True)
-        else:
-            print(f"  [{elapsed:.0f}s] {phase_name} {toks_ps:.1f} tok/s  {last_log[:60]}",
-                  flush=True)
+        with _draw_lock:
+            tick += 1
+            s = spin[tick % len(spin)]
+            phase_col = _phase_color(phase_id) if phase_id else CYAN
+            phase_str = phase_col(f"Phase {phase_id}: {phase_name}") if phase_id else CYAN(phase_name)
+            toks_str  = (f"{GREEN(f'{toks_ps:.1f}')} tok/s"
+                         if toks_ps > 0 and (time.time()-last_toks_t) < 10
+                         else DIM("-- tok/s"))
+            agent_str = (f"{DIM(agent_name)}{DIM('@')}{DIM(model_name)}"
+                         if agent_name else DIM("waiting"))
+            status_line = f"  {s} {phase_str}  {toks_str}  {DIM(f'{elapsed:.0f}s')}  {agent_str}"
+            log_line    = f"  {DIM(last_log[:width-4])}" if last_log else ""
+            if _USE_COLOR:
+                # Move up exactly as many lines as we drew last time, then redraw
+                if _last_lines > 0:
+                    print(f"\033[{_last_lines}A", end="", flush=True)
+                print(f"{CLEAR}{status_line}")
+                if last_log:
+                    print(f"{CLEAR}{log_line}")
+                    _last_lines = 2
+                else:
+                    _last_lines = 1
+            else:
+                print(f"  [{elapsed:.0f}s] {phase_name} {toks_ps:.1f} tok/s  {last_log[:60]}")
+
+    def _spin_worker():
+        """Background thread: tick the spinner every 0.15s regardless of SSE events."""
+        while not _stop_spin.is_set():
+            _draw()
+            _stop_spin.wait(0.15)
 
     def _set_last_log(line: str):
         nonlocal last_log
@@ -793,10 +807,27 @@ def cmd_stream(server: str, question: str):
 
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
+            # Placeholder line so spinner has a row to overwrite on first draw
             if VERBOSITY == 1:
                 print()
-                if _USE_COLOR:
-                    print()
+
+            # Start background thread: spinner ticks every 0.15s independent of SSE events
+            if VERBOSITY == 1:
+                _spin_thread = threading.Thread(target=_spin_worker, daemon=True)
+                _spin_thread.start()
+
+            def _stop_and_clear():
+                """Stop spinner thread and erase its lines before printing output."""
+                _stop_spin.set()
+                if VERBOSITY == 1 and _USE_COLOR:
+                    with _draw_lock:
+                        if _last_lines > 0:
+                            print(f"\033[{_last_lines}A", end="", flush=True)
+                            for _ in range(_last_lines):
+                                print(CLEAR, end="")
+                            print(flush=True)
+                elif VERBOSITY == 1:
+                    print()  # end the no-color spinner line
 
             buf = ""
             while True:
@@ -824,7 +855,6 @@ def cmd_stream(server: str, question: str):
                         if etype == "start":
                             phase_name = "Starting..."
                             _vprint("start    ", f"job={evt.get('job_id','?')}", CYAN)
-                            _draw()
 
                         elif etype == "phase":
                             phase_id   = evt.get("phase_id", "")
@@ -833,7 +863,6 @@ def cmd_stream(server: str, question: str):
                             _vprint(f"phase {phase_id:<4}",
                                     f"[{elapsed:.0f}s] {phase_name}",
                                     _phase_color(phase_id))
-                            _draw()
 
                         elif etype == "toks":
                             toks_ps      = evt.get("toks_per_sec", 0.0)
@@ -843,34 +872,27 @@ def cmd_stream(server: str, question: str):
                                     f"{evt.get('tokens')} tok  {toks_ps:.1f} tok/s  "
                                     f"{evt.get('seconds')}s",
                                     GREEN)
-                            _draw()
 
                         elif etype == "agent":
                             agent_name = evt.get("agent", "")
                             model_name = evt.get("model", "")
                             _vprint("agent    ", f"{agent_name} @ {model_name}", MAGENTA)
-                            _draw()
 
                         elif etype == "log":
                             line = evt.get("line", "")
                             _set_last_log(line)
                             _vprint("log      ", line[:width-20])
-                            _draw()
 
                         elif etype == "error_line":
                             line = evt.get("line", "")
                             _set_last_log(RED("!") + " " + line)
                             _vprint("error    ", line[:width-20], RED)
-                            _draw()
 
                         elif etype == "heartbeat":
                             _vprint("heartbeat", f"[{elapsed:.0f}s]", DIM)
-                            _draw()
 
                         elif etype == "answer":
-                            # Clear spinner line before printing answer
-                            if VERBOSITY == 1 and _USE_COLOR:
-                                print(f"\033[2A{CLEAR}\n{CLEAR}", end="")
+                            _stop_and_clear()
                             print(DIM("-" * 60))
                             print(f"{GREEN('Done')}  "
                                   f"{DIM(f'elapsed={elapsed:.1f}s')}  "
@@ -882,22 +904,26 @@ def cmd_stream(server: str, question: str):
                             for ln in answer.splitlines():
                                 print(textwrap.fill(ln, width=w) if len(ln) > w else ln)
                             print()
+                            return
 
                         elif etype == "error":
-                            if VERBOSITY >= 1 and _USE_COLOR:
-                                print(f"\033[2A{CLEAR}\n{CLEAR}", end="")
+                            _stop_and_clear()
                             print(f"\n{RED('Error:')} {evt.get('error','unknown')}\n")
 
                         elif etype == "done":
+                            _stop_spin.set()
                             return
 
     except urllib.error.HTTPError as e:
+        _stop_spin.set()
         print(RED(f"\n[HTTP {e.code}] {e.read().decode()}"), file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
+        _stop_spin.set()
         print(RED(f"\n[Connection error] {e.reason}"), file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
+        _stop_spin.set()
         print(f"\n{YELLOW('Interrupted.')}")
 
 
