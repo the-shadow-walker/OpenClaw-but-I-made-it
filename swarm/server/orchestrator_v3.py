@@ -1,5 +1,5 @@
 """
-Swarm 3.1 — OrchestratorV3
+Swarm 3.4 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.1 top-level dispatcher.
+    Swarm 3.4 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print("🚀 Swarm 3.1 OrchestratorV3 initialized")
+        print("🚀 Swarm 3.4 OrchestratorV3 initialized")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -135,7 +135,7 @@ class OrchestratorV3:
         _qtype_val: str = "unknown"   # track before try so except can read it
 
         print("\n" + "="*70)
-        print("🚀 SWARM 3.1 — OrchestratorV3")
+        print("🚀 SWARM 3.4 — OrchestratorV3")
         print("="*70)
         print(f"Q: {question[:100]}")
         print("="*70)
@@ -319,6 +319,30 @@ class OrchestratorV3:
                 )
                 print(f"  📋 Manifest: {len(global_manifest)} computed value(s) → all wave SPs")
 
+            # ── Soft salvage: scan failed SP logs for any RESULT: lines ─────────
+            soft_manifest: Dict[str, str] = {}  # var → "value unit" (unverified)
+            for prior_id, prior_res in solver_results.items():
+                if prior_res.status != "solved" and getattr(prior_res, "raw_log", ""):
+                    for log_line in prior_res.raw_log.splitlines():
+                        rm = re.match(
+                            r'RESULT:\s*([A-Za-z_]\w*)\s*=\s*([+-]?\d[\d.e+\-]*)\s*(.*)',
+                            log_line.strip(),
+                            re.IGNORECASE,
+                        )
+                        if rm:
+                            var, val, unit = rm.group(1), rm.group(2), rm.group(3).strip()
+                            if var not in global_manifest and var not in soft_manifest:
+                                soft_manifest[var] = f"{val} {unit}".strip()
+
+            # Append soft results to manifest block (separate section, labeled unverified)
+            if soft_manifest:
+                soft_lines = [f"  {k} = {v}  (unverified)" for k, v in soft_manifest.items()]
+                manifest_block += (
+                    "\n💡 SOFT RESULTS (partial computation from failed SPs — use if nothing better):\n"
+                    + "\n".join(soft_lines) + "\n"
+                )
+                print(f"  💡 Soft salvage: {len(soft_manifest)} value(s) from failed SP logs")
+
             for sp_id in wave:
                 sp = sp_map.get(sp_id)
                 if sp is None:
@@ -330,6 +354,13 @@ class OrchestratorV3:
                             sp.inputs[var] = float(val_str.split()[0])
                         except (ValueError, IndexError):
                             pass  # non-numeric (string results) — skip
+                # Also inject soft results at lower priority (don't override confirmed values)
+                for var, val_str in soft_manifest.items():
+                    if var not in sp.inputs:
+                        try:
+                            sp.inputs[var] = float(val_str.split()[0])
+                        except (ValueError, IndexError):
+                            pass
 
             # Run this wave in parallel
             tasks = []

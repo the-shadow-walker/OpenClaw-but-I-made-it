@@ -192,7 +192,11 @@ RULES:
    M_planet, astronomical radii, c=3e8, or any constant not in the anchor.
 3. Print each computed result as: print(f"RESULT: var_name = {{value:.6g}} unit")
 4. Never skip the END_INPUT or END_ANSWER marker.
-5. Use SymPy or scipy for solving; numpy for arrays.
+5. NUMERICAL SOLVER PRIORITY: Use scipy.optimize.fsolve, brentq, or minimize
+   for ALL polynomials degree > 2 and ALL transcendental equations.
+   SymPy is permitted ONLY for degree ≤ 2 polynomials and symbolic simplification.
+   NEVER call sympy.solve() on quartic, quintic, or transcendental equations —
+   it returns CRootOf or empty [] which cannot be printed as a float.
 6. Verify your answer numerically before declaring STATUS: solved.
 7. Think step by step inside THOUGHT blocks.
 8. CRITICAL: After your <think> block, you MUST output EITHER a valid
@@ -242,6 +246,12 @@ RULES:
     Print: VERIFICATION: analytical=X, simulation=Y, error=Z%
     This is MANDATORY for any result involving differential equations,
     circular motion, stability analysis, or energy conservation.
+16. SYMPY FLOAT MANDATE: Any SymPy expression result MUST be converted to a
+    float before printing. NEVER print a raw symbolic expression.
+      BAD:  print(f"RESULT: x = {{sympy_expr}}")          # crashes or prints formula
+      GOOD: print(f"RESULT: x = {{float(sympy_expr.evalf()):.6g}} unit")
+    If .evalf() returns a complex number, your equation setup is wrong —
+    switch to scipy.optimize.brentq with a sign-confirmed bracket.
 """
 
 
@@ -319,6 +329,15 @@ class ReactSolver:
                     raw_log="\n".join(self._log_parts),
                     verification_note="Hard timeout (1800s) reached",
                 )
+
+            # Context pruning: Turn 6+ with zero computed results → trim to seed + last error
+            if turn == 6 and not self._locked_results and len(self._history) > 5:
+                seed_msg = self._history[:1]       # original given-values seed
+                last_two = self._history[-2:]      # last assistant + observation
+                pruned_count = len(self._history) - len(seed_msg) - len(last_two)
+                self._history = seed_msg + last_two
+                print(f"  ✂️  [{sp.id}] T6 context prune: dropped {pruned_count} old turns (0 results yet)")
+                self._log(f"[CONTEXT PRUNE at T6: dropped {pruned_count} turns]")
 
             # Query the model
             response = await self._llm_call()
@@ -584,13 +603,34 @@ class ReactSolver:
                 print(f"FAILED")
                 lineno_m = re.search(r'line (\d+)', result.error or "")
                 lineno_hint = lineno_m.group(1) if lineno_m else "?"
+                stderr_text = result.error or ""
+                stdout_text = result.output or ""
+                sympy_keywords = (
+                    "crootof", "sympy", "zoo", "oo ", "nan",
+                    "solve returned []", "complex root", "no solution",
+                    "typeerror: can't convert",
+                )
+                is_sympy_failure = any(
+                    kw in stderr_text.lower() or kw in stdout_text.lower()
+                    for kw in sympy_keywords
+                )
+                sympy_ban = (
+                    "\n🔴 SYMPY SOLVER BAN: SymPy failed to produce a float on this turn. "
+                    "You are REQUIRED to switch to scipy.optimize.brentq or fsolve for the "
+                    "rest of this sub-problem. Do not call sympy.solve() again.\n"
+                    "Template:\n"
+                    "  from scipy.optimize import brentq\n"
+                    "  f = lambda x: <your equation in terms of x>\n"
+                    "  result = brentq(f, lower_bound, upper_bound)\n"
+                ) if is_sympy_failure else ""
                 obs = (
-                    f"CODE EXECUTION FAILED.\n"
-                    f"Error (line {lineno_hint}):\n{(result.error or '')[:1500]}\n\n"
-                    f"STDOUT before crash:\n{(result.output or '')[:500]}\n\n"
-                    f"⚠️  FIX INSTRUCTIONS: Identify the SINGLE failing line/expression. "
+                    f"🛑 CODE FAILED (Turn {self._turn}/{self.MAX_TURNS}).\n"
+                    f"Error (line {lineno_hint}):\n{stderr_text[:1500]}\n\n"
+                    f"STDOUT before crash:\n{stdout_text[:500]}\n"
+                    f"{sympy_ban}\n"
+                    f"⚠️  FIX INSTRUCTIONS: Fix ONLY the single failing line. "
                     f"Keep all imports, GIVEN VALUES block, and working code unchanged. "
-                    f"Do NOT rewrite the entire script. Produce a corrected run_code block with the minimal fix."
+                    f"Do NOT rewrite the entire script."
                 )
                 return obs
         except Exception as e:

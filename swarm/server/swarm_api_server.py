@@ -10,7 +10,7 @@ except ImportError:
         if _os.path.isdir(_d) and _d not in _sys.path:
             _sys.path.insert(0, _d)
 """
-Swarm 3.0 REST API Wrapper
+Swarm 3.4 REST API Wrapper
 ==========================
 Provides REST endpoints plus SSE streaming progress.
 
@@ -1374,7 +1374,7 @@ def server_error(e):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Swarm 3.0 REST API Server")
+    parser = argparse.ArgumentParser(description="Swarm 3.4 REST API Server")
     parser.add_argument('--port',    type=int, default=Config.PORT)
     parser.add_argument('--host',             default=Config.HOST)
     parser.add_argument('--debug',   action='store_true')
@@ -1389,7 +1389,7 @@ def main():
     auth_status = "enabled" if Config.API_KEY else "disabled (set SWARM_API_KEY to enable)"
 
     print("\n" + "=" * 62)
-    print("Swarm 3.0 REST API Server")
+    print("Swarm 3.4 REST API Server")
     print("=" * 62)
     print(f"Host:         {args.host}:{args.port}")
     print(f"Debug:        {Config.DEBUG}")
