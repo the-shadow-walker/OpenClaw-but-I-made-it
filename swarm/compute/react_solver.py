@@ -470,8 +470,14 @@ class ReactSolver:
                     f"{ledger}\n\n"
                     f"OBSERVATION:\n{obs}"
                 )
+            # Focus Anchor: re-state the sub-problem at every turn so the model
+            # never drifts to a simpler textbook version of the question.
+            _focus = (
+                f"📌 FOCUS: {sp.id} — {sp.description}\n"
+                f"   Given: {_seed_given_str}\n\n"
+            )
             self._log(f"\n[OBSERVATION turn {turn}]\n{obs}")
-            self._history.append({"role": "user", "content": f"OBSERVATION:\n{obs}"})
+            self._history.append({"role": "user", "content": f"{_focus}OBSERVATION:\n{obs}"})
 
         # Exhausted turns
         print(f"  [{sp.id}] FAILED (turn limit)")

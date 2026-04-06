@@ -105,7 +105,7 @@ class BaseAgent:
                     f"{self.ollama_base_url}/api/generate",
                     json=payload,
                     stream=stream,
-                    timeout=600
+                    timeout=1200
                 )
                 response.raise_for_status()
                 
@@ -167,7 +167,7 @@ class BaseAgent:
             return full_response
                 
         except requests.exceptions.Timeout:
-            print(f"\n      ❌ Timeout after 600s\n")
+            print(f"\n      ❌ Timeout after 1200s\n")
             return "Error: Model timeout"
         except requests.exceptions.ConnectionError:
             print(f"\n      ❌ Connection error - is Ollama running?\n")

@@ -135,13 +135,18 @@ Respond with ONLY valid JSON (no markdown, no explanation):
             
             import json
             import re
-            
-            # Extract JSON
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-            else:
-                data = json.loads(response)
+
+            # Lazy JSON: find first {...} block — handles Gemma4 thought prefixes
+            _cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(),
+                               flags=re.MULTILINE)
+            try:
+                data = json.loads(_cleaned)
+            except json.JSONDecodeError:
+                m = re.search(r'\{.*\}', _cleaned, re.DOTALL)
+                if m:
+                    data = json.loads(m.group())
+                else:
+                    raise ValueError("No JSON object found in classifier response")
             
             # Parse question type
             qtype_str = data.get('question_type', 'unknown').lower()

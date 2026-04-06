@@ -15,6 +15,27 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
+# ── JSON helpers ─────────────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> dict:
+    """
+    Robustly extract and parse a JSON object from LLM output.
+    Handles: markdown fences, preceding <thought> blocks, prose preambles.
+    """
+    # Strip markdown fences
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    # Direct parse first (fast path)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Scan for first {...} block (handles prose/think prefixes)
+    m = re.search(r'\{.*\}', text, re.DOTALL)
+    if m:
+        return json.loads(m.group())
+    raise ValueError("No JSON object found in LLM response")
+
+
 # ── Data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -287,8 +308,7 @@ class PlannerV2:
                 "Output ONLY valid JSON matching the schema exactly."
             )
             raw = await llm_query_func(prompt, system)
-            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
-            data = json.loads(text)
+            data = _extract_json(raw)
             reqs = []
             for item in data.get("requirements", []):
                 reqs.append(Requirement(
@@ -311,9 +331,7 @@ class PlannerV2:
     @staticmethod
     def _parse_plan(question: str, raw: str, classification,
                     requirements: Optional[List["Requirement"]] = None) -> "SolvePlan":
-        # Strip markdown fences if present
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
-        data = json.loads(text)
+        data = _extract_json(raw)
 
         # Build SubProblem list
         sub_problems = []

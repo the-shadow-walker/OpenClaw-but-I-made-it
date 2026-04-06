@@ -1,5 +1,5 @@
 """
-Swarm 3.4 — OrchestratorV3
+Swarm 3.5 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.4 top-level dispatcher.
+    Swarm 3.5 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print("🚀 Swarm 3.4 OrchestratorV3 initialized")
+        print(f"🚀 Swarm 3.5 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -135,7 +135,7 @@ class OrchestratorV3:
         _qtype_val: str = "unknown"   # track before try so except can read it
 
         print("\n" + "="*70)
-        print("🚀 SWARM 3.4 — OrchestratorV3")
+        print("🚀 SWARM 3.5 — OrchestratorV3")
         print("="*70)
         print(f"Q: {question[:100]}")
         print("="*70)
