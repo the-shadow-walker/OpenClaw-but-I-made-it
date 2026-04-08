@@ -252,6 +252,25 @@ RULES:
       GOOD: print(f"RESULT: x = {{float(sympy_expr.evalf()):.6g}} unit")
     If .evalf() returns a complex number, your equation setup is wrong —
     switch to scipy.optimize.brentq with a sign-confirmed bracket.
+17. LOCKED GIVEN VALUES: Any variable in the '# === GIVEN VALUES ===' block at
+    the top of your code was VERIFIED in a prior sub-problem. You are FORBIDDEN
+    from assigning a new value to that variable anywhere else in your code.
+    Use it as a read-only constant. Recalculating it will contradict the
+    verified global manifest and produce conflicting results.
+    BAD:  r0 = brentq(...)   # if r0 is already in GIVEN VALUES
+    GOOD: # r0 is LOCKED — use the value from GIVEN VALUES directly
+18. HIGH-PRECISION FOR TINY DIFFERENCES: When two values may differ by less
+    than 1e-10 (e.g. relativistic corrections, quantum shifts, perturbation
+    results), you MUST use Python's decimal library to capture the difference:
+      from decimal import Decimal, getcontext
+      getcontext().prec = 50
+      omega_class = Decimal(str(omega_class_float))
+      omega_rel   = Decimal(str(omega_rel_float))
+      delta = omega_rel - omega_class
+      print(f"RESULT: delta_omega = {{float(delta):.6e}} rad/s")
+    NEVER report two physically distinct values as "identical." A v≪c
+    relativistic correction is NEVER exactly zero — always compute and
+    print the exact difference using Decimal arithmetic.
 """
 
 
@@ -582,10 +601,10 @@ class ReactSolver:
 
         # Force-inject SP given values as constants so model can't assume wrong params
         if self.sub_problem.inputs:
-            forced = "# === GIVEN VALUES — DO NOT OVERRIDE ===\n"
+            forced = "# === GIVEN VALUES — LOCKED FROM PRIOR STEPS — DO NOT RECALCULATE ===\n"
             for var, val in self.sub_problem.inputs.items():
-                forced += f"{var} = {val!r}\n"
-            forced += "# =========================================\n\n"
+                forced += f"{var} = {val!r}  # LOCKED\n"
+            forced += "# ====================================================================\n\n"
             code = forced + code
 
         if not _HAS_EXECUTOR:

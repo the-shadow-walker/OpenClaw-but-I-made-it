@@ -1,5 +1,5 @@
 """
-Swarm 3.5 — OrchestratorV3
+Swarm 3.6 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.5 top-level dispatcher.
+    Swarm 3.6 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.5 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.6 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -135,7 +135,7 @@ class OrchestratorV3:
         _qtype_val: str = "unknown"   # track before try so except can read it
 
         print("\n" + "="*70)
-        print("🚀 SWARM 3.5 — OrchestratorV3")
+        print("🚀 SWARM 3.6 — OrchestratorV3")
         print("="*70)
         print(f"Q: {question[:100]}")
         print("="*70)
@@ -438,6 +438,79 @@ class OrchestratorV3:
                     )
                     print(f"  {sp_id} RETRY → {rr.status.upper()} | {vals_str} "
                           f"| {rr.turn_count} turns")
+
+        # ── Requirement Audit: one-pass re-solve for completely dropped SPs ──
+        # Catches SPs that were skipped due to timeouts, OOM, or wave-level
+        # failures — ensures every requirement from the planner gets a result.
+        dropped_sps = [
+            sp for sp in plan.sub_problems
+            if (
+                solver_results.get(sp.id) is None
+                or (solver_results[sp.id].status != "solved" and sp.expected_outputs)
+            )
+        ]
+        if dropped_sps:
+            print(f"\n{'─'*62}")
+            print(f"  🚨 Requirement Audit: {len(dropped_sps)} SP(s) with no results — "
+                  f"re-solving: {[sp.id for sp in dropped_sps]}")
+            # Rebuild full manifest from all solved SPs so far
+            audit_manifest: Dict[str, str] = {}
+            for prior_id, prior_res in solver_results.items():
+                if prior_res.status == "solved":
+                    if getattr(prior_res, "results_with_units", None):
+                        for var, meta in prior_res.results_with_units.items():
+                            audit_manifest[var] = (
+                                f"{meta.get('value','')} {meta.get('unit','')}".strip()
+                            )
+                    elif prior_res.results:
+                        for var, val in prior_res.results.items():
+                            audit_manifest[var] = str(val)
+            audit_block = ""
+            if audit_manifest:
+                mlines = [f"  {k} = {v}" for k, v in audit_manifest.items()]
+                audit_block = (
+                    "\n🔒 COMPUTED FACTS FROM PRIOR STEPS — USE THESE DIRECTLY, DO NOT RECOMPUTE:\n"
+                    + "\n".join(mlines) + "\n"
+                )
+            audit_tasks = []
+            audit_sp_ids = []
+            for sp in dropped_sps:
+                # Inject manifest into SP inputs (makes them available as LOCKED GIVEN VALUES)
+                for var, val_str in audit_manifest.items():
+                    if var not in sp.inputs:
+                        try:
+                            sp.inputs[var] = float(val_str.split()[0])
+                        except (ValueError, IndexError):
+                            pass
+                ctx = research_contexts.get(sp.id, "")
+                audit_solver = ReactSolver(
+                    sub_problem=sp,
+                    plan=plan,
+                    research_context=audit_block + (ctx or ""),
+                    searxng_url=self.searxng_url,
+                )
+                audit_solver._history.append({
+                    "role": "user",
+                    "content": (
+                        "⚠️  REQUIREMENT AUDIT: This sub-problem produced no results in "
+                        "the first pass. You MUST solve it now. Use ACTION: run_code "
+                        "immediately. Do NOT skip, approximate, or write prose — compute "
+                        "the exact numerical result."
+                    ),
+                })
+                audit_tasks.append(audit_solver.solve())
+                audit_sp_ids.append(sp.id)
+            if audit_tasks:
+                audit_results = await asyncio.gather(*audit_tasks)
+                for sp_id, ar in zip(audit_sp_ids, audit_results):
+                    solver_results[sp_id] = ar
+                    vals_str = (
+                        ", ".join(
+                            f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                            for v, d in ar.results_with_units.items()
+                        ) if ar.results_with_units else "no results"
+                    ) if ar.status == "solved" else "no results"
+                    print(f"  🚨 AUDIT {sp_id} → {ar.status.upper()} | {vals_str}")
 
         # ── Free VRAM before synthesis (evict reactor model) ───────────────
         await self._unload_solver_model()
