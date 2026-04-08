@@ -988,25 +988,20 @@ class JarvisServer:
         routing = self.agent_router.route(message)
         model = self._select_model(routing)
 
-        # VRAM check — do this before slow context building so the apology appears immediately.
-        # Competing models (Swarm/CMD qwen2.5-coder:14b) frequently displace mistral from VRAM.
+        # VRAM check — warn user immediately if chat model has been displaced, then proceed.
+        # Previously a blocking pre-load was attempted here, but it doubled latency:
+        #   - Pre-load blocked for up to 120s (often timing out)
+        #   - Then the actual chat request ALSO waited for the model to load
+        # Ollama loads the model naturally on the first request; no need to block.
         if model == MODELS['chat']:
             try:
                 ps = requests.get(f"{OLLAMA_HOST}/api/ps", timeout=3).json()
                 loaded_names = [m['name'] for m in ps.get('models', [])]
                 if MODELS['chat'] not in loaded_names:
-                    logger.info(f"[LLM] {MODELS['chat']} not in VRAM — force-loading")
+                    logger.info(f"[LLM] {MODELS['chat']} not in VRAM — will load on first token")
                     yield "\x00SYS\x00Terribly sorry for the delay, sir. A competing model has taken over the GPU — reloading my model, just one moment..."
-                    requests.post(f"{OLLAMA_HOST}/api/generate", json={
-                        "model": MODELS['chat'],
-                        "prompt": "",
-                        "keep_alive": "30m",
-                        "num_predict": 1,
-                        "stream": False
-                    }, timeout=120)  # qwen2.5:14b takes ~30s to load 9GB
-                    logger.info(f"[LLM] {MODELS['chat']} loaded to VRAM")
             except Exception as e:
-                logger.warning(f"[LLM] Model warm-check failed: {e}")
+                logger.warning(f"[LLM] VRAM check failed: {e}")
 
         # Build context — static system prompt (KV cached) + dynamic context (fresh each request)
         system_prompt, dynamic_context = self.build_context(message, session_id)
