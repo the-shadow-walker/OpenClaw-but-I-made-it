@@ -172,6 +172,8 @@ body {
   color: var(--accent);
   letter-spacing: 2px;
   text-shadow: 0 0 8px var(--accent);
+  text-decoration: none;
+  cursor: pointer;
 }
 .badge {
   display: flex; align-items: center; gap: 5px;
@@ -196,8 +198,8 @@ body {
 /* ── Workspace / drag area ───────────────────────────────────────── */
 #workspace {
   position: relative;
-  margin-top: 44px;
-  min-height: calc(100vh - 44px);
+  margin-top: 78px;
+  min-height: calc(100vh - 78px);
   padding: 12px;
   background-image: radial-gradient(circle, #252540 1.5px, transparent 1.5px);
   background-size: 20px 20px;
@@ -566,7 +568,7 @@ body {
 
 <!-- ── HEADER ──────────────────────────────────────────────────────── -->
 <div id="header">
-  <span class="brand">⬡ JARVIS</span>
+  <a class="brand" href="#" onclick="window.open('http://'+location.hostname+':4210','_blank');return false">⬡ JARVIS</a>
 
   <div class="badge" id="badge-swarm">
     <span class="dot"></span>
@@ -931,7 +933,13 @@ function updateMetrics(m) {
         : `${gpu.mem_pct}%`)
     document.getElementById('hdr-gpu').textContent = `${gpu.gpu_pct}%`
   } else {
-    document.getElementById('gpu-name').textContent = 'nvidia-smi unavailable'
+    const errMsg = (gpu.error || '').toLowerCase()
+    let gpuLabel = 'nvidia-smi unavailable'
+    if (errMsg.includes('mismatch') || errMsg.includes('nvml')) {
+      gpuLabel = 'Driver mismatch — reboot or: sudo modprobe -r nvidia && sudo modprobe nvidia'
+    }
+    document.getElementById('gpu-name').textContent = gpuLabel
+    document.getElementById('hdr-gpu').textContent = 'ERR'
   }
   if (m.memory_pct != null) {
     setBar('ram', m.memory_pct, `${m.memory_pct.toFixed(0)}%`)
