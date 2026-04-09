@@ -1,5 +1,5 @@
 """
-Swarm 3.6 — OrchestratorV3
+Swarm 3.7 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.6 top-level dispatcher.
+    Swarm 3.7 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.6 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.7 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -311,6 +311,13 @@ class OrchestratorV3:
 
             # ── Build manifest text block and inject numeric values into SP inputs ─
             manifest_block = ""
+            # Float version of manifest for ReactSolver anchor splitting
+            global_manifest_float: Dict[str, float] = {}
+            for _var, _val_str in global_manifest.items():
+                try:
+                    global_manifest_float[_var] = float(_val_str.split()[0])
+                except (ValueError, IndexError):
+                    pass
             if global_manifest:
                 mlines = [f"  {k} = {v}" for k, v in global_manifest.items()]
                 manifest_block = (
@@ -378,6 +385,7 @@ class OrchestratorV3:
                         plan=plan,
                         research_context=ctx_with_manifest,
                         searxng_url=self.searxng_url,
+                        manifest_values=global_manifest_float,
                     )
                     tasks.append(solver.solve())
                 else:
@@ -413,6 +421,7 @@ class OrchestratorV3:
                         plan=plan,
                         research_context=manifest_block + research_contexts.get(sp_id, ""),
                         searxng_url=self.searxng_url,
+                        manifest_values=global_manifest_float,
                     )
                     # Inject a mandatory-code message at the top of history
                     retry_solver._history.append({
@@ -483,11 +492,19 @@ class OrchestratorV3:
                         except (ValueError, IndexError):
                             pass
                 ctx = research_contexts.get(sp.id, "")
+                # Rebuild audit manifest float for anchor splitting
+                audit_manifest_float: Dict[str, float] = {}
+                for _var, _val_str in audit_manifest.items():
+                    try:
+                        audit_manifest_float[_var] = float(_val_str.split()[0])
+                    except (ValueError, IndexError):
+                        pass
                 audit_solver = ReactSolver(
                     sub_problem=sp,
                     plan=plan,
                     research_context=audit_block + (ctx or ""),
                     searxng_url=self.searxng_url,
+                    manifest_values=audit_manifest_float,
                 )
                 audit_solver._history.append({
                     "role": "user",
@@ -536,6 +553,28 @@ class OrchestratorV3:
         print(f"\n{_sep}")
         print(f"✅ Done │ {n_solved}/{len(solver_results)} SP(s) solved │ Total: {elapsed:.1f}s")
         return answer
+
+    # ── Domain categorisation ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _domain_category(domain: str) -> str:
+        """Map an SP domain string to a broad category for the writer checklist."""
+        d = domain.lower().replace("_", "").replace(" ", "")
+        # Chemistry-specific checks first (avoid "thermo" matching both)
+        if any(x in d for x in ["electrochemist", "thermochemist", "biochem",
+                                 "analyticalchem", "physicalchem", "gibbs", "faraday"]):
+            return "CHEMISTRY"
+        if any(x in d for x in ["chem", "reaction", "molec", "enthalpy",
+                                 "stoichi", "molar"]):
+            return "CHEMISTRY"
+        if any(x in d for x in ["calc", "algebra", "numbertheory", "series",
+                                 "statistic", "geomet", "combinat", "puremath",
+                                 "stirling", "integral", "differentiat"]):
+            return "MATHEMATICS"
+        if any(x in d for x in ["math", "analysis"]):
+            return "MATHEMATICS"
+        # Default: physics covers mechanics, orbital, thermo, electro, optics, etc.
+        return "PHYSICS"
 
     # ── Topological waves ─────────────────────────────────────────────────────
 
@@ -726,26 +765,69 @@ END_ANSWER_DATA
             else:
                 failed_sps.append(f"  {sp_id} | FAILED — {sp_desc}")
 
-        results_block = "\n".join(verified_results) if verified_results else "  (no numerical results computed)"
-        failed_block  = ("\nFAILED SUB-PROBLEMS (do NOT invent values for these):\n" +
-                         "\n".join(failed_sps)) if failed_sps else ""
+        # ── Domain isolation: group results by domain category ───────────────
+        domain_groups: Dict[str, List[str]] = {}  # category → [sp_id, ...]
+        for sp_id in plan.dependency_order:
+            sp_obj = next((s for s in plan.sub_problems if s.id == sp_id), None)
+            cat = self._domain_category(sp_obj.domain if sp_obj else "physics")
+            domain_groups.setdefault(cat, []).append(sp_id)
+
+        # Build domain-structured results block
+        domain_results_lines = []
+        for cat in ("PHYSICS", "MATHEMATICS", "CHEMISTRY", "OTHER"):
+            sp_ids_in_cat = domain_groups.get(cat, [])
+            if not sp_ids_in_cat:
+                continue
+            domain_results_lines.append(f"\n── {cat} ──")
+            for sp_id in sp_ids_in_cat:
+                sr = solver_results.get(sp_id)
+                sp_obj = next((s for s in plan.sub_problems if s.id == sp_id), None)
+                sp_desc = sp_obj.description[:80] if sp_obj else sp_id
+                if sr and sr.status == "solved" and sr.results_with_units:
+                    for var, info in sr.results_with_units.items():
+                        val = info.get("value", "")
+                        unit = info.get("unit", "")
+                        domain_results_lines.append(f"  {sp_id} | {var} = {val} {unit}".rstrip())
+                elif sr and sr.status == "solved" and sr.results:
+                    for var, val in sr.results.items():
+                        domain_results_lines.append(f"  {sp_id} | {var} = {val}")
+                else:
+                    domain_results_lines.append(f"  {sp_id} | FAILED — {sp_desc}")
+
+        domain_results_block = "\n".join(domain_results_lines) or "  (no results)"
+
+        # Build coverage checklist
+        checklist_lines = []
+        for cat in ("PHYSICS", "MATHEMATICS", "CHEMISTRY", "OTHER"):
+            sp_ids_in_cat = domain_groups.get(cat, [])
+            if sp_ids_in_cat:
+                checklist_lines.append(f"  • {cat}: {', '.join(sp_ids_in_cat)}")
+        coverage_checklist = "\n".join(checklist_lines)
+
+        failed_block = ("\nFAILED SUB-PROBLEMS (do NOT invent values for these):\n" +
+                        "\n".join(failed_sps)) if failed_sps else ""
 
         prompt = f"""\
 Write a complete, well-structured technical answer based ONLY on the verified computed results below.
 
-VERIFIED COMPUTED RESULTS (these are the ONLY numbers you may use):
-{results_block}
+VERIFIED COMPUTED RESULTS — grouped by domain:
+{domain_results_block}
 {failed_block}
+
+DOMAIN COVERAGE CHECKLIST — your answer MUST contain a dedicated section for EACH item:
+{coverage_checklist}
+Do NOT skip any domain. If a domain has only failed SPs, still include that section
+with "**[description]: Numerical solution failed.**" — no invented values.
 
 CONTEXT (for framing only — do NOT use any numbers from here):
 {question[:400]}
 
 RULES — you MUST follow these:
 1. Every number in your answer MUST come from the VERIFIED COMPUTED RESULTS above.
-2. If a sub-problem FAILED, write exactly: "**[SP description]: Numerical solution failed.**"
-   Do NOT guess, estimate, or invent a value for failed sub-problems.
-3. Explain the physical meaning and method for each result.
-4. List all computed values in a summary table with units.
+2. Structure your answer with one H2 section per domain category (## Physics Results,
+   ## Mathematics Results, ## Chemistry Results, etc.).
+3. Explain the physical/mathematical meaning and method for each result.
+4. List all computed values in a summary table with units at the end.
 5. Use markdown formatting (headers, bold, tables).
 6. Minimum 400 words.
 

@@ -1,5 +1,5 @@
 """
-ReAct Solver — per-sub-problem reasoning agent (deepseek-r1:14b)
+ReAct Solver — Swarm 3.7 — per-sub-problem reasoning agent
 
 Runs a Reason→Act→Observe loop to solve a single SubProblem.
 Tools are invoked via text-parsed markers (no native function-calling needed —
@@ -96,9 +96,15 @@ class SolverResult:
 _CONTEXT_ANCHOR_TEMPLATE = """\
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  PROBLEM PARAMETER ANCHOR — READ THIS BEFORE ANYTHING ELSE          ║
-║  These are the ONLY numerical values for this problem.              ║
 ╠══════════════════════════════════════════════════════════════════════╣
-{anchor_values}
+║  PROBLEM INPUTS (from question statement):                          ║
+{anchor_problem_values}
+╠══════════════════════════════════════════════════════════════════════╣
+║  🔒 LOCKED RESULTS FROM PRIOR SUB-PROBLEMS — FINAL, DO NOT REDO:   ║
+{anchor_locked_values}
+║  ⛔ If your expected output is the SAME QUANTITY as a locked value   ║
+║     above (even if variable name differs), USE the locked value.    ║
+║     Re-deriving a locked result will produce a conflicting answer.  ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  ⛔ FORBIDDEN — DO NOT define or import these in your code:          ║
 ║    G  = 6.67e-11  (gravitational constant — NOT in this problem)    ║
@@ -259,18 +265,24 @@ RULES:
     verified global manifest and produce conflicting results.
     BAD:  r0 = brentq(...)   # if r0 is already in GIVEN VALUES
     GOOD: # r0 is LOCKED — use the value from GIVEN VALUES directly
-18. HIGH-PRECISION FOR TINY DIFFERENCES: When two values may differ by less
-    than 1e-10 (e.g. relativistic corrections, quantum shifts, perturbation
-    results), you MUST use Python's decimal library to capture the difference:
-      from decimal import Decimal, getcontext
-      getcontext().prec = 50
-      omega_class = Decimal(str(omega_class_float))
-      omega_rel   = Decimal(str(omega_rel_float))
-      delta = omega_rel - omega_class
-      print(f"RESULT: delta_omega = {{float(delta):.6e}} rad/s")
-    NEVER report two physically distinct values as "identical." A v≪c
-    relativistic correction is NEVER exactly zero — always compute and
-    print the exact difference using Decimal arithmetic.
+18. HIGH-PRECISION ARITHMETIC (relativistic / quantum / perturbation):
+    For ANY calculation where the result may be < 1e-10 of the inputs
+    (e.g. v≪c corrections, fine-structure splits, orbit precession rates),
+    standard float64 silently rounds to zero — you MUST use mpmath:
+      import mpmath
+      mpmath.mp.dps = 50          # 50 decimal places
+      c  = mpmath.mpf('2.998e8')  # use exact value from INPUTS block
+      v  = mpmath.mpf(str(v_float))
+      gamma = 1 / mpmath.sqrt(1 - v**2 / c**2)
+      correction = gamma - mpmath.mpf('1')
+      print(f"RESULT: relativistic_correction = {{float(correction):.6e}}")
+    mpmath is installed (it ships with sympy). Fallback if unavailable:
+      from decimal import Decimal, getcontext; getcontext().prec = 50
+    RULES:
+    (a) NEVER feed v/c directly into numpy — numpy uses float64 (16 digits).
+    (b) NEVER subtract two nearly-equal float64 values — catastrophic cancellation.
+    (c) NEVER report a relativistic correction as zero or "identical to classical"
+        — the correction is always nonzero for finite v. Print the mpmath result.
 """
 
 
@@ -293,11 +305,13 @@ class ReactSolver:
         plan: "SolvePlan",
         research_context: str = "",
         searxng_url: Optional[str] = None,
+        manifest_values: Optional[Dict[str, Any]] = None,
     ):
         self.sub_problem = sub_problem
         self.plan = plan
         self.research_context = research_context
         self.searxng_url = searxng_url or os.getenv("SEARXNG_URL", "http://localhost:8080")
+        self._manifest_values: Dict[str, Any] = manifest_values or {}  # keys that are locked from prior SPs
 
         # Build conversation history: system + alternating user/assistant
         self._system = self._build_system_prompt()
@@ -750,11 +764,25 @@ class ReactSolver:
                 except ValueError:
                     pass
 
-        if given_vals:
-            anchor_lines = "\n".join(f"║  {k} = {v}" for k, v in given_vals.items())
+        # Split into problem-given values vs locked manifest values from prior SPs
+        manifest_keys = set(self._manifest_values.keys())
+        problem_entries = [(k, v) for k, v in given_vals.items() if k not in manifest_keys]
+        locked_entries  = [(k, v) for k, v in given_vals.items() if k in manifest_keys]
+
+        if problem_entries:
+            problem_lines = "\n".join(f"║  {k} = {v}" for k, v in problem_entries)
         else:
-            anchor_lines = "║  (use ONLY values explicitly stated in the problem description)"
-        context_anchor = _CONTEXT_ANCHOR_TEMPLATE.format(anchor_values=anchor_lines)
+            problem_lines = "║  (use ONLY values explicitly stated in the problem description)"
+
+        if locked_entries:
+            locked_lines = "\n".join(f"║  {k} = {v}  ← LOCKED (SP result)" for k, v in locked_entries)
+        else:
+            locked_lines = "║  (none — this is a first-wave sub-problem)"
+
+        context_anchor = _CONTEXT_ANCHOR_TEMPLATE.format(
+            anchor_problem_values=problem_lines,
+            anchor_locked_values=locked_lines,
+        )
 
         return _SYSTEM_PROMPT_TEMPLATE.format(
             context_anchor=context_anchor,
