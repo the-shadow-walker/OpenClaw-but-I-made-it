@@ -1,5 +1,5 @@
 """
-Swarm 3.7 — OrchestratorV3
+Swarm 3.8 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.7 top-level dispatcher.
+    Swarm 3.8 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.7 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.8 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -548,6 +548,11 @@ class OrchestratorV3:
             question, synthesis, plan, solver_results, requirements
         )
 
+        # ── Phase 3D: Domain completeness gate ────────────────────────────
+        print(f"\n{'─'*62}")
+        print(f"Phase 3D  DomainGate")
+        answer = await self._domain_completeness_gate(answer, plan, solver_results)
+
         n_solved = sum(1 for r in solver_results.values() if r.status == "solved")
         elapsed = time.time() - t0
         print(f"\n{_sep}")
@@ -575,6 +580,101 @@ class OrchestratorV3:
             return "MATHEMATICS"
         # Default: physics covers mechanics, orbital, thermo, electro, optics, etc.
         return "PHYSICS"
+
+    # ── Domain completeness gate ──────────────────────────────────────────────
+
+    async def _domain_completeness_gate(
+        self,
+        answer: str,
+        plan: "SolvePlan",
+        solver_results: Dict[str, "SolverResult"],
+    ) -> str:
+        """
+        Phase 3D: scan writer output for missing domain sections.
+        If a domain has solved SPs whose results don't appear in the answer,
+        generate a targeted append section via llm_query_coder and add it.
+        """
+        domain_groups: Dict[str, List[str]] = {}
+        for sp in plan.sub_problems:
+            cat = self._domain_category(sp.domain)
+            domain_groups.setdefault(cat, []).append(sp.id)
+
+        # Only act on multi-domain problems
+        if len(domain_groups) <= 1:
+            print("  → single domain — gate skipped")
+            return answer
+
+        answer_lower = answer.lower()
+        append_sections: List[str] = []
+
+        for cat in ("PHYSICS", "MATHEMATICS", "CHEMISTRY", "OTHER"):
+            sp_ids = domain_groups.get(cat, [])
+            if not sp_ids:
+                continue
+
+            # Collect solved results for this domain
+            solved_lines: List[str] = []
+            for sp_id in sp_ids:
+                sr = solver_results.get(sp_id)
+                sp_obj = next((s for s in plan.sub_problems if s.id == sp_id), None)
+                desc = sp_obj.description[:80] if sp_obj else sp_id
+                if sr and sr.status == "solved" and sr.results_with_units:
+                    for var, info in sr.results_with_units.items():
+                        val = info.get("value", "")
+                        unit = info.get("unit", "")
+                        solved_lines.append(f"  {sp_id} | {var} = {val} {unit}".rstrip())
+                elif sr and sr.status == "solved" and sr.results:
+                    for var, val in sr.results.items():
+                        solved_lines.append(f"  {sp_id} | {var} = {val}")
+
+            if not solved_lines:
+                continue  # no solved results to check
+
+            # Check if this domain's results are represented in the answer
+            # (look for at least one numeric value match OR domain header keyword)
+            cat_keyword = cat.lower()  # "physics", "mathematics", "chemistry"
+            has_header = any(kw in answer_lower for kw in
+                             [f"## {cat_keyword}", f"# {cat_keyword}",
+                              cat_keyword + " result", cat_keyword + " section"])
+
+            if not has_header:
+                # Also check if any computed values appear verbatim (first 6 chars)
+                val_found = False
+                for sp_id in sp_ids:
+                    sr = solver_results.get(sp_id)
+                    if sr and sr.results_with_units:
+                        for info in sr.results_with_units.values():
+                            val_str = str(info.get("value", ""))
+                            if len(val_str) >= 4 and val_str[:4] in answer:
+                                val_found = True
+                                break
+                if val_found:
+                    has_header = True  # values are there, just no header
+
+            if has_header:
+                print(f"  ✅ {cat}: present in answer")
+                continue
+
+            # Domain is genuinely absent — generate targeted section
+            print(f"  ⚠️  {cat}: MISSING from answer — generating section")
+            results_str = "\n".join(solved_lines)
+            prompt = (
+                f"The {cat} section is missing from the answer below. "
+                f"Write a complete '## {cat.title()} Results' section.\n\n"
+                f"COMPUTED {cat} RESULTS:\n{results_str}\n\n"
+                f"Write 3-5 sentences per result: method used, numerical value, "
+                f"physical/mathematical meaning. Use markdown. "
+                f"Start IMMEDIATELY with '## {cat.title()} Results'.\n"
+            )
+            section = await self._llm_query_coder(prompt)
+            if section.strip():
+                append_sections.append(section.strip())
+
+        if not append_sections:
+            return answer
+
+        print(f"  ✍️  Appending {len(append_sections)} missing domain section(s)")
+        return answer + "\n\n---\n\n" + "\n\n".join(append_sections)
 
     # ── Topological waves ─────────────────────────────────────────────────────
 

@@ -186,6 +186,15 @@ RULES:
    AND a number theory problem AND a chemistry problem) MUST be separate SPs with
    depends_on: []. They will run in PARALLEL, cutting total time. Only add a
    dependency if SP_B genuinely needs a RESULT value from SP_A.
+8. VARIABLE NAME CONTINUITY: If SP_B depends on SP_A, the variable names in
+   SP_B's inputs MUST exactly match the expected_output names from SP_A.
+   WRONG: SP_A outputs "r_circular_orbit", SP_B inputs has "r0" or "radius"
+   RIGHT: SP_A outputs "r_circular_orbit", SP_B inputs has "r_circular_orbit"
+9. NO DUPLICATE COMPUTATIONS: Never create two SPs that compute the same physical
+   quantity. If SP_A computes the circular orbit radius, no later SP should also
+   compute the radius. Use SP_A's result as an input to SP_B, not a re-derivation.
+   If a requirement says "verify the radius", the SP should take r from prior SP and
+   verify it numerically — NOT solve a fresh equation to find a different r.
 
 Respond ONLY with valid JSON (no markdown fences, no explanation):
 {{

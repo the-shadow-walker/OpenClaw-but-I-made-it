@@ -1,5 +1,5 @@
 """
-ReAct Solver — Swarm 3.7 — per-sub-problem reasoning agent
+ReAct Solver — Swarm 3.8 — per-sub-problem reasoning agent
 
 Runs a Reason→Act→Observe loop to solve a single SubProblem.
 Tools are invoked via text-parsed markers (no native function-calling needed —
@@ -335,10 +335,28 @@ class ReactSolver:
         # Seed with the sub-problem statement — repeat given values for emphasis
         _seed_given = {**(self.plan.given_values if self.plan else {}), **sp.inputs}
         _seed_given_str = ", ".join(f"{k}={v}" for k, v in _seed_given.items()) or "(see problem)"
+        # Build manifest lock block for seed (prevents re-deriving locked quantities)
+        _manifest_lock = ""
+        if self._manifest_values:
+            _mlines = "\n".join(f"   {k} = {v}" for k, v in self._manifest_values.items())
+            _manifest_lock = (
+                f"\n{'═'*58}\n"
+                f"🔒 ALREADY COMPUTED IN PRIOR WAVES — DO NOT RE-DERIVE:\n"
+                f"{_mlines}\n"
+                f"RULE: If your expected outputs ask for a quantity that is\n"
+                f"CONCEPTUALLY THE SAME as any value above (same physical\n"
+                f"meaning, different variable name — e.g. 'radius_solve' is\n"
+                f"the same as 'r_circular_orbit'), COPY that locked value\n"
+                f"directly into your FINAL_ANSWER. Do NOT run new code to\n"
+                f"find an 'alternative' value — the first solution is final.\n"
+                f"{'═'*58}\n"
+            )
+
         seed_msg = (
             f"Solve {sp.id}: {sp.description}\n"
             f"Domain: {sp.domain}\n"
             f"⚠️  GIVEN VALUES (use ONLY these — no G, no M_Earth): {_seed_given_str}\n"
+            f"{_manifest_lock}"
             f"Expected outputs: {sp.expected_outputs}\n"
             f"Begin your ReAct reasoning now."
         )
@@ -620,6 +638,19 @@ class ReactSolver:
                 forced += f"{var} = {val!r}  # LOCKED\n"
             forced += "# ====================================================================\n\n"
             code = forced + code
+
+        # Auto-inject mpmath if speed-of-light scale or relativistic keywords detected
+        _problem_text = (self.sub_problem.description + " " +
+                         (self.plan.problem if self.plan else "")).lower()
+        _needs_mpmath = (
+            any(isinstance(v, (int, float)) and abs(v) > 1e7
+                for v in self.sub_problem.inputs.values())
+            or any(kw in _problem_text for kw in
+                   ["relativistic", "speed of light", "lorentz", "v/c", "v²/c",
+                    "correction", "c =", "c="])
+        )
+        if _needs_mpmath and "mpmath" not in code:
+            code = "import mpmath; mpmath.mp.dps = 50  # auto-injected: high-precision\n" + code
 
         if not _HAS_EXECUTOR:
             return "ERROR: EquationExecutor not available — cannot run code."
