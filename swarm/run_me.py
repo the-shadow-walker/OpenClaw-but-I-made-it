@@ -440,12 +440,40 @@ def _parse_job_progress(log_text, elapsed):
     }
 
 
-def _progress_bar(pct, width=22):
-    """Purple/dim ASCII block bar.  e.g.  [████████░░░░░░]"""
-    filled = int(round(pct / 100 * width))
-    bar_on = "█" * filled
+# Green (46) → cyan (51) → blue (21) via the 256-color cube, 11 stops
+_TURN_GRADIENT = [46, 47, 48, 49, 50, 51, 45, 39, 33, 27, 21]
+
+def _turn_color(turn, max_turn):
+    """Render `turn` in a colour that slides green→blue as turn approaches max_turn."""
+    if not _USE_COLOR:
+        return str(turn)
+    n = len(_TURN_GRADIENT) - 1
+    idx = round((turn - 1) / max(max_turn - 1, 1) * n)
+    code = _TURN_GRADIENT[max(0, min(n, idx))]
+    return f"\033[38;5;{code}m{turn}\033[0m"
+
+# Distinct colour per action kind
+_ACTION_COLOR = {
+    "Coding":        lambda t: _c("94", t),   # bright blue
+    "Searching":     lambda t: _c("36", t),   # teal / cyan
+    "Writing":       lambda t: _c("35", t),   # magenta
+    "Loading model": lambda t: _c("33", t),   # amber / yellow
+    "Planning":      lambda t: _c("32", t),   # green
+    "Classifying":   lambda t: _c("96", t),   # bright cyan
+    "RAG lookup":    lambda t: _c("95", t),   # bright purple
+    "Thinking":      DIM,
+}
+
+def _action_color(action):
+    return _ACTION_COLOR.get(action, DIM)(action)
+
+def _progress_bar(pct, width=22, done=False):
+    """Block bar: purple while running, green when finished."""
+    filled  = int(round(pct / 100 * width))
+    bar_on  = "█" * filled
     bar_off = "░" * (width - filled)
-    return PURPLE("[") + PURPLE(bar_on) + DIM(bar_off) + PURPLE("]")
+    colour  = GREEN if done else PURPLE
+    return colour("[") + colour(bar_on) + DIM(bar_off) + colour("]")
 
 
 def cmd_jobs(server):
@@ -466,28 +494,47 @@ def cmd_jobs(server):
             log_text = _fetch_log_tail(server, jid, tail=200)
             prog = _parse_job_progress(log_text, float(el) if el else 0)
             pct  = prog["pct"]
-            bar  = _progress_bar(pct)
+            done = pct >= 100
+            bar  = _progress_bar(pct, done=done)
 
-            # ETA string
+            # Line 1: bar  pct  runtime  ETA
+            pct_str = YELLOW(f"{pct:3d}%")
+            rt_str  = BLUE(el_s)
             eta_str = ""
             if prog["eta_s"] is not None:
                 em, es = divmod(int(prog["eta_s"]), 60)
-                eta_str = f"  ETA ~{em}m{es:02d}s" if em else f"  ETA ~{es}s"
+                val = f"{em}m{es:02d}s" if em else f"{es}s"
+                eta_str = f"  {YELLOW('ETA ~')}{BLUE(val)}"
 
-            # SP/turn string
+            # Line 3 pieces:  phase  sp_count  sp_id  turn  action
+            phase_str = GREEN(prog["phase"])
+
+            sp_count = ""
+            if prog["sp_total"]:
+                sp_count = (f"  {LIGHT_BLUE(str(prog['sp_done']))}"
+                            f"{DIM('/')}{LIGHT_BLUE(str(prog['sp_total']))}"
+                            f" {DIM('SPs')}")
+
             sp_str = ""
             if prog["sp_id"]:
-                sp_str = f"  {PURPLE(prog['sp_id'])} T{prog['sp_turn']}/{prog['sp_max']}"
-            sp_count = (f"  {CYAN(str(prog['sp_done']))}/{CYAN(str(prog['sp_total']))} SPs"
-                        if prog["sp_total"] else "")
+                t_col = _turn_color(prog["sp_turn"], prog["sp_max"])
+                sp_str = (f"  {BLUE(prog['sp_id'])}"
+                          f"  {DIM('T')}{t_col}{DIM(f'/{prog[\"sp_max\"]}')}")
 
-            print(f"  {BOLD(jid)}  {bar}  {PURPLE(f'{pct:3d}%')}  {YELLOW(el_s)}{DIM(eta_str)}")
+            act_str = f"  {_action_color(prog['action'])}"
+
+            print(f"  {YELLOW(jid)}  {bar}  {pct_str}  {rt_str}{eta_str}")
             print(f"    {DIM(q_s)}")
-            print(f"    {DIM(prog['phase'])}{sp_count}{sp_str}  {YELLOW(prog['action'])}")
+            print(f"    {phase_str}{sp_count}{sp_str}{act_str}")
             print()
+
+        elif st == "completed":
+            bar = _progress_bar(100, done=True)
+            print(f"  {YELLOW(jid)}  {bar}  {GREEN('done')}  {BLUE(el_s)}  {DIM(q_s)}")
+        elif st == "failed":
+            print(f"  {YELLOW(jid)}  [{RED('failed'):10s}]  {q_s}  {BLUE(el_s)}")
         else:
-            col = {"completed": GREEN, "failed": RED}.get(st, DIM)
-            print(f"  {BOLD(jid)}  [{col(st):10s}]  {q_s}  {DIM(el_s)}")
+            print(f"  {YELLOW(jid)}  [{DIM(st):10s}]  {q_s}  {BLUE(el_s)}")
     print()
 
 def cmd_result(server, job_id):
