@@ -517,9 +517,10 @@ def cmd_jobs(server):
 
             sp_str = ""
             if prog["sp_id"]:
-                t_col = _turn_color(prog["sp_turn"], prog["sp_max"])
-                sp_str = (f"  {BLUE(prog['sp_id'])}"
-                          f"  {DIM('T')}{t_col}{DIM(f'/{prog[\"sp_max\"]}')}")
+                t_col   = _turn_color(prog["sp_turn"], prog["sp_max"])
+                sp_max  = prog["sp_max"]
+                sp_str  = (f"  {BLUE(prog['sp_id'])}"
+                           + f"  {DIM('T')}{t_col}" + DIM(f"/{sp_max}"))
 
             act_str = f"  {_action_color(prog['action'])}"
 
