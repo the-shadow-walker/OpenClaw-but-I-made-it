@@ -84,17 +84,18 @@ except ImportError:
 
 # ── Ollama constants ─────────────────────────────────────────────────────────
 _OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-_MODEL_REASONER = "qwq:32b"
-_MODEL_FALLBACK  = "deepseek-r1:32b"
-_MODEL_CODER     = "qwen2.5:14b"
-_MODEL_PLANNER   = "phi4:14b"
+_MODEL_REASONER      = "qwq:32b"
+_MODEL_FALLBACK      = "deepseek-r1:32b"
+_MODEL_CODER         = "qwen2.5:14b"
+_MODEL_PLANNER       = "phi4:14b"          # lightweight tasks (classify, etc.)
+_MODEL_SMART_PLANNER = "qwq:32b"           # Lead Architect — deep CoT planning
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OrchestratorV3:
     """
-    Swarm 3.9 top-level dispatcher.
+    Swarm 3.10 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +122,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.9 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.10 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -237,7 +238,7 @@ class OrchestratorV3:
         requirements: List = []
         if _HAS_PLANNER_V2:
             plan, requirements = await PlannerV2.create_plan(
-                question, classification, self._llm_query
+                question, classification, self._llm_query_planner
             )
         else:
             print("⚠️  PlannerV2 not available — single-SP fallback")
@@ -1232,6 +1233,25 @@ Rules:
             think=_RS.THINKING_ENABLED,
         )
 
+    async def _llm_query_planner(self, prompt: str, system_prompt: str = "") -> str:
+        """qwq:32b — Lead Architect: deep CoT for requirement shredding + SP decomposition.
+        keep_alive=0 so qwq unloads immediately after planning → VRAM free for solver."""
+        system = system_prompt or (
+            "You are the Lead Systems Architect. You are being evaluated on COMPLETENESS. "
+            "Every distinct mathematical operation, integral, series, chemical reaction, "
+            "or conceptual explanation in the prompt MUST have its own Sub-Problem. "
+            "If you omit a single task, the entire mission fails. "
+            "Output ONLY valid JSON matching the schema exactly."
+        )
+        return await OrchestratorV3._ollama_chat(
+            model=_MODEL_SMART_PLANNER,
+            prompt=prompt,
+            system=system,
+            timeout=600,        # 10 min ceiling for planning
+            num_predict=4096,   # JSON plan fits well within 4k tokens
+            keep_alive=0,       # unload qwq immediately → free VRAM for solver
+        )
+
     async def _llm_query_fallback(self, prompt: str, system_prompt: str = "") -> str:
         """deepseek-r1:32b — fallback when qwq fails."""
         return await self._ollama_chat(
@@ -1253,6 +1273,7 @@ Rules:
         timeout: int = 1800,
         num_predict: int = 2048,
         think: bool = True,
+        keep_alive: int = 600,
     ) -> str:
         """Direct Ollama /api/chat call using streaming (avoids HTTP timeout on large models)."""
         messages = []
@@ -1264,7 +1285,7 @@ Rules:
             "model": model,
             "messages": messages,
             "stream": True,
-            "keep_alive": 600,  # keep loaded 10 min — explicit unload at phase transitions
+            "keep_alive": keep_alive,
             # NOTE: do NOT pass "think" — Ollama 0.17+ rejects it for qwq/deepseek models.
             "options": {
                 "temperature": 0.6,

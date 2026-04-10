@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Swarm 3.9 -- Client Entry Point
+Swarm 3.10 -- Client Entry Point
 Connects to a remote Swarm API server (default: http://10.0.0.58:5002).
 
 Usage:
@@ -1123,7 +1123,7 @@ def cmd_stream(server: str, question: str):
 
 def cmd_repl(server):
     global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
-    print(f"{BOLD('Swarm 3.9 REPL')}  (server: {server})")
+    print(f"{BOLD('Swarm 3.10 REPL')}  (server: {server})")
     print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}  Tokens: {STREAM_TOKENS}")
     print("Commands: :health :status :jobs :stream <q> :ask <q> :tokens")
     print("          :result <job_id>  -- show answer for a completed job")

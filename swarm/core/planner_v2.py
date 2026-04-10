@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 def _extract_json(text: str) -> dict:
     """
     Robustly extract and parse a JSON object from LLM output.
-    Handles: markdown fences, preceding <thought> blocks, prose preambles.
+    Handles: markdown fences, <think>…</think> blocks, prose preambles.
     """
+    # Strip <think>…</think> reasoning blocks (qwq/deepseek-r1)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     # Strip markdown fences
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
     # Direct parse first (fast path)
@@ -300,8 +302,11 @@ class PlannerV2:
             )
 
             system = (
-                "You are a scientific problem planner. "
-                "Output ONLY valid JSON matching the schema exactly."
+                "You are the Lead Systems Architect. "
+                "You are being evaluated on COMPLETENESS — every distinct mathematical "
+                "operation, integral, series, chemical step, or conceptual explanation "
+                "MUST have its own Sub-Problem. Omitting a single task means mission failure. "
+                "Output ONLY valid JSON matching the schema exactly. No prose, no fences."
             )
 
             raw = await llm_query_func(prompt, system)
@@ -328,8 +333,11 @@ class PlannerV2:
         try:
             prompt = _REQUIREMENT_PROMPT.format(question=question[:1200])
             system = (
-                "You are a requirement extractor. "
-                "Output ONLY valid JSON matching the schema exactly."
+                "You are a precision requirement extractor. "
+                "Your job: find EVERY distinct task in the question — computations, "
+                "explanations, comparisons, derivations, each gets its own requirement. "
+                "Never merge two different operations. Never skip fine-print tasks. "
+                "Output ONLY valid JSON matching the schema exactly. No prose, no fences."
             )
             raw = await llm_query_func(prompt, system)
             data = _extract_json(raw)
