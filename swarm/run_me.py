@@ -332,18 +332,162 @@ def cmd_status(server):
     print(f"  Max conc.  : {cfg.get('max_concurrent',3)}")
     print(f"  SearXNG    : {'yes' if cfg.get('searxng') else 'no'}\n")
 
+def _fetch_log_tail(server, job_id, tail=200):
+    """Fetch last N lines of job log. Returns empty string on any failure."""
+    url = server.rstrip("/") + f"/logs/{job_id}?tail={tail}"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.read().decode(errors="replace")
+    except Exception:
+        return ""
+
+
+def _parse_job_progress(log_text, elapsed):
+    """
+    Parse log text → dict with: phase, sp_id, sp_turn, sp_max, action,
+    sp_total, sp_done, pct, eta_s, wave, wave_total.
+    """
+    lines      = log_text.splitlines()
+    phase      = "—"
+    sp_id      = None
+    sp_turn    = 0
+    sp_max     = 15
+    action     = "Thinking"
+    sp_total   = 0
+    sp_done    = 0
+    wave       = 0
+    wave_total = 0
+    sp_turns   = {}   # sp_id → last turn seen (for ETA via turn counting)
+
+    for ln in lines:
+        # Phase header: "Phase 0A │ 0.1s" or just "Phase 2"
+        m = re.search(r'Phase\s+(\w+)', ln)
+        if m:
+            phase = f"Phase {m.group(1)}"
+
+        # SolvePlan total: "📋 SolvePlan: 4 sub-problem(s)"
+        m = re.search(r'SolvePlan:\s+(\d+)\s+sub-problem', ln)
+        if m:
+            sp_total = int(m.group(1))
+
+        # Wave: "Wave 2/4" or "─── Wave 2 ───"
+        m = re.search(r'Wave\s+(\d+)(?:/(\d+))?', ln)
+        if m:
+            wave = int(m.group(1))
+            if m.group(2):
+                wave_total = int(m.group(2))
+
+        # SP turn: "[SP1] Turn 3/15" or "[SP2] T4/15"
+        m = re.search(r'\[(SP\d+)\]\s+T(?:urn\s+)?(\d+)/(\d+)', ln)
+        if m:
+            sp_id   = m.group(1)
+            sp_turn = int(m.group(2))
+            sp_max  = int(m.group(3))
+            sp_turns[sp_id] = sp_turn
+
+        # Action from ReAct tool dispatch line "→ run_code:" etc.
+        m = re.search(r'→\s+(run_code|search|rag):', ln)
+        if m:
+            action = {"run_code": "Coding", "search": "Searching",
+                      "rag": "RAG lookup"}.get(m.group(1), "Thinking")
+
+        # SP solved / failed
+        if re.search(r'\[SP\d+\].*(?:SOLVED|✅)', ln):
+            sp_done += 1
+            m2 = re.search(r'\[(SP\d+)\]', ln)
+            if m2 and m2.group(1) == sp_id:
+                sp_id = None
+        elif re.search(r'\[SP\d+\].*(?:FAILED|TIMEOUT)', ln, re.IGNORECASE):
+            sp_done += 1
+
+        # Writing / synthesis
+        if re.search(r'WriterAgent|write_final|Phase 3C|Synthesis|🖊|✍', ln):
+            action = "Writing"
+
+        # VRAM / model loading
+        if re.search(r'VRAM handoff|Loading model|ollama.*pull', ln, re.IGNORECASE):
+            action = "Loading model"
+
+        # Planning / classifying (pre-solve phases)
+        if re.search(r'PlannerV2|extract_requirements|📋', ln):
+            action = "Planning"
+        elif re.search(r'Phase 0[ABC]|question_classifier|ClassificationResult', ln):
+            action = "Classifying"
+
+        # Broad search phase before SPs start
+        if re.search(r'Phase [12]\b', ln) and sp_id is None and sp_done == 0:
+            action = "Searching"
+
+    # Compute percentage
+    if sp_total > 0:
+        pct = min(99, int(sp_done / sp_total * 100))
+        if sp_done >= sp_total:
+            pct = 100
+    else:
+        pct = 0 if sp_done == 0 else min(99, sp_done * 15)
+
+    # ETA: avg time per completed SP × remaining SPs
+    eta_s = None
+    remaining = max(0, sp_total - sp_done)
+    if sp_done > 0 and elapsed and remaining > 0:
+        eta_s = (float(elapsed) / sp_done) * remaining
+
+    return {
+        "phase": phase, "sp_id": sp_id, "sp_turn": sp_turn, "sp_max": sp_max,
+        "action": action, "sp_total": sp_total, "sp_done": sp_done,
+        "pct": pct, "eta_s": eta_s, "wave": wave, "wave_total": wave_total,
+    }
+
+
+def _progress_bar(pct, width=22):
+    """Purple/dim ASCII block bar.  e.g.  [████████░░░░░░]"""
+    filled = int(round(pct / 100 * width))
+    bar_on = "█" * filled
+    bar_off = "░" * (width - filled)
+    return PURPLE("[") + PURPLE(bar_on) + DIM(bar_off) + PURPLE("]")
+
+
 def cmd_jobs(server):
     data = _get(server, "/jobs")
     jobs = data.get("jobs", [])
     if not jobs:
         print(DIM("  (no jobs)"))
         return
-    for j in sorted(jobs, key=lambda x: x.get("created_at",""), reverse=True)[:20]:
-        st = j.get("status","?")
-        col = {"completed": GREEN, "failed": RED, "processing": YELLOW}.get(st, DIM)
-        q  = (j.get("question","")[:55] + "...") if len(j.get("question","")) > 55 else j.get("question","")
-        el = f"  {j.get('elapsed',''):.0f}s" if j.get("elapsed") else ""
-        print(f"  {BOLD(j.get('job_id','?'))}  [{col(st):10s}]  {q}{DIM(el)}")
+    for j in sorted(jobs, key=lambda x: x.get("created_at", ""), reverse=True)[:20]:
+        st  = j.get("status", "?")
+        jid = j.get("job_id", "?")
+        q   = j.get("question", "")
+        q_s = (q[:52] + "…") if len(q) > 52 else q
+        el  = j.get("elapsed") or 0
+        el_s = f"{float(el):.0f}s" if el else "—"
+
+        if st == "processing":
+            log_text = _fetch_log_tail(server, jid, tail=200)
+            prog = _parse_job_progress(log_text, float(el) if el else 0)
+            pct  = prog["pct"]
+            bar  = _progress_bar(pct)
+
+            # ETA string
+            eta_str = ""
+            if prog["eta_s"] is not None:
+                em, es = divmod(int(prog["eta_s"]), 60)
+                eta_str = f"  ETA ~{em}m{es:02d}s" if em else f"  ETA ~{es}s"
+
+            # SP/turn string
+            sp_str = ""
+            if prog["sp_id"]:
+                sp_str = f"  {PURPLE(prog['sp_id'])} T{prog['sp_turn']}/{prog['sp_max']}"
+            sp_count = (f"  {CYAN(str(prog['sp_done']))}/{CYAN(str(prog['sp_total']))} SPs"
+                        if prog["sp_total"] else "")
+
+            print(f"  {BOLD(jid)}  {bar}  {PURPLE(f'{pct:3d}%')}  {YELLOW(el_s)}{DIM(eta_str)}")
+            print(f"    {DIM(q_s)}")
+            print(f"    {DIM(prog['phase'])}{sp_count}{sp_str}  {YELLOW(prog['action'])}")
+            print()
+        else:
+            col = {"completed": GREEN, "failed": RED}.get(st, DIM)
+            print(f"  {BOLD(jid)}  [{col(st):10s}]  {q_s}  {DIM(el_s)}")
     print()
 
 def cmd_result(server, job_id):
