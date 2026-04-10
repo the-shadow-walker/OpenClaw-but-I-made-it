@@ -1,5 +1,5 @@
 """
-ReAct Solver — Swarm 3.8 — per-sub-problem reasoning agent
+ReAct Solver — Swarm 3.9 — per-sub-problem reasoning agent
 
 Runs a Reason→Act→Observe loop to solve a single SubProblem.
 Tools are invoked via text-parsed markers (no native function-calling needed —
@@ -275,14 +275,25 @@ RULES:
       v  = mpmath.mpf(str(v_float))
       gamma = 1 / mpmath.sqrt(1 - v**2 / c**2)
       correction = gamma - mpmath.mpf('1')
-      print(f"RESULT: relativistic_correction = {{float(correction):.6e}}")
+      # PRINT 20 DECIMAL PLACES — correction is ~(v/c)²/2 ~ 1e-17 scale
+      print(f"RESULT: relativistic_correction = {{float(correction):.20e}}")
     mpmath is installed (it ships with sympy). Fallback if unavailable:
       from decimal import Decimal, getcontext; getcontext().prec = 50
     RULES:
     (a) NEVER feed v/c directly into numpy — numpy uses float64 (16 digits).
     (b) NEVER subtract two nearly-equal float64 values — catastrophic cancellation.
-    (c) NEVER report a relativistic correction as zero or "identical to classical"
-        — the correction is always nonzero for finite v. Print the mpmath result.
+    (c) SCALE CHECK: for v ≈ 1 m/s and c = 3e8 m/s, the correction is
+        ~(v/c)²/2 ≈ 5.6e-18. If your printed result does NOT look like ~1e-17
+        to ~1e-15, your calculation is WRONG. Re-run with mpmath.mpf().
+    (d) NEVER report "relativistic correction is zero" or "identical to classical"
+        — print the EXACT mpmath value with 20 decimal places.
+19. LAMBDA BAN FOR PHYSICS FUNCTIONS: Never define a potential V(r), effective
+    force F(r), or any physics/math function as a Python lambda when passing it
+    to scipy solvers or when it will be evaluated repeatedly. Lambdas fail in
+    sandboxed execution for complex expressions. ALWAYS use a standard def:
+      BAD:  V = lambda r: -5/r + 3*r**2   # crashes in sandbox
+      GOOD: def V(r): return -5/r + 3*r**2
+    This applies to all functions passed to brentq, fsolve, solve_ivp, quad.
 """
 
 
@@ -650,7 +661,20 @@ class ReactSolver:
                     "correction", "c =", "c="])
         )
         if _needs_mpmath and "mpmath" not in code:
-            code = "import mpmath; mpmath.mp.dps = 50  # auto-injected: high-precision\n" + code
+            # Estimate expected correction scale for the comment hint
+            _v_vals = [v for v in self.sub_problem.inputs.values()
+                       if isinstance(v, (int, float)) and 0 < abs(v) < 1e6]
+            _c_vals = [v for v in self.sub_problem.inputs.values()
+                       if isinstance(v, (int, float)) and abs(v) > 1e7]
+            _scale_hint = ""
+            if _v_vals and _c_vals:
+                _ratio = _v_vals[0] / _c_vals[0]
+                _scale_hint = f"  # expected correction ≈ (v/c)²/2 ~ {_ratio**2/2:.2e}"
+            mpmath_preamble = (
+                f"import mpmath; mpmath.mp.dps = 50{_scale_hint}\n"
+                f"# ⚠️  Use mpmath.mpf() for ALL v/c terms — float64 rounds to 0\n"
+            )
+            code = mpmath_preamble + code
 
         if not _HAS_EXECUTOR:
             return "ERROR: EquationExecutor not available — cannot run code."

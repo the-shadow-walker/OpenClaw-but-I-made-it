@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Swarm 3.8 -- Client Entry Point
+Swarm 3.9 -- Client Entry Point
 Connects to a remote Swarm API server (default: http://10.0.0.58:5002).
 
 Usage:
@@ -751,7 +751,7 @@ def cmd_stream(server: str, question: str):
     _stop_spin   = threading.Event()
 
     if VERBOSITY >= 1:
-        print(f"\n{BOLD('Swarm 3.8')}  {DIM(question[:80])}")
+        print(f"\n{BOLD('Swarm 3.9')}  {DIM(question[:80])}")
         print(DIM("-" * 60))
 
     # ── spinner/status line — driven by background thread every 0.15s ────────
@@ -931,7 +931,7 @@ def cmd_stream(server: str, question: str):
 
 def cmd_repl(server):
     global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
-    print(f"{BOLD('Swarm 3.8 REPL')}  (server: {server})")
+    print(f"{BOLD('Swarm 3.9 REPL')}  (server: {server})")
     print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}  Tokens: {STREAM_TOKENS}")
     print("Commands: :health :status :jobs :stream <q> :ask <q> :tokens")
     print("          :result <job_id>  -- show answer for a completed job")
@@ -1012,7 +1012,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="run_me.py",
-        description="Swarm 3.8 client",
+        description="Swarm 3.9 client",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:

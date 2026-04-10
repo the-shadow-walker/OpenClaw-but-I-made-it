@@ -1,5 +1,5 @@
 """
-Swarm 3.8 — OrchestratorV3
+Swarm 3.9 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -94,7 +94,7 @@ _MODEL_PLANNER   = "phi4:14b"
 
 class OrchestratorV3:
     """
-    Swarm 3.8 top-level dispatcher.
+    Swarm 3.9 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -121,7 +121,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.8 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.9 OrchestratorV3  —  planner:{_MODEL_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -404,6 +404,33 @@ class OrchestratorV3:
                     ))
                 else:
                     wave_results.append(res)
+            # ── Manifest consensus: reject values that conflict with prior waves ─
+            # If a new result differs by >1% from an already-solved manifest value,
+            # pin the new SP's value to the prior manifest (trust earlier waves).
+            for result in wave_results:
+                if result.status != "solved":
+                    continue
+                for var in list(result.results.keys()):
+                    if var not in global_manifest:
+                        continue
+                    try:
+                        prior_val = float(global_manifest[var].split()[0])
+                        new_val = float(str(result.results[var]))
+                        if prior_val == 0 or new_val == 0:
+                            continue
+                        pct_diff = abs(new_val - prior_val) / abs(prior_val)
+                        if pct_diff > 0.01:  # >1% threshold
+                            print(
+                                f"  🚨 CONSENSUS: {var} manifest={prior_val:.6g} "
+                                f"vs {result.sub_problem_id}={new_val:.6g} "
+                                f"({pct_diff*100:.1f}% diff) — pinned to manifest value"
+                            )
+                            result.results[var] = prior_val
+                            if var in result.results_with_units:
+                                result.results_with_units[var]["value"] = prior_val
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
+
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result
 
@@ -562,10 +589,33 @@ class OrchestratorV3:
     # ── Domain categorisation ─────────────────────────────────────────────────
 
     @staticmethod
-    def _domain_category(domain: str) -> str:
-        """Map an SP domain string to a broad category for the writer checklist."""
+    def _domain_category(domain: str, description: str = "") -> str:
+        """
+        Map an SP domain string + description to a broad category.
+        Description keywords take priority over the planner's domain label
+        (planner often over-labels everything as 'physics').
+        """
+        desc = description.lower()
+        # ── Description-first overrides (planner often mislabels these) ─────
+        # Mathematics / Calculus
+        if any(kw in desc for kw in [
+            "stirling", "infinite series", "series expansion", "series analysis",
+            "series sum", "convergence", "sigma notation", "factorial approximat",
+            "improper integral", "evaluate integral", "antiderivative",
+            "integrate f", "integrate the", "compute the integral", "definite integral",
+        ]):
+            return "MATHEMATICS"
+        # Chemistry
+        if any(kw in desc for kw in [
+            "gibbs-helmholtz", "gibbs helmholtz", "gibbs free energy",
+            "electrochemical", "electrochemistry", "cell potential",
+            "faraday", "nernst", "oxidation", "reduction", "half-cell",
+            "molar enthalpy", "molar entropy", "thermochemistry",
+        ]):
+            return "CHEMISTRY"
+
+        # ── Fall back to domain label ─────────────────────────────────────────
         d = domain.lower().replace("_", "").replace(" ", "")
-        # Chemistry-specific checks first (avoid "thermo" matching both)
         if any(x in d for x in ["electrochemist", "thermochemist", "biochem",
                                  "analyticalchem", "physicalchem", "gibbs", "faraday"]):
             return "CHEMISTRY"
@@ -578,7 +628,6 @@ class OrchestratorV3:
             return "MATHEMATICS"
         if any(x in d for x in ["math", "analysis"]):
             return "MATHEMATICS"
-        # Default: physics covers mechanics, orbital, thermo, electro, optics, etc.
         return "PHYSICS"
 
     # ── Domain completeness gate ──────────────────────────────────────────────
@@ -596,12 +645,17 @@ class OrchestratorV3:
         """
         domain_groups: Dict[str, List[str]] = {}
         for sp in plan.sub_problems:
-            cat = self._domain_category(sp.domain)
+            # Pass description so mislabeled "physics" SPs are correctly categorised
+            cat = self._domain_category(sp.domain, sp.description)
             domain_groups.setdefault(cat, []).append(sp.id)
 
-        # Only act on multi-domain problems
-        if len(domain_groups) <= 1:
-            print("  → single domain — gate skipped")
+        # Always run the gate — even "single-domain" labels may hide math/chem SPs
+        # that were mislabeled by the planner
+        if not any(
+            solver_results.get(sp.id) and solver_results[sp.id].status == "solved"
+            for sp in plan.sub_problems
+        ):
+            print("  → no solved SPs — gate skipped")
             return answer
 
         answer_lower = answer.lower()
@@ -869,7 +923,10 @@ END_ANSWER_DATA
         domain_groups: Dict[str, List[str]] = {}  # category → [sp_id, ...]
         for sp_id in plan.dependency_order:
             sp_obj = next((s for s in plan.sub_problems if s.id == sp_id), None)
-            cat = self._domain_category(sp_obj.domain if sp_obj else "physics")
+            cat = self._domain_category(
+                sp_obj.domain if sp_obj else "physics",
+                sp_obj.description if sp_obj else "",
+            )
             domain_groups.setdefault(cat, []).append(sp_id)
 
         # Build domain-structured results block

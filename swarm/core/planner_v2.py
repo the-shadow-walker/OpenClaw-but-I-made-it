@@ -195,6 +195,21 @@ RULES:
    compute the radius. Use SP_A's result as an input to SP_B, not a re-derivation.
    If a requirement says "verify the radius", the SP should take r from prior SP and
    verify it numerically — NOT solve a fresh equation to find a different r.
+10. MANDATORY CROSS-DOMAIN LABELS — assign these domains regardless of the overall
+    question topic:
+    - domain "calculus" or "mathematics": ANY SP whose task is to evaluate an
+      integral, compute a series sum, apply Stirling's approximation, analyze
+      convergence, or perform symbolic differentiation/integration.
+      WRONG: domain "physics" for "evaluate the improper integral ∫₀^∞ ..."
+      RIGHT: domain "calculus"
+    - domain "electrochemistry" or "chemistry": ANY SP involving Gibbs energy,
+      Helmholtz free energy, cell potential, Nernst equation, Faraday's law,
+      half-cell reactions, molar enthalpy/entropy, or thermochemistry.
+      WRONG: domain "physics" for "compute the Gibbs-Helmholtz correction"
+      RIGHT: domain "electrochemistry"
+    - domain "mechanics", "orbital_mechanics", "quantum_mechanics": for classical
+      orbits, Hamiltonians, wavefunctions, potential energy wells.
+    DO NOT default everything to "physics" — use the most specific domain string.
 
 Respond ONLY with valid JSON (no markdown fences, no explanation):
 {{
