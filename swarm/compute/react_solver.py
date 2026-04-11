@@ -231,6 +231,12 @@ RULES:
             a, b = xs[sign_changes[0]], xs[sign_changes[0]+1]
             r0 = scipy.optimize.brentq(f, a, b)
       (c) Prefer brentq over fsolve — it is guaranteed to converge in a bracket.
+      (d) ONE-STRIKE RULE: If sympy.solve() returns [] or CRootOf with no real
+          float root, do NOT retry SymPy on the same expression. Switch NOW:
+            Polynomial ax^n+...+a0=0 → numpy.roots([a_n,...,a_0])
+            General equation        → scipy.optimize.fsolve(f, x0=initial_guess)
+          SymPy gets exactly ONE attempt per expression. After that, it is banned
+          for that expression for the remainder of this sub-problem.
     DERIVATIVE SIGN CHECK: for V(r) = A/r^n, dV/dr = -nA/r^(n+1). Verify
     signs before solving: d/dr(-5/r) = +5/r², d/dr(3r²) = 6r.
 13. NEVER write placeholder syntax like <value_from_R3> or {{result_R5}} in
@@ -294,6 +300,15 @@ RULES:
       BAD:  V = lambda r: -5/r + 3*r**2   # crashes in sandbox
       GOOD: def V(r): return -5/r + 3*r**2
     This applies to all functions passed to brentq, fsolve, solve_ivp, quad.
+20. PINT UNIT VALIDATION (electric fence): When mixing unit domains (e.g.,
+    joules vs kJ/mol, radians vs degrees, meters vs AU), use pint to validate:
+      import pint; ureg = pint.UnitRegistry()
+      force = 9.8 * ureg.newton
+      distance = 2.0 * ureg.meter
+      energy = (force * distance).to(ureg.joule)  # pint checks dimensions
+      print(f"RESULT: energy = {energy.magnitude:.6g} J")
+    If pint raises a DimensionalityError your equation is mixing incompatible
+    units — FIX the equation before printing any result. pint is installed.
 """
 
 
@@ -333,6 +348,7 @@ class ReactSolver:
         self._tool_counts: Dict[str, int] = {"run_code": 0, "search": 0, "rag": 0}
         self._locked_results: Dict[str, str] = {}  # Ledger: var → "value unit" (never overwritten once set)
         self._recent_lens: List[int] = []         # Loop detection: last 3 response lengths
+        self._failed_snippets: List[str] = []     # Error-Memory: key failing lines across all turns
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -392,14 +408,19 @@ class ReactSolver:
                     verification_note="Hard timeout (1800s) reached",
                 )
 
-            # Context pruning: Turn 6+ with zero computed results → trim to seed + last error
-            if turn == 6 and not self._locked_results and len(self._history) > 5:
-                seed_msg = self._history[:1]       # original given-values seed
-                last_two = self._history[-2:]      # last assistant + observation
-                pruned_count = len(self._history) - len(seed_msg) - len(last_two)
-                self._history = seed_msg + last_two
-                print(f"  ✂️  [{sp.id}] T6 context prune: dropped {pruned_count} old turns (0 results yet)")
-                self._log(f"[CONTEXT PRUNE at T6: dropped {pruned_count} turns]")
+            # Token-aware pruning: if history > ~12k tokens with no results yet,
+            # keep seed + last 2 pairs. 32B models lose instruction adherence when
+            # context fills with failed code — this resets attention to the rules.
+            _hist_chars = sum(len(m["content"]) for m in self._history)
+            if _hist_chars > 24000 and not self._locked_results and len(self._history) > 5:
+                seed_msg  = self._history[:1]
+                last_four = self._history[-4:]
+                pruned_count = len(self._history) - 1 - len(last_four)
+                pruned_chars = _hist_chars - sum(len(m["content"]) for m in seed_msg + last_four)
+                self._history = seed_msg + last_four
+                print(f"  \u2702\ufe0f  [{sp.id}] T{turn} token-prune: dropped {pruned_count} turns "
+                      f"({pruned_chars//1000}k chars, 0 results yet)")
+                self._log(f"[TOKEN PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
 
             # Query the model
             response = await self._llm_call()
@@ -699,6 +720,27 @@ class ReactSolver:
                 lineno_hint = lineno_m.group(1) if lineno_m else "?"
                 stderr_text = result.error or ""
                 stdout_text = result.output or ""
+
+                # Error-Memory: extract and log the specific failing line
+                try:
+                    _code_lines = code.splitlines()
+                    _err_idx = int(lineno_hint) - 1 if lineno_hint != "?" else len(_code_lines) - 1
+                    _failing_line = _code_lines[_err_idx].strip() if 0 <= _err_idx < len(_code_lines) else ""
+                    if _failing_line and _failing_line not in self._failed_snippets:
+                        self._failed_snippets.append(_failing_line)
+                except Exception:
+                    pass
+
+                # Build "wall of shame" — show all prior failed lines so model can't repeat them
+                _shame_block = ""
+                if len(self._failed_snippets) > 1:
+                    _shame_lines = "\n".join(f"  \u2717 {s}" for s in self._failed_snippets[-5:])
+                    _shame_block = (
+                        f"\n\u26a0\ufe0f  LINES YOU HAVE ALREADY TRIED AND FAILED "
+                        f"({len(self._failed_snippets)} total):\n"
+                        f"{_shame_lines}\n"
+                        f"DO NOT repeat these patterns. Use a completely different approach.\n"
+                    )
                 sympy_keywords = (
                     "crootof", "sympy", "zoo", "oo ", "nan",
                     "solve returned []", "complex root", "no solution",
@@ -721,7 +763,8 @@ class ReactSolver:
                     f"🛑 CODE FAILED (Turn {self._turn}/{self.MAX_TURNS}).\n"
                     f"Error (line {lineno_hint}):\n{stderr_text[:1500]}\n\n"
                     f"STDOUT before crash:\n{stdout_text[:500]}\n"
-                    f"{sympy_ban}\n"
+                    f"{sympy_ban}"
+                    f"{_shame_block}\n"
                     f"⚠️  FIX INSTRUCTIONS: Fix ONLY the single failing line. "
                     f"Keep all imports, GIVEN VALUES block, and working code unchanged. "
                     f"Do NOT rewrite the entire script."
