@@ -330,15 +330,16 @@ def _make_orchestrator(date_filter: str = None):
         return None
 
 
-async def _run_question(question: str, date_filter: str = None) -> str:
+async def _run_question(question: str, date_filter: str = None, job_id: str = "") -> str:
     orch = _make_orchestrator(date_filter)
     if orch is None:
         return "Error: Orchestrator not available"
     try:
-        return await orch.process_question(question)
+        return await orch.process_question(question, job_id=job_id)
     except Exception as e:
         logging.error(f"Processing error: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+        print(traceback.format_exc())  # stdout → captured in job disk log
         return f"Error processing question: {e}"
 
 
@@ -392,7 +393,7 @@ def _start_worker(job_id: str, question: str, since: str = None,
         try:
             job_manager.update_job(job_id, 'processing', progress='Initializing...',
                                    log_path=log_path)
-            answer = loop.run_until_complete(_run_question(question, date_filter=since))
+            answer = loop.run_until_complete(_run_question(question, date_filter=since, job_id=job_id))
             elapsed = round(time.time() - t0, 1)
             job_manager.update_job(job_id, 'completed', answer=answer, elapsed=elapsed)
             # Persist final answer to disk immediately — survives service restarts
@@ -624,6 +625,30 @@ def get_logs(job_id: str):
         return Response('\n'.join(lines), mimetype='text/plain')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/debug/<job_id>', methods=['GET'])
+def get_debug_index(job_id: str):
+    """List available SP debug log files for a job."""
+    debug_dir = Config.RESULTS_DIR / "debug" / job_id
+    if not debug_dir.exists():
+        return jsonify({'error': f'No debug logs for job {job_id} — run with a newer version or job not finished yet'}), 404
+    files = sorted(p.name for p in debug_dir.iterdir() if p.is_file())
+    return jsonify({'job_id': job_id, 'files': files, 'path': str(debug_dir)})
+
+
+@app.route('/debug/<job_id>/<filename>', methods=['GET'])
+def get_debug_file(job_id: str, filename: str):
+    """Return the raw content of a specific SP debug log file."""
+    # Sanitise filename — only allow word chars, dash, dot
+    import re as _re
+    if not _re.match(r'^[\w\-\.]+$', filename):
+        return jsonify({'error': 'invalid filename'}), 400
+    debug_dir = Config.RESULTS_DIR / "debug" / job_id
+    path = debug_dir / filename
+    if not path.exists():
+        return jsonify({'error': f'{filename} not found'}), 404
+    return Response(path.read_text(errors='replace'), mimetype='text/plain')
 
 
 @app.route('/query', methods=['POST'])

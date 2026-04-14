@@ -306,7 +306,7 @@ RULES:
       force = 9.8 * ureg.newton
       distance = 2.0 * ureg.meter
       energy = (force * distance).to(ureg.joule)  # pint checks dimensions
-      print(f"RESULT: energy = {energy.magnitude:.6g} J")
+      print(f"RESULT: energy = {{energy.magnitude:.6g}} J")
     If pint raises a DimensionalityError your equation is mixing incompatible
     units — FIX the equation before printing any result. pint is installed.
 """

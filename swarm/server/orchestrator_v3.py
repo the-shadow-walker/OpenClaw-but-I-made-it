@@ -129,9 +129,10 @@ class OrchestratorV3:
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
-    async def process_question(self, question: str, status=None) -> str:
+    async def process_question(self, question: str, status=None, job_id: str = "") -> str:
         """Answer any question. Drop-in interface for OrchestratorV2_1."""
         self.status = status
+        self._job_id = job_id
         t0 = datetime.now()
         _qtype_val: str = "unknown"   # track before try so except can read it
 
@@ -188,7 +189,7 @@ class OrchestratorV3:
 
             # MATHEMATICAL or HYBRID → new ReAct pipeline
             if qtype.value in ("mathematical", "hybrid"):
-                return await self._solve_react(question, classification, qtype.value)
+                return await self._solve_react(question, classification, qtype.value, job_id=self._job_id)
 
             # Fallback for any other classification
             return await self._delegate_v2(question)
@@ -196,7 +197,7 @@ class OrchestratorV3:
         except Exception as e:
             import traceback as _tb
             print(f"\n❌ OrchestratorV3 error: {e}")
-            _tb.print_exc()   # always print full traceback so we can diagnose
+            print(_tb.format_exc())   # print full traceback to stdout → captured in job log
             # For MATHEMATICAL/HYBRID questions do NOT fall back to V2_1 — it will
             # hallucinate convincing-looking but wrong numbers.  Return an honest
             # failure so the user knows to retry rather than trust fabricated output.
@@ -222,6 +223,7 @@ class OrchestratorV3:
         question: str,
         classification,
         qtype_value: str,
+        job_id: str = "",
     ) -> str:
         t0 = time.time()
         _sep = "─" * 62
@@ -585,6 +587,36 @@ class OrchestratorV3:
         elapsed = time.time() - t0
         print(f"\n{_sep}")
         print(f"✅ Done │ {n_solved}/{len(solver_results)} SP(s) solved │ Total: {elapsed:.1f}s")
+
+        # ── Debug: SP status summary + persist raw logs ───────────────────
+        print(f"\n{'─'*62}")
+        print("📊 SP Debug Summary")
+        for sp in plan.sub_problems:
+            sr = solver_results.get(sp.id)
+            if sr is None:
+                print(f"  {sp.id}  MISSING   {sp.description[:60]}")
+                continue
+            vals = ", ".join(
+                f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                for v, d in (sr.results_with_units or {}).items()
+            ) or "(none)"
+            print(f"  {sp.id}  {sr.status.upper():8s}  turns={sr.turn_count}  "
+                  f"results={vals}  │  {sp.description[:50]}")
+
+        if job_id:
+            import pathlib
+            debug_dir = pathlib.Path("./swarm_results/debug") / job_id
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            for sp_id, sr in solver_results.items():
+                if sr.raw_log:
+                    (debug_dir / f"{sp_id}.log").write_text(sr.raw_log, encoding="utf-8")
+            # Write plan summary
+            try:
+                (debug_dir / "_plan.md").write_text(plan.to_markdown(), encoding="utf-8")
+            except Exception:
+                pass
+            print(f"  📁 SP logs → swarm_results/debug/{job_id}/")
+
         return answer
 
     # ── Domain categorisation ─────────────────────────────────────────────────

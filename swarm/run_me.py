@@ -822,6 +822,60 @@ def cmd_logs(server: str, job_id: str, tail: int = None, grep: str = None):
         sys.exit(1)
 
 
+# -- SP debug log inspector ---------------------------------------------------
+
+def cmd_sp(server: str, job_id: str, sp_id: str = None):
+    """
+    Inspect per-SP debug logs for a completed job.
+
+    :sp <job_id>          — list available SP log files
+    :sp <job_id> <sp_id>  — print full ReAct transcript for that SP
+    """
+    base = server.rstrip("/")
+    if sp_id:
+        filename = sp_id if sp_id.endswith(".log") else f"{sp_id}.log"
+        url = f"{base}/debug/{job_id}/{filename}"
+        req = urllib.request.Request(url, headers=_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                text = r.read().decode(errors="replace")
+            sep = "─" * 70
+            print(f"\n{sep}")
+            print(f"  SP Debug Log: {job_id} / {sp_id}")
+            print(sep)
+            print(text)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code == 404:
+                print(f"  No log for {sp_id} — did the job complete? Try :sp {job_id} first.")
+            else:
+                print(RED(f"[HTTP {e.code}] {body}"), file=sys.stderr)
+        except urllib.error.URLError as e:
+            print(RED(f"[Connection error] {e.reason}"), file=sys.stderr)
+    else:
+        url = f"{base}/debug/{job_id}"
+        req = urllib.request.Request(url, headers=_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            files = data.get("files", [])
+            if not files:
+                print(f"  No SP debug files for job {job_id}")
+                return
+            print(f"\n  SP debug files for job {job_id}:")
+            for f in files:
+                sp = f.replace(".log", "")
+                print(f"    {sp}   →  :sp {job_id} {sp}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code == 404:
+                print(f"  No debug logs for {job_id}. The job may predate 3.11 or may still be running.")
+            else:
+                print(RED(f"[HTTP {e.code}] {body}"), file=sys.stderr)
+        except urllib.error.URLError as e:
+            print(RED(f"[Connection error] {e.reason}"), file=sys.stderr)
+
+
 # -- Watch (reconnect to running job) -----------------------------------------
 
 def cmd_watch(server: str, job_id: str):
@@ -1333,12 +1387,13 @@ def cmd_stream(server: str, question: str):
 
 def cmd_repl(server):
     global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
-    print(f"{BOLD('Swarm 3.10 REPL')}  (server: {server})")
+    print(f"{BOLD('Swarm 3.11 REPL')}  (server: {server})")
     print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}  Tokens: {STREAM_TOKENS}")
     print("Commands: :health :status :jobs :live [job_id]  :stream <q> :ask <q> :tokens")
     print("          :result <job_id>  -- show answer for a completed job")
     print("          :watch <job_id>   -- reconnect to running job (tail-f style)")
     print("          :logs <job_id> [tail=N] [grep=pat]")
+    print("          :sp <job_id> [sp_id]  -- inspect per-SP debug logs (3.11+)")
     print("          :verbose [0|1|2]  :debug [on|off]  :quit\n")
     while True:
         try:
@@ -1380,6 +1435,14 @@ def cmd_repl(server):
                 cmd_logs(server, job_id, tail=tail_n, grep=grep_s)
             else:
                 print("  Usage: :logs <job_id> [tail=N] [grep=pat]")
+        elif line.startswith(":sp "):
+            parts = line.split()
+            if len(parts) >= 2:
+                j_id = parts[1]
+                s_id = parts[2] if len(parts) >= 3 else None
+                cmd_sp(server, j_id, s_id)
+            else:
+                print("  Usage: :sp <job_id> [sp_id]  — list or view SP debug logs")
         elif line.startswith(":verbose"):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
