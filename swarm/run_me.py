@@ -538,6 +538,216 @@ def cmd_jobs(server):
             print(f"  {YELLOW(jid)}  [{DIM(st):10s}]  {q_s}  {BLUE(el_s)}")
     print()
 
+def cmd_live(server, job_id=None):
+    """
+    Live updating job monitor.  Two threads:
+      • poll thread  — fetches /jobs + /logs every 2 s
+      • draw thread  — redraws the panel every 0.5 s (keeps timer live)
+    Auto-finds the most recent running job when no job_id is given.
+    Ctrl+C to exit.
+    """
+    # ── helpers that won't sys.exit on error ─────────────────────────────────
+    def _safe_jobs():
+        req = urllib.request.Request(server.rstrip("/") + "/jobs", headers=_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r:
+                return json.loads(r.read().decode()).get("jobs", [])
+        except Exception:
+            return []
+
+    def _safe_log(jid, tail=28):
+        req = urllib.request.Request(
+            server.rstrip("/") + f"/logs/{jid}?tail={tail}", headers=_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r:
+                return r.read().decode(errors="replace")
+        except Exception:
+            return ""
+
+    # ── find target job ───────────────────────────────────────────────────────
+    if not job_id:
+        running = [j for j in _safe_jobs() if j.get("status") == "processing"]
+        if not running:
+            print(DIM("  No jobs currently processing."))
+            return
+        job_id = sorted(running, key=lambda x: x.get("created_at", ""), reverse=True)[0]["job_id"]
+
+    print(f"  {DIM('Watching')} {YELLOW(job_id)}  {DIM('Ctrl+C to stop')}")
+
+    # ── shared state (protected by _lock) ────────────────────────────────────
+    _state = {
+        "job":         {},
+        "prog":        {"pct": 0, "phase": "—", "sp_id": None, "sp_turn": 0,
+                        "sp_max": 15, "action": "Thinking", "sp_total": 0,
+                        "sp_done": 0, "eta_s": None, "wave": 0, "wave_total": 0},
+        "log_lines":   [],
+        "elapsed":     0.0,
+        "base_el":     0.0,
+        "tick_start":  time.time(),
+        "done":        False,
+    }
+    _lock       = threading.Lock()
+    _stop       = threading.Event()
+    _height     = [0]          # mutable: lines currently on screen
+    _width      = min(_term_width() - 4, 84)
+
+    # ── log-line coloriser ────────────────────────────────────────────────────
+    _LOG_SKIP = ("[LLMTOK]", "OBSERVATION:", "# === GIVEN", "# ====", "# LOCKED")
+
+    def _col_log(s):
+        if "RESULT:"  in s:             return B_GREEN(s)
+        if "SOLVED"   in s or "✅" in s: return GREEN(s)
+        if "FAILED"   in s or "❌" in s: return B_RED(s)
+        if s.startswith("\u2717") or "failed line" in s.lower(): return RED(s)
+        if s.startswith("\u2192 "):      return PURPLE(s)   # → action
+        if "[run_code]" in s:           return LIGHT_BLUE(s)
+        if "Wave"     in s:             return CYAN(s)
+        if "Phase"    in s:             return GREEN(s)
+        if "[SP"      in s and "Turn" in s: return YELLOW(s)
+        return DIM(s)
+
+    # ── renderer → list of strings ────────────────────────────────────────────
+    def _render():
+        with _lock:
+            job   = dict(_state["job"])
+            prog  = dict(_state["prog"])
+            lines = list(_state["log_lines"])
+            el    = _state["elapsed"]
+            done  = _state["done"]
+
+        st  = job.get("status", "processing")
+        pct = prog["pct"]
+        bar = _progress_bar(pct, width=26, done=(st == "completed"))
+
+        mm, ss = divmod(max(0, int(el)), 60)
+        el_s   = f"{mm}m{ss:02d}s" if mm else f"{ss}s"
+
+        eta_str = ""
+        if prog["eta_s"] and not done:
+            em, es = divmod(int(prog["eta_s"]), 60)
+            val    = f"{em}m{es:02d}s" if em else f"{es}s"
+            eta_str = f"  {YELLOW('ETA ~')}{BLUE(val)}"
+
+        # Row 1 — bar + pct + runtime + ETA
+        r1 = f"  {bar}  {YELLOW(f'{pct:3d}%')}  {BLUE(el_s)}{eta_str}"
+
+        # Row 2 — phase / SP count / SP id+turn / action
+        phase_s  = GREEN(prog["phase"])
+        sp_count = ""
+        if prog["sp_total"]:
+            sp_count = (f"  {LIGHT_BLUE(str(prog['sp_done']))}"
+                        f"{DIM('/')}{LIGHT_BLUE(str(prog['sp_total']))} SPs")
+        sp_str = ""
+        if prog["sp_id"]:
+            sp_max = prog["sp_max"]
+            t_col  = _turn_color(prog["sp_turn"], sp_max)
+            sp_str = f"  {BLUE(prog['sp_id'])} {DIM('T')}{t_col}{DIM(f'/{sp_max}')}"
+        r2 = f"  {phase_s}{sp_count}{sp_str}  {_action_color(prog['action'])}"
+
+        sep = f"  {DIM('\u2500' * _width)}"
+
+        rows = [r1, r2, sep]
+        for ln in lines:
+            rows.append(f"  {_col_log(ln[:_width])}")
+
+        # Pad to fixed height of 16
+        while len(rows) < 16:
+            rows.append("")
+        rows = rows[:16]
+
+        if done:
+            col = GREEN if st == "completed" else RED
+            rows += [sep, f"  Job {col(st)}  {BLUE(el_s)}"]
+
+        return rows
+
+    # ── draw (call from draw thread) ──────────────────────────────────────────
+    def _draw():
+        rows = _render()
+        n    = _height[0]
+        if n > 0 and _USE_COLOR:
+            sys.stdout.write(f"\033[{n}A")
+        for row in rows:
+            if _USE_COLOR:
+                sys.stdout.write(f"\033[2K{row}\n")
+            else:
+                sys.stdout.write(row + "\n")
+        sys.stdout.flush()
+        _height[0] = len(rows)
+
+    # ── draw thread: redraws every 0.5 s ─────────────────────────────────────
+    def _draw_worker():
+        while not _stop.is_set():
+            try:
+                with _lock:
+                    _state["elapsed"] = (
+                        _state["base_el"] + (time.time() - _state["tick_start"])
+                    )
+                _draw()
+            except Exception:
+                pass
+            _stop.wait(0.5)
+
+    # ── poll thread: fetches server state every 2 s ───────────────────────────
+    def _poll_worker():
+        while not _stop.is_set():
+            try:
+                jobs = _safe_jobs()
+                job  = next((j for j in jobs if j["job_id"] == job_id), None)
+                if not job:
+                    job = {"job_id": job_id, "status": "unknown"}
+
+                base_el  = float(job.get("elapsed") or 0)
+                log_text = _safe_log(job_id, tail=28)
+                prog     = _parse_job_progress(log_text, base_el)
+
+                interesting = []
+                for raw in log_text.splitlines():
+                    s = raw.strip()
+                    if not s or any(s.startswith(p) for p in _LOG_SKIP):
+                        continue
+                    interesting.append(s)
+                log_lines = interesting[-11:]
+
+                with _lock:
+                    _state["job"]        = job
+                    _state["prog"]       = prog
+                    _state["log_lines"]  = log_lines
+                    _state["base_el"]    = base_el
+                    _state["tick_start"] = time.time()
+                    _state["elapsed"]    = base_el
+                    _state["done"]       = job.get("status") in ("completed", "failed")
+
+                if _state["done"]:
+                    _stop.set()
+                    break
+            except Exception:
+                pass
+            _stop.wait(2.0)
+
+    # ── initial blank canvas ──────────────────────────────────────────────────
+    for _ in range(16):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+    _height[0] = 16
+
+    t_poll = threading.Thread(target=_poll_worker, daemon=True)
+    t_draw = threading.Thread(target=_draw_worker, daemon=True)
+    t_poll.start(); t_draw.start()
+
+    try:
+        while not _stop.is_set():
+            time.sleep(0.1)
+        time.sleep(0.6)   # let draw thread do one final pass
+        _draw()
+        print()
+    except KeyboardInterrupt:
+        _stop.set()
+        print(f"\n  {DIM('Stopped watching.')}")
+    finally:
+        _stop.set()
+
+
 def cmd_result(server, job_id):
     data = _get(server, f"/result/{job_id}")
     # Show last few progress log lines
@@ -1125,7 +1335,7 @@ def cmd_repl(server):
     global VERBOSITY, DEBUG_MODE, STREAM_TOKENS
     print(f"{BOLD('Swarm 3.10 REPL')}  (server: {server})")
     print(f"Verbosity: {VERBOSITY}  Debug: {DEBUG_MODE}  Tokens: {STREAM_TOKENS}")
-    print("Commands: :health :status :jobs :stream <q> :ask <q> :tokens")
+    print("Commands: :health :status :jobs :live [job_id]  :stream <q> :ask <q> :tokens")
     print("          :result <job_id>  -- show answer for a completed job")
     print("          :watch <job_id>   -- reconnect to running job (tail-f style)")
     print("          :logs <job_id> [tail=N] [grep=pat]")
@@ -1141,6 +1351,9 @@ def cmd_repl(server):
         elif line == ":health":   cmd_health(server)
         elif line == ":status":   cmd_status(server)
         elif line == ":jobs":     cmd_jobs(server)
+        elif line == ":live" or line.startswith(":live "):
+            parts = line.split()
+            cmd_live(server, parts[1] if len(parts) > 1 else None)
         elif line.startswith(":result ") or line.startswith(":results "): cmd_result(server, line.split(" ", 1)[1].strip())
         elif line.startswith(":stream "): cmd_stream(server, line[8:].strip())
         elif line.startswith(":ask "):    cmd_ask(server, line[5:].strip())
