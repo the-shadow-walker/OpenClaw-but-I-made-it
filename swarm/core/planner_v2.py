@@ -20,8 +20,11 @@ from dataclasses import dataclass, field
 def _extract_json(text: str) -> dict:
     """
     Robustly extract and parse a JSON object from LLM output.
-    Handles: markdown fences, <think>…</think> blocks, prose preambles.
+    Handles: markdown fences, <think>…</think> blocks, prose preambles,
+    single-quote JSON (from qwq/phi4 lazy outputs).
     """
+    import ast
+
     # Strip <think>…</think> reasoning blocks (qwq/deepseek-r1)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     # Strip markdown fences
@@ -34,7 +37,19 @@ def _extract_json(text: str) -> dict:
     # Scan for first {...} block (handles prose/think prefixes)
     m = re.search(r'\{.*\}', text, re.DOTALL)
     if m:
-        return json.loads(m.group())
+        blob = m.group()
+        # Try strict JSON parse on the extracted blob
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError:
+            pass
+        # Fallback: ast.literal_eval handles single-quote dicts from lazy models
+        try:
+            result = ast.literal_eval(blob)
+            if isinstance(result, dict):
+                return result
+        except (ValueError, SyntaxError):
+            pass
     raise ValueError("No JSON object found in LLM response")
 
 

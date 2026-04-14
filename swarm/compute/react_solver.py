@@ -882,17 +882,22 @@ class ReactSolver:
             anchor_locked_values=locked_lines,
         )
 
+        # Escape any literal {…} in dynamic content so .format() doesn't
+        # misinterpret physics notation like {energy} as a missing key.
+        def _safe(s: str) -> str:
+            return str(s).replace("{", "{{").replace("}", "}}")
+
         return _SYSTEM_PROMPT_TEMPLATE.format(
             context_anchor=context_anchor,
-            sp_id=sp.id,
-            sp_description=sp.description,
-            sp_domain=sp.domain,
-            sp_approach=sp.approach or "derive from first principles",
-            sp_inputs=inputs_str,
-            sp_outputs=outputs_str,
-            coord_system=self.plan.coordinate_system if self.plan else "N/A",
-            plan_notes=self.plan.notes[:500] if self.plan else "",
-            research_context_block=ctx_block,
+            sp_id=_safe(sp.id),
+            sp_description=_safe(sp.description),
+            sp_domain=_safe(sp.domain),
+            sp_approach=_safe(sp.approach or "derive from first principles"),
+            sp_inputs=_safe(inputs_str),
+            sp_outputs=_safe(outputs_str),
+            coord_system=_safe(self.plan.coordinate_system if self.plan else "N/A"),
+            plan_notes=_safe(self.plan.notes[:500] if self.plan else ""),
+            research_context_block=_safe(ctx_block),
         )
 
     def _parse_action(self, text: str) -> Optional[Tuple[str, str]]:

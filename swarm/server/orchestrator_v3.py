@@ -1,5 +1,5 @@
 """
-Swarm 3.9 — OrchestratorV3
+Swarm 3.11 — OrchestratorV3
 
 Drop-in replacement for OrchestratorV2_1.  Same constructor signature and
 process_question() interface.
@@ -88,14 +88,14 @@ _MODEL_REASONER      = "qwq:32b"
 _MODEL_FALLBACK      = "deepseek-r1:32b"
 _MODEL_CODER         = "qwen2.5:14b"
 _MODEL_PLANNER       = "phi4:14b"          # lightweight tasks (classify, etc.)
-_MODEL_SMART_PLANNER = "qwq:32b"           # Lead Architect — deep CoT planning
+_MODEL_SMART_PLANNER = "phi4:14b"          # Planner — fast structured JSON (was qwq:32b, reverted 3.11)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OrchestratorV3:
     """
-    Swarm 3.10 top-level dispatcher.
+    Swarm 3.11 top-level dispatcher.
     Drop-in replacement for OrchestratorV2_1.
     """
 
@@ -122,7 +122,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.10 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.11 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
