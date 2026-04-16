@@ -99,6 +99,57 @@ def _colorize_llm_line(line: str, in_code: bool) -> tuple:
         return B_RED(s), False
     return s, False
 
+
+def _feed_line(s: str, width: int = 62) -> str:
+    """
+    Classify a log line into a colour-labelled entry for the 5-line scrolling feed.
+    Returns e.g.  "[CODE] compute orbital_period..."
+    """
+    raw = s.strip()
+
+    def _body(*prefixes):
+        for p in prefixes:
+            if raw.startswith(p):
+                return raw[len(p):].lstrip(" :")[:width]
+        return raw[:width]
+
+    if raw.startswith("RESULT:"):
+        return B_GREEN("[RES] ") + B_GREEN(_body("RESULT:"))
+    if re.search(r'SOLVED|✅', raw):
+        return GREEN("[✓SP] ") + GREEN(raw[:width])
+    if re.search(r'FAILED|TIMEOUT|❌', raw, re.IGNORECASE):
+        return B_RED("[✗SP] ") + B_RED(raw[:width])
+    if raw.startswith("FINAL_ANSWER:"):
+        return B_GREEN("[ANS] ") + B_GREEN(_body("FINAL_ANSWER:"))
+    if raw.startswith("ACTION:") and "run_code" in raw:
+        return LIGHT_BLUE("[CODE] ") + LIGHT_BLUE(_body("ACTION:"))
+    if raw.startswith("ACTION:") and "search" in raw:
+        return CYAN("[SRCH] ") + CYAN(_body("ACTION:"))
+    if raw.startswith("ACTION:") and "rag" in raw:
+        return PURPLE("[RAG]  ") + PURPLE(_body("ACTION:"))
+    if raw.startswith("→ run_code") or "[run_code]" in raw:
+        return LIGHT_BLUE("[CODE] ") + LIGHT_BLUE(raw[:width])
+    if raw.startswith("→ search"):
+        return CYAN("[SRCH] ") + CYAN(raw[:width])
+    if raw.startswith("→ rag"):
+        return PURPLE("[RAG]  ") + PURPLE(raw[:width])
+    if re.search(r'EXECUTION ERROR|Traceback|SyntaxError|NameError|TypeError', raw):
+        return B_RED("[ERR]  ") + B_RED(raw[:width])
+    if raw.startswith("🚨 CONSENSUS"):
+        return YELLOW("[⚠]   ") + YELLOW(raw[:width])
+    if raw.startswith("THOUGHT:"):
+        return DIM("[THK]  ") + DIM(_body("THOUGHT:"))
+    if re.match(r'Phase\s+\w+', raw):
+        return GREEN("[SYS]  ") + GREEN(raw[:width])
+    if re.search(r'Wave\s+\d', raw):
+        return CYAN("[WAVE] ") + CYAN(raw[:width])
+    if re.search(r'\[SP\d+\]', raw) and re.search(r'T(?:urn\s*)?\d+/', raw):
+        return YELLOW("[SP]   ") + YELLOW(raw[:width])
+    if re.match(r'\s{2}\w+ = [\d.e+\-]+', raw):   # ledger value line
+        return B_GREEN("[RES] ") + B_GREEN(raw[:width])
+    return DIM("[LOG]  ") + DIM(raw[:width])
+
+
 # Phase colour map
 _PHASE_COLORS = {
     "0A": CYAN, "0B": CYAN,
@@ -349,16 +400,17 @@ def _parse_job_progress(log_text, elapsed):
     sp_total, sp_done, pct, eta_s, wave, wave_total.
     """
     lines      = log_text.splitlines()
-    phase      = "—"
-    sp_id      = None
-    sp_turn    = 0
-    sp_max     = 15
-    action     = "Thinking"
-    sp_total   = 0
-    sp_done    = 0
-    wave       = 0
-    wave_total = 0
-    sp_turns   = {}   # sp_id → last turn seen (for ETA via turn counting)
+    phase        = "—"
+    sp_id        = None
+    sp_turn      = 0
+    sp_max       = 15
+    action       = "Thinking"
+    sp_total     = 0
+    sp_done      = 0
+    wave         = 0
+    wave_total   = 0
+    sp_turns     = {}   # sp_id → last turn seen (for ETA via turn counting)
+    llmtok_count = sum(1 for ln in lines if ln.startswith("[LLMTOK]"))
 
     for ln in lines:
         # Phase header: "Phase 0A │ 0.1s" or just "Phase 2"
@@ -433,10 +485,16 @@ def _parse_job_progress(log_text, elapsed):
     if sp_done > 0 and elapsed and remaining > 0:
         eta_s = (float(elapsed) / sp_done) * remaining
 
+    # Average tok/s over total elapsed (simple but accurate for :jobs)
+    toks_per_sec = 0.0
+    if elapsed and float(elapsed) > 1 and llmtok_count > 0:
+        toks_per_sec = round(llmtok_count / float(elapsed), 1)
+
     return {
         "phase": phase, "sp_id": sp_id, "sp_turn": sp_turn, "sp_max": sp_max,
         "action": action, "sp_total": sp_total, "sp_done": sp_done,
         "pct": pct, "eta_s": eta_s, "wave": wave, "wave_total": wave_total,
+        "toks_per_sec": toks_per_sec,
     }
 
 
@@ -523,10 +581,12 @@ def cmd_jobs(server):
                            + f"  {DIM('T')}{t_col}" + DIM(f"/{sp_max}"))
 
             act_str = f"  {_action_color(prog['action'])}"
+            tps     = prog.get("toks_per_sec", 0.0)
+            tps_str = (f"  {GREEN(f'{tps:.1f}')}{DIM(' tok/s')}" if tps > 0 else "")
 
             print(f"  {YELLOW(jid)}  {bar}  {pct_str}  {rt_str}{eta_str}")
             print(f"    {DIM(q_s)}")
-            print(f"    {phase_str}{sp_count}{sp_str}{act_str}")
+            print(f"    {phase_str}{sp_count}{sp_str}{act_str}{tps_str}")
             print()
 
         elif st == "completed":
@@ -576,15 +636,17 @@ def cmd_live(server, job_id=None):
 
     # ── shared state (protected by _lock) ────────────────────────────────────
     _state = {
-        "job":         {},
-        "prog":        {"pct": 0, "phase": "—", "sp_id": None, "sp_turn": 0,
-                        "sp_max": 15, "action": "Thinking", "sp_total": 0,
-                        "sp_done": 0, "eta_s": None, "wave": 0, "wave_total": 0},
-        "log_lines":   [],
-        "elapsed":     0.0,
-        "base_el":     0.0,
-        "tick_start":  time.time(),
-        "done":        False,
+        "job":          {},
+        "prog":         {"pct": 0, "phase": "—", "sp_id": None, "sp_turn": 0,
+                         "sp_max": 15, "action": "Thinking", "sp_total": 0,
+                         "sp_done": 0, "eta_s": None, "wave": 0, "wave_total": 0,
+                         "toks_per_sec": 0.0},
+        "log_lines":    [],
+        "elapsed":      0.0,
+        "base_el":      0.0,
+        "tick_start":   time.time(),
+        "done":         False,
+        "toks_per_sec": 0.0,
     }
     _lock       = threading.Lock()
     _stop       = threading.Event()
@@ -614,6 +676,7 @@ def cmd_live(server, job_id=None):
             lines = list(_state["log_lines"])
             el    = _state["elapsed"]
             done  = _state["done"]
+            tps   = _state["toks_per_sec"]
 
         st  = job.get("status", "processing")
         pct = prog["pct"]
@@ -628,8 +691,10 @@ def cmd_live(server, job_id=None):
             val    = f"{em}m{es:02d}s" if em else f"{es}s"
             eta_str = f"  {YELLOW('ETA ~')}{BLUE(val)}"
 
-        # Row 1 — bar + pct + runtime + ETA
-        r1 = f"  {bar}  {YELLOW(f'{pct:3d}%')}  {BLUE(el_s)}{eta_str}"
+        tps_str = (f"  {GREEN(f'{tps:.1f}')}{DIM(' t/s')}" if tps > 0 else "")
+
+        # Row 1 — bar + pct + runtime + ETA + tok/s
+        r1 = f"  {bar}  {YELLOW(f'{pct:3d}%')}  {BLUE(el_s)}{eta_str}{tps_str}"
 
         # Row 2 — phase / SP count / SP id+turn / action
         phase_s  = GREEN(prog["phase"])
@@ -646,14 +711,16 @@ def cmd_live(server, job_id=None):
 
         sep = f"  {DIM('\u2500' * _width)}"
 
+        # 5-line scrolling categorised feed (newest at bottom)
+        feed = lines[-5:] if len(lines) >= 5 else lines
         rows = [r1, r2, sep]
-        for ln in lines:
-            rows.append(f"  {_col_log(ln[:_width])}")
+        for ln in feed:
+            rows.append(f"  {_feed_line(ln, _width - 10)}")
 
-        # Pad to fixed height of 16
-        while len(rows) < 16:
+        # Fixed height of 10 (pad blank lines so cursor always moves same distance)
+        while len(rows) < 10:
             rows.append("")
-        rows = rows[:16]
+        rows = rows[:10]
 
         if done:
             col = GREEN if st == "completed" else RED
@@ -690,6 +757,10 @@ def cmd_live(server, job_id=None):
 
     # ── poll thread: fetches server state every 2 s ───────────────────────────
     def _poll_worker():
+        prev_tok_count = 0
+        prev_poll_t    = time.time()
+        live_tps       = 0.0
+
         while not _stop.is_set():
             try:
                 jobs = _safe_jobs()
@@ -698,25 +769,40 @@ def cmd_live(server, job_id=None):
                     job = {"job_id": job_id, "status": "unknown"}
 
                 base_el  = float(job.get("elapsed") or 0)
-                log_text = _safe_log(job_id, tail=28)
+                log_text = _safe_log(job_id, tail=60)
                 prog     = _parse_job_progress(log_text, base_el)
 
+                # Live tok/s: count [LLMTOK] lines added since last poll
+                all_log_lines = log_text.splitlines()
+                new_tok_count = sum(1 for l in all_log_lines if l.startswith("[LLMTOK]"))
+                now           = time.time()
+                dt            = now - prev_poll_t
+                if dt > 0 and new_tok_count > prev_tok_count:
+                    live_tps = round((new_tok_count - prev_tok_count) / dt, 1)
+                elif new_tok_count == prev_tok_count:
+                    live_tps *= 0.7   # decay when idle (no new tokens)
+                    if live_tps < 0.1:
+                        live_tps = 0.0
+                prev_tok_count = new_tok_count
+                prev_poll_t    = now
+
                 interesting = []
-                for raw in log_text.splitlines():
+                for raw in all_log_lines:
                     s = raw.strip()
                     if not s or any(s.startswith(p) for p in _LOG_SKIP):
                         continue
                     interesting.append(s)
-                log_lines = interesting[-11:]
+                log_lines = interesting[-20:]   # keep more; feed shows last 5
 
                 with _lock:
-                    _state["job"]        = job
-                    _state["prog"]       = prog
-                    _state["log_lines"]  = log_lines
-                    _state["base_el"]    = base_el
-                    _state["tick_start"] = time.time()
-                    _state["elapsed"]    = base_el
-                    _state["done"]       = job.get("status") in ("completed", "failed")
+                    _state["job"]          = job
+                    _state["prog"]         = prog
+                    _state["log_lines"]    = log_lines
+                    _state["base_el"]      = base_el
+                    _state["tick_start"]   = time.time()
+                    _state["elapsed"]      = base_el
+                    _state["toks_per_sec"] = live_tps
+                    _state["done"]         = job.get("status") in ("completed", "failed")
 
                 if _state["done"]:
                     _stop.set()
@@ -726,10 +812,10 @@ def cmd_live(server, job_id=None):
             _stop.wait(2.0)
 
     # ── initial blank canvas ──────────────────────────────────────────────────
-    for _ in range(16):
+    for _ in range(10):
         sys.stdout.write("\n")
     sys.stdout.flush()
-    _height[0] = 16
+    _height[0] = 10
 
     t_poll = threading.Thread(target=_poll_worker, daemon=True)
     t_draw = threading.Thread(target=_draw_worker, daemon=True)
