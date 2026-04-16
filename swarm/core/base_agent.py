@@ -90,6 +90,7 @@ class BaseAgent:
                     "model": self.model_name,
                     "prompt": full_prompt,
                     "stream": stream,
+                    "keep_alive": 300,   # stay warm for 5 min — explicit unload handles transitions
                     "options": {
                         "temperature": 0.7,
                         "num_predict": 2048,

@@ -280,8 +280,11 @@ class OrchestratorV3:
             solver_model = _RS_tmp.MODEL
         except Exception:
             pass
-        print(f"\n  🔄 VRAM handoff: {_MODEL_PLANNER} → {solver_model}")
-        await self._unload_model(_MODEL_PLANNER)
+        if _MODEL_PLANNER != solver_model:
+            print(f"\n  🔄 VRAM handoff: {_MODEL_PLANNER} → {solver_model}")
+            await self._unload_model(_MODEL_PLANNER)
+        else:
+            print(f"\n  🔒 VRAM: planner == solver ({solver_model}), model stays loaded")
         # Pre-warm solver in background while we start Phase 1 setup
         asyncio.ensure_future(self._prewarm_model(solver_model))
 
@@ -559,8 +562,16 @@ class OrchestratorV3:
                     ) if ar.status == "solved" else "no results"
                     print(f"  🚨 AUDIT {sp_id} → {ar.status.upper()} | {vals_str}")
 
-        # ── Free VRAM before synthesis (evict reactor model) ───────────────
-        await self._unload_solver_model()
+        # ── Free VRAM before synthesis — only if switching models ─────────
+        try:
+            from react_solver import ReactSolver as _RS_w
+            _solver_model_now = _RS_w.MODEL
+        except Exception:
+            _solver_model_now = ""
+        if _solver_model_now != _MODEL_CODER:
+            await self._unload_solver_model()
+        else:
+            print(f"  🔒 VRAM: solver == writer ({_MODEL_CODER}), model stays loaded")
 
         # ── Phase 2: Synthesis ─────────────────────────────────────────────
         print(f"\n{_sep}")
@@ -1267,7 +1278,7 @@ Rules:
 
     async def _llm_query_planner(self, prompt: str, system_prompt: str = "") -> str:
         """qwq:32b — Lead Architect: deep CoT for requirement shredding + SP decomposition.
-        keep_alive=0 so qwq unloads immediately after planning → VRAM free for solver."""
+        keep_alive uses default (600s) — explicit unload happens before solver if needed."""
         system = system_prompt or (
             "You are the Lead Systems Architect. You are being evaluated on COMPLETENESS. "
             "Every distinct mathematical operation, integral, series, chemical reaction, "
@@ -1281,7 +1292,6 @@ Rules:
             system=system,
             timeout=600,        # 10 min ceiling for planning
             num_predict=4096,   # JSON plan fits well within 4k tokens
-            keep_alive=0,       # unload qwq immediately → free VRAM for solver
         )
 
     async def _llm_query_fallback(self, prompt: str, system_prompt: str = "") -> str:
