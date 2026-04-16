@@ -344,6 +344,104 @@ async def _run_question(question: str, date_filter: str = None, job_id: str = ""
 
 
 # =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+
+# Role registry — maps logical role names → descriptions + which module var to mutate
+_ROLE_META = {
+    "planner":    {"desc": "Plans SP decomposition (creates SubProblems)", "emoji": "📋",
+                   "detail": "orchestrator_v3._MODEL_SMART_PLANNER"},
+    "classifier": {"desc": "Classifies question type (HYBRID/MATH/etc.)",  "emoji": "🔍",
+                   "detail": "orchestrator_v3._MODEL_PLANNER"},
+    "solver":     {"desc": "ReAct solve loop — runs code, searches, reasons","emoji": "⚙️ ",
+                   "detail": "react_solver.ReactSolver.MODEL"},
+    "writer":     {"desc": "Final answer synthesis + constraint rewrite",   "emoji": "✍️ ",
+                   "detail": "orchestrator_v3._MODEL_CODER"},
+}
+
+_MODEL_CONFIG_FILE = Config.RESULTS_DIR / "model_config.json"
+
+
+def _get_current_models() -> dict:
+    """Read live model assignments from imported modules."""
+    out = {}
+    try:
+        import orchestrator_v3 as _om
+        out["planner"]    = getattr(_om, "_MODEL_SMART_PLANNER", "unknown")
+        out["classifier"] = getattr(_om, "_MODEL_PLANNER",       "unknown")
+        out["writer"]     = getattr(_om, "_MODEL_CODER",          "unknown")
+    except ImportError:
+        pass
+    try:
+        import react_solver as _rs
+        out["solver"] = getattr(_rs.ReactSolver, "MODEL", "unknown")
+    except (ImportError, AttributeError):
+        pass
+    return out
+
+
+def _apply_model(role: str, model: str) -> bool:
+    """Mutate the live module-level variable for a role. Returns True on success."""
+    try:
+        if role == "planner":
+            import orchestrator_v3 as _om;  _om._MODEL_SMART_PLANNER = model
+        elif role == "classifier":
+            import orchestrator_v3 as _om;  _om._MODEL_PLANNER = model
+        elif role == "writer":
+            import orchestrator_v3 as _om;  _om._MODEL_CODER = model
+        elif role == "solver":
+            import react_solver as _rs;      _rs.ReactSolver.MODEL = model
+        else:
+            return False
+        _save_model_config()
+        logging.info(f"Model config: {role} → {model}")
+        return True
+    except Exception as e:
+        logging.error(f"_apply_model({role!r}, {model!r}): {e}")
+        return False
+
+
+def _save_model_config():
+    """Persist current assignments to JSON so restarts keep the config."""
+    try:
+        Config.RESULTS_DIR.mkdir(exist_ok=True)
+        _MODEL_CONFIG_FILE.write_text(json.dumps(_get_current_models(), indent=2))
+    except Exception as e:
+        logging.warning(f"Could not save model config: {e}")
+
+
+def _load_model_config():
+    """Apply saved model config from disk (called once at startup)."""
+    if not _MODEL_CONFIG_FILE.exists():
+        return
+    try:
+        saved = json.loads(_MODEL_CONFIG_FILE.read_text())
+        for role, model in saved.items():
+            _apply_model(role, model)
+        logging.info(f"Loaded saved model config: {saved}")
+    except Exception as e:
+        logging.warning(f"Could not load model config: {e}")
+
+
+def _get_ollama_models() -> list:
+    """Fetch installed model list from local Ollama /api/tags."""
+    try:
+        import urllib.request as _ur
+        with _ur.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
+            data = json.loads(r.read())
+        models = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            size_gb = round(m.get("size", 0) / 1e9, 1)
+            models.append({"name": name, "size_gb": size_gb})
+        models.sort(key=lambda x: x["name"])
+        return models
+    except Exception as e:
+        logging.warning(f"Could not list Ollama models: {e}")
+        return []
+
+
+# =============================================================================
 # WEBHOOK
 # =============================================================================
 
@@ -649,6 +747,38 @@ def get_debug_file(job_id: str, filename: str):
     if not path.exists():
         return jsonify({'error': f'{filename} not found'}), 404
     return Response(path.read_text(errors='replace'), mimetype='text/plain')
+
+
+@app.route('/config/models', methods=['GET'])
+def get_model_config():
+    """Return current model assignments and available Ollama models."""
+    current = _get_current_models()
+    roles_out = {}
+    for role, meta in _ROLE_META.items():
+        roles_out[role] = {
+            "model":  current.get(role, "unknown"),
+            "desc":   meta["desc"],
+            "emoji":  meta["emoji"],
+            "detail": meta["detail"],
+        }
+    return jsonify({"current": roles_out, "available": _get_ollama_models()})
+
+
+@app.route('/config/models', methods=['POST'])
+@require_api_key
+def set_model_config():
+    """Assign a model to a role: POST {"role": "solver", "model": "phi4:14b"}"""
+    data = request.get_json(force=True) or {}
+    role  = data.get("role",  "").strip()
+    model = data.get("model", "").strip()
+    if not role or not model:
+        return jsonify({"error": "role and model are required"}), 400
+    if role not in _ROLE_META:
+        return jsonify({"error": f"unknown role '{role}'",
+                        "valid_roles": list(_ROLE_META)}), 400
+    if not _apply_model(role, model):
+        return jsonify({"error": "failed to apply model"}), 500
+    return jsonify({"ok": True, "role": role, "model": model})
 
 
 @app.route('/query', methods=['POST'])
@@ -1428,6 +1558,9 @@ def main():
     print("  GET  /jobs")
     print("  GET  /result/<id>")
     print("  GET  /logs/<id>             -- full job log (?tail=N&grep=pat)")
+    print("  GET  /debug/<id>           -- list SP debug log files (3.11+)")
+    print("  GET  /debug/<id>/<sp>.log  -- SP ReAct transcript")
+    print("  GET  /config/models        -- current model assignments + Ollama list")
     print("  GET  /stream/<job_id>      -- SSE progress fan-out")
     print("  GET  /metrics              -- GPU + server stats")
     print("  GET  /dashboard            -- Command Station SPA")
@@ -1436,9 +1569,12 @@ def main():
     print("  POST /query                -- sync (blocking)")
     print("  POST /query_async          -- async, returns job_id")
     print("  POST /query_stream         -- SSE live progress stream")
+    print("  POST /config/models        -- set model for a role")
     print("  POST /project/start")
     print("  POST /project/respond")
     print("=" * 62 + "\n")
+
+    _load_model_config()   # apply any saved model assignments before first request
 
     try:
         app.run(host=args.host, port=args.port, debug=Config.DEBUG, threaded=True)

@@ -876,6 +876,186 @@ def cmd_sp(server: str, job_id: str, sp_id: str = None):
             print(RED(f"[Connection error] {e.reason}"), file=sys.stderr)
 
 
+# -- Model configuration TUI --------------------------------------------------
+
+def _pick_menu(items, title="", hint="  ↑↓/jk  navigate   Enter  select   q/Esc  exit",
+               initial_idx=0):
+    """
+    Interactive arrow-key picker. Returns selected index, or -1 on cancel.
+    Falls back to a numbered list when stdin is not a tty or termios is unavailable.
+    """
+    try:
+        import tty, termios, select as _sel
+        _has_tty = sys.stdin.isatty()
+    except ImportError:
+        _has_tty = False
+
+    if not _has_tty:
+        # Non-interactive fallback
+        print(f"\n  {title}" if title else "")
+        for i, item in enumerate(items, 1):
+            clean = re.sub(r'\033\[[^m]*m', '', item)
+            print(f"  {'▶' if i-1 == initial_idx else ' '} {i:2}. {clean}")
+        try:
+            n = int(input("  Enter number (0 = cancel): "))
+            return n - 1 if 1 <= n <= len(items) else -1
+        except (ValueError, KeyboardInterrupt, EOFError):
+            return -1
+
+    idx = max(0, min(initial_idx, len(items) - 1))
+    fd  = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+
+    def _render():
+        sys.stdout.write("\033[2J\033[H\033[?25l")   # clear, home, hide cursor
+        if title:
+            sys.stdout.write(f"\n  \033[1m{title}\033[0m\n  {'─'*66}\n\n")
+        for i, item in enumerate(items):
+            arrow = "\033[1;32m▶\033[0m" if i == idx else " "
+            sys.stdout.write(f"  {arrow} {item}\n")
+        sys.stdout.write(f"\n  \033[2m{hint}\033[0m\n")
+        sys.stdout.flush()
+
+    try:
+        tty.setraw(fd)
+        _render()
+        while True:
+            ch = sys.stdin.buffer.read(1)
+            if ch == b'\x1b':
+                if _sel.select([sys.stdin.buffer], [], [], 0.05)[0]:
+                    seq = sys.stdin.buffer.read(2)
+                    if   seq == b'[A': idx = (idx - 1) % len(items); _render()
+                    elif seq == b'[B': idx = (idx + 1) % len(items); _render()
+                    # other sequences (page-up, etc.) ignored
+                else:
+                    return -1   # bare Esc
+            elif ch in (b'\r', b'\n'):
+                return idx
+            elif ch in (b'q', b'\x03', b'\x04'):
+                return -1
+            elif ch == b'k':
+                idx = (idx - 1) % len(items); _render()
+            elif ch == b'j':
+                idx = (idx + 1) % len(items); _render()
+    except (KeyboardInterrupt, Exception):
+        return -1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\033[?25h\033[2J\033[H")   # show cursor, clear
+        sys.stdout.flush()
+
+
+def cmd_model(server: str):
+    """
+    Interactive TUI to reassign models to Swarm roles.
+
+    Screen 1 — role picker:   Planner / Classifier / Solver / Writer
+    Screen 2 — model picker:  all models installed in the server's Ollama
+    Changes take effect immediately (no service restart needed).
+    Assignments are persisted to swarm_results/model_config.json.
+    """
+    # Fetch current config + available models from server
+    try:
+        req = urllib.request.Request(
+            server.rstrip("/") + "/config/models", headers=_headers()
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(f"  Server error ({e.code}): {e.read().decode()}", file=sys.stderr)
+        return
+    except Exception as e:
+        print(f"  Could not reach server: {e}", file=sys.stderr)
+        return
+
+    current   = data.get("current",   {})   # {role: {model, desc, emoji}}
+    available = data.get("available", [])    # [{name, size_gb}]
+    role_order = ["planner", "classifier", "solver", "writer"]
+
+    while True:
+        # ── Screen 1: pick a role ─────────────────────────────────────
+        role_items = []
+        for role in role_order:
+            info  = current.get(role, {})
+            model = info.get("model", "unknown")
+            emoji = info.get("emoji", "🤖")
+            desc  = info.get("desc", "")
+            role_items.append(
+                f"{emoji}  \033[1m{role.capitalize():<12}\033[0m"
+                f"  \033[33m{model:<34}\033[0m  \033[2m{desc}\033[0m"
+            )
+
+        ridx = _pick_menu(
+            role_items,
+            title="Swarm Model Configuration — pick a role to reassign",
+            hint="  ↑↓/jk  navigate   Enter  select   q/Esc  exit",
+        )
+        if ridx < 0:
+            print("  No changes made.")
+            return
+
+        role      = role_order[ridx]
+        cur_model = current.get(role, {}).get("model", "")
+
+        # ── Screen 2: pick a model ────────────────────────────────────
+        if not available:
+            print("  No Ollama models found — is the server's Ollama running?")
+            return
+
+        model_items = []
+        default_idx = 0
+        for i, m in enumerate(available):
+            name  = m["name"]
+            size  = f"{m['size_gb']:.1f} GB" if m.get("size_gb") else "     "
+            cur_tag = "  \033[2m← current\033[0m" if name == cur_model else ""
+            model_items.append(
+                f"\033[1m{name:<38}\033[0m  \033[2m{size}\033[0m{cur_tag}"
+            )
+            if name == cur_model:
+                default_idx = i
+
+        midx = _pick_menu(
+            model_items,
+            title=(f"Set model for \033[1m{role.capitalize()}\033[0m"
+                   f"  (current: \033[33m{cur_model}\033[0m)"),
+            hint="  ↑↓/jk  navigate   Enter  assign   Esc  back",
+            initial_idx=default_idx,
+        )
+        if midx < 0:
+            continue   # back to role picker
+
+        new_model = available[midx]["name"]
+        if new_model == cur_model:
+            print(f"  {role.capitalize()} already uses {new_model} — no change.")
+            continue
+
+        # ── POST the change ───────────────────────────────────────────
+        try:
+            payload = json.dumps({"role": role, "model": new_model}).encode()
+            req = urllib.request.Request(
+                server.rstrip("/") + "/config/models",
+                data=payload,
+                headers={**_headers(), "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                resp = json.loads(r.read())
+            if resp.get("ok"):
+                print(f"  ✅  {role.capitalize()} → {new_model}")
+                current[role]["model"] = new_model   # reflect locally
+            else:
+                print(f"  ⚠️  Server error: {resp}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code == 401:
+                print(f"  Auth required — set SWARM_API_KEY env var.")
+            else:
+                print(f"  Server error ({e.code}): {body}", file=sys.stderr)
+        except Exception as e:
+            print(f"  Error: {e}", file=sys.stderr)
+        # Loop → role picker again so user can change more roles
+
+
 # -- Watch (reconnect to running job) -----------------------------------------
 
 def cmd_watch(server: str, job_id: str):
@@ -1394,6 +1574,7 @@ def cmd_repl(server):
     print("          :watch <job_id>   -- reconnect to running job (tail-f style)")
     print("          :logs <job_id> [tail=N] [grep=pat]")
     print("          :sp <job_id> [sp_id]  -- inspect per-SP debug logs (3.11+)")
+    print("          :model               -- interactive model assignment TUI (3.11+)")
     print("          :verbose [0|1|2]  :debug [on|off]  :quit\n")
     while True:
         try:
@@ -1443,6 +1624,8 @@ def cmd_repl(server):
                 cmd_sp(server, j_id, s_id)
             else:
                 print("  Usage: :sp <job_id> [sp_id]  — list or view SP debug logs")
+        elif line.startswith(":model"):
+            cmd_model(server)
         elif line.startswith(":verbose"):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
@@ -1461,7 +1644,7 @@ def cmd_repl(server):
         elif line.startswith(":"):
             cmd = line.split()[0]
             print(f"  Unknown command: {cmd}")
-            print("  Commands: :health :status :jobs :result :stream :ask :tokens :watch :logs :verbose :debug")
+            print("  Commands: :health :status :jobs :result :watch :logs :sp :model :verbose :debug")
         else:
             if _USE_COLOR:
                 cmd_stream(server, line)
