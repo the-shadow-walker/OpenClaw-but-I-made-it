@@ -90,6 +90,10 @@ _MODEL_CODER         = "qwen2.5:14b"
 _MODEL_PLANNER       = "phi4:14b"          # lightweight tasks (classify, etc.)
 _MODEL_SMART_PLANNER = "phi4:14b"          # Planner — fast structured JSON (was qwq:32b, reverted 3.11)
 
+# ── Swarm 3.13 kill switches ─────────────────────────────────────────────────
+RESIDUAL_LOCK_ORCH = os.getenv("SWARM_RESIDUAL_LOCK_ORCH", "1") != "0"
+RESIDUAL_TOLERANCE_REL_ORCH = float(os.getenv("SWARM_RESIDUAL_TOL_ORCH", "1e-6"))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -333,9 +337,22 @@ class OrchestratorV3:
                 print(f"  📋 Manifest: {len(global_manifest)} computed value(s) → all wave SPs")
 
             # ── Soft salvage: scan failed SP logs for any RESULT: lines ─────────
+            # Swarm 3.13 — skip variables that were rejected by the residual lock
             soft_manifest: Dict[str, str] = {}  # var → "value unit" (unverified)
             for prior_id, prior_res in solver_results.items():
                 if prior_res.status != "solved" and getattr(prior_res, "raw_log", ""):
+                    # Build per-SP skip set from RESIDUAL_LOCK_REJECTED: sentinel lines
+                    rejected_vars: set = set()
+                    for log_line in prior_res.raw_log.splitlines():
+                        rej_m = re.match(
+                            r'RESIDUAL_LOCK_REJECTED:\s*(.+)',
+                            log_line.strip(),
+                        )
+                        if rej_m:
+                            for _v in rej_m.group(1).split(","):
+                                _v = _v.strip()
+                                if _v:
+                                    rejected_vars.add(_v)
                     for log_line in prior_res.raw_log.splitlines():
                         rm = re.match(
                             r'RESULT:\s*([A-Za-z_]\w*)\s*=\s*([+-]?\d[\d.e+\-]*)\s*(.*)',
@@ -344,6 +361,8 @@ class OrchestratorV3:
                         )
                         if rm:
                             var, val, unit = rm.group(1), rm.group(2), rm.group(3).strip()
+                            if var in rejected_vars:
+                                continue   # residual lock said this is poisoned
                             if var not in global_manifest and var not in soft_manifest:
                                 soft_manifest[var] = f"{val} {unit}".strip()
 
@@ -437,6 +456,39 @@ class OrchestratorV3:
                     except (ValueError, TypeError, ZeroDivisionError):
                         pass
 
+            # ── Swarm 3.13: Orchestrator-side Pydantic Residual Lock ─────────
+            # Independently re-execute each solved SP's CHECK expression(s).
+            # If any fail, flip the SP to "failed" and stamp the raw_log so
+            # soft-salvage skips the poisoned vars downstream.
+            if RESIDUAL_LOCK_ORCH:
+                for result in wave_results:
+                    if result.status != "solved":
+                        continue
+                    sp = sp_map.get(result.sub_problem_id)
+                    if sp is None or not sp.expected_outputs:
+                        continue
+                    ok, reason, worst, failed_vars = await self._residual_lock_check(
+                        result, sp
+                    )
+                    if ok:
+                        print(f"  🔬 RESIDUAL LOCK: {sp.id} → PASS (worst={worst:.2e})")
+                    else:
+                        print(
+                            f"  🔬 RESIDUAL LOCK: {sp.id} → FAIL "
+                            f"(worst={worst:.2e}) — {reason[:140]}"
+                        )
+                        result.status = "failed"
+                        result.verification_note = (
+                            (result.verification_note + "; " if result.verification_note else "")
+                            + f"residual lock rejected: {reason[:200]}"
+                        )
+                        if failed_vars:
+                            # Stamp the raw_log so soft-salvage knows which vars
+                            # to skip when scavenging RESULT: lines from failed SPs.
+                            result.raw_log = (result.raw_log or "") + (
+                                f"\nRESIDUAL_LOCK_REJECTED: {','.join(failed_vars)}\n"
+                            )
+
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result
 
@@ -447,8 +499,55 @@ class OrchestratorV3:
                 sp_id = result.sub_problem_id
                 sp = sp_map.get(sp_id)
                 if sp and result.status != "solved" and sp.expected_outputs and _HAS_REACT:
-                    print(f"  ⚡ Retrying {sp_id} (status={result.status}, "
-                          f"0 computed results, outputs expected)…")
+                    # Swarm 3.13 — craft a targeted retry seed if the reason
+                    # this SP failed was a residual-lock rejection.
+                    residual_rejected = (
+                        "residual lock rejected" in (result.verification_note or "").lower()
+                        or "RESIDUAL_LOCK_REJECTED" in (result.raw_log or "")
+                    )
+                    if residual_rejected:
+                        rej_vars: List[str] = []
+                        for _ln in (result.raw_log or "").splitlines():
+                            _rm = re.match(r'RESIDUAL_LOCK_REJECTED:\s*(.+)', _ln.strip())
+                            if _rm:
+                                for _v in _rm.group(1).split(","):
+                                    _v = _v.strip()
+                                    if _v:
+                                        rej_vars.append(_v)
+                        worst = 0.0
+                        for _v, _r in (getattr(result, "check_eval_values", {}) or {}).items():
+                            try:
+                                _rv = float(_r)
+                                if _rv > worst:
+                                    worst = _rv
+                            except (TypeError, ValueError):
+                                pass
+                        retry_msg = (
+                            f"⛔ PRIOR ATTEMPT FAILED THE RESIDUAL LOCK.\n"
+                            f"Rejected variable(s): {', '.join(rej_vars) or 'unknown'}.\n"
+                            f"Worst relative residual: {worst:.3e} "
+                            f"(tolerance {RESIDUAL_TOLERANCE_REL_ORCH:.0e}).\n"
+                            f"This means the value(s) you printed did NOT satisfy the "
+                            f"equation — you likely guessed a round number to escape a "
+                            f"quartic / transcendental that sympy.solve couldn't handle.\n\n"
+                            f"MANDATORY this retry:\n"
+                            f"  1. Derive the equation symbolically first.\n"
+                            f"  2. Solve it with scipy.optimize.brentq — NOT sympy.solve.\n"
+                            f"  3. Verify the CHECK: residual < 1e-6 before FINAL_ANSWER.\n"
+                            f"  4. Emit a paired `CHECK: <var>_residual = <expr>` line for "
+                            f"EVERY RESULT: line, per Rule 21.\n"
+                            f"Do not fabricate. If no real root exists, output STATUS: failed."
+                        )
+                        print(f"  ⚡ Retrying {sp_id} (residual-rejected, worst={worst:.2e})…")
+                    else:
+                        retry_msg = (
+                            "Previous attempt returned 0 results. "
+                            "You MUST write Python code and use ACTION: run_code. "
+                            "Do not describe the calculation in prose — execute it."
+                        )
+                        print(f"  ⚡ Retrying {sp_id} (status={result.status}, "
+                              f"0 computed results, outputs expected)…")
+
                     retry_solver = ReactSolver(
                         sub_problem=sp,
                         plan=plan,
@@ -456,14 +555,9 @@ class OrchestratorV3:
                         searxng_url=self.searxng_url,
                         manifest_values=global_manifest_float,
                     )
-                    # Inject a mandatory-code message at the top of history
                     retry_solver._history.append({
                         "role": "user",
-                        "content": (
-                            "Previous attempt returned 0 results. "
-                            "You MUST write Python code and use ACTION: run_code. "
-                            "Do not describe the calculation in prose — execute it."
-                        ),
+                        "content": retry_msg,
                     })
                     retry_tasks.append(retry_solver.solve())
                     retry_sp_ids.append(sp_id)
@@ -715,6 +809,133 @@ class OrchestratorV3:
             print(f"  📁 SP logs → swarm_results/debug/{job_id}/")
 
         return answer
+
+    # ── Swarm 3.13: Orchestrator-side Residual Lock ──────────────────────────
+
+    async def _residual_lock_check(
+        self,
+        result: "SolverResult",
+        sp: "SubProblem",
+    ) -> tuple:
+        """
+        Belt-and-suspenders residual verification: the solver already ran its
+        own gate, but the orchestrator re-executes each CHECK expression
+        independently so a compromised solver cannot fake passing residuals.
+
+        Returns (ok: bool, reason: str, max_residual: float, failed_vars: List[str]).
+        """
+        if not RESIDUAL_LOCK_ORCH:
+            return True, "", 0.0, []
+        try:
+            from equation_validator import EquationExecutor
+        except ImportError:
+            return True, "executor unavailable — orch gate skipped", 0.0, []
+
+        check_residuals = getattr(result, "check_residuals", None) or {}
+        if not result.results:
+            return True, "", 0.0, []
+        if not check_residuals:
+            return True, "no CHECK lines provided", 0.0, []
+
+        # Build numeric bindings: sp.inputs (locked + given) + result.results.
+        locals_lines: List[str] = []
+        for k, v in sp.inputs.items():
+            try:
+                fv = float(v)
+                locals_lines.append(f"{k} = {fv!r}")
+            except (TypeError, ValueError):
+                continue
+        for k, v in result.results.items():
+            if k in sp.inputs:
+                continue
+            try:
+                fv = float(v)
+                locals_lines.append(f"{k} = {fv!r}")
+            except (TypeError, ValueError):
+                continue
+
+        max_res = 0.0
+        failed_vars: List[str] = []
+        diagnostics: List[str] = []
+
+        for var, expr in check_residuals.items():
+            # Absolute tolerance fallback for CHECK expressions that already
+            # represent an absolute residual (large-magnitude inputs).
+            try:
+                var_val = float(result.results.get(var, 0.0))
+            except (TypeError, ValueError):
+                var_val = 0.0
+            abs_tol = max(1e-9, min(1e-3 * abs(var_val), 1e-3))
+
+            script = (
+                "import math\n"
+                "try:\n"
+                "    import numpy as np\n"
+                "except Exception:\n"
+                "    np = None\n"
+                "try:\n"
+                "    import mpmath\n"
+                "except Exception:\n"
+                "    mpmath = None\n"
+                + "\n".join(locals_lines) + "\n"
+                f"_res = {expr}\n"
+                "try:\n"
+                "    _res = float(_res)\n"
+                "except Exception:\n"
+                "    _res = float('inf')\n"
+                "print(f'RESIDUAL: {_res}')\n"
+            )
+            try:
+                exec_result = await EquationExecutor.execute(
+                    script, given_values={}, timeout=30
+                )
+            except Exception as e:
+                failed_vars.append(var)
+                diagnostics.append(f"{var}: gate exception {e}")
+                max_res = float("inf")
+                continue
+
+            if not exec_result.success:
+                failed_vars.append(var)
+                diagnostics.append(
+                    f"{var}: CHECK did not execute ({(exec_result.error or '')[:80]})"
+                )
+                max_res = float("inf")
+                continue
+
+            m = re.search(r"RESIDUAL:\s*([+-]?[\d.eE+\-]+)", exec_result.output or "")
+            if not m:
+                failed_vars.append(var)
+                diagnostics.append(f"{var}: no RESIDUAL printed")
+                max_res = float("inf")
+                continue
+
+            try:
+                res_val = abs(float(m.group(1)))
+            except ValueError:
+                failed_vars.append(var)
+                diagnostics.append(f"{var}: unparseable residual '{m.group(1)}'")
+                max_res = float("inf")
+                continue
+
+            # Record for debugging
+            try:
+                result.check_eval_values[var] = res_val
+            except AttributeError:
+                pass
+
+            if res_val > max_res:
+                max_res = res_val
+            if res_val >= RESIDUAL_TOLERANCE_REL_ORCH and res_val >= abs_tol:
+                failed_vars.append(var)
+                diagnostics.append(
+                    f"{var}: residual {res_val:.3e} exceeds tol "
+                    f"(rel={RESIDUAL_TOLERANCE_REL_ORCH:.0e}, abs={abs_tol:.0e})"
+                )
+
+        if failed_vars:
+            return False, "; ".join(diagnostics), max_res, failed_vars
+        return True, "", max_res, []
 
     # ── Domain categorisation ─────────────────────────────────────────────────
 

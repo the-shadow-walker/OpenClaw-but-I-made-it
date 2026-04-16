@@ -77,6 +77,12 @@ except ImportError:
     SolvePlan = Any
 
 
+# ── Swarm 3.13 kill switches ──────────────────────────────────────────────────
+RESIDUAL_LOCK_ENABLED = os.getenv("SWARM_RESIDUAL_LOCK", "1") != "0"
+RESIDUAL_TOLERANCE_REL = float(os.getenv("SWARM_RESIDUAL_TOL", "1e-6"))
+SUMMARY_PRUNE_ENABLED = os.getenv("SWARM_SUMMARY_PRUNE", "1") != "0"
+
+
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -89,6 +95,9 @@ class SolverResult:
     verification_note: str = ""
     turn_count: int = 0
     raw_log: str = ""                  # full ReAct transcript (archived)
+    # Swarm 3.13 — Pydantic Residual Lock
+    check_residuals: Dict[str, str] = field(default_factory=dict)   # var → expression string
+    check_eval_values: Dict[str, float] = field(default_factory=dict)  # populated by orchestrator after subprocess exec
 
 
 # ── Context anchor (injected at top of system prompt) ─────────────────────────
@@ -309,6 +318,24 @@ RULES:
       print(f"RESULT: energy = {{energy.magnitude:.6g}} J")
     If pint raises a DimensionalityError your equation is mixing incompatible
     units — FIX the equation before printing any result. pint is installed.
+21. RESIDUAL LOCK (MANDATORY TRUTH GATE): Every numeric RESULT: line you emit
+    MUST be paired with a CHECK: line that expresses the equation's residual
+    evaluated at your computed value. The orchestrator re-executes the CHECK
+    expression in an isolated subprocess — you cannot cheat this.
+    FORMAT:
+      print(f"RESULT: r0 = {{r0:.6g}} m")
+      print(f"CHECK: r0_residual = {{(5/r0**2 + 6*r0 - L**2/(m*r0**3)):.6e}}")
+    RULE: relative residual = |lhs - rhs| / (|lhs| + |rhs| + 1e-30) < 1e-6
+    (use absolute residual when an equation has no clean RHS split).
+    EXAMPLE for an equilibrium condition V'(r0) = L²/(m·r0³):
+      # V(r) = -5/r + 3*r^2, so V'(r) = 5/r^2 + 6*r
+      lhs = 5/r0**2 + 6*r0
+      rhs = L**2 / (m * r0**3)
+      print(f"CHECK: r0_residual = {{abs(lhs - rhs)/(abs(lhs) + abs(rhs) + 1e-30):.6e}}")
+    If a CHECK line is missing, the residual lock rejects the RESULT and you
+    are forced to retry. If the residual is not < 1e-6, your answer is WRONG —
+    switch numerical solver (sympy → scipy.brentq), widen brackets, or re-check
+    the equation derivation. Never fabricate a value to escape a hard equation.
 """
 
 
@@ -349,6 +376,9 @@ class ReactSolver:
         self._locked_results: Dict[str, str] = {}  # Ledger: var → "value unit" (never overwritten once set)
         self._recent_lens: List[int] = []         # Loop detection: last 3 response lengths
         self._failed_snippets: List[str] = []     # Error-Memory: key failing lines across all turns
+        # Swarm 3.13 — Pydantic Residual Lock state
+        self._locked_checks: Dict[str, str] = {}  # var → CHECK residual expression string
+        self._residual_rejects: int = 0           # count of residual-gate rejections (cap at 2)
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -411,16 +441,48 @@ class ReactSolver:
             # Token-aware pruning: if history > ~12k tokens with no results yet,
             # keep seed + last 2 pairs. 32B models lose instruction adherence when
             # context fills with failed code — this resets attention to the rules.
+            # Swarm 3.13 — summary-aware: replace middle turns with a factual recap
+            # so the model remembers what it already tried.
             _hist_chars = sum(len(m["content"]) for m in self._history)
             if _hist_chars > 24000 and not self._locked_results and len(self._history) > 5:
-                seed_msg  = self._history[:1]
-                last_four = self._history[-4:]
-                pruned_count = len(self._history) - 1 - len(last_four)
-                pruned_chars = _hist_chars - sum(len(m["content"]) for m in seed_msg + last_four)
-                self._history = seed_msg + last_four
-                print(f"  \u2702\ufe0f  [{sp.id}] T{turn} token-prune: dropped {pruned_count} turns "
-                      f"({pruned_chars//1000}k chars, 0 results yet)")
-                self._log(f"[TOKEN PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
+                seed_msg_list = self._history[:1]
+                middle        = self._history[1:-4]
+                last_four     = self._history[-4:]
+                pruned_count  = len(middle)
+                pruned_chars  = sum(len(m["content"]) for m in middle)
+
+                if SUMMARY_PRUNE_ENABLED and middle:
+                    try:
+                        summary = await self._summarize_failed_attempts(middle, sp)
+                    except Exception as _e:
+                        summary = ""
+                        print(f"  ✂️  [{sp.id}] T{turn} blind-prune (summary failed: {_e})")
+                    if summary:
+                        synthetic = [{
+                            "role": "user",
+                            "content": (
+                                f"📝 PRIOR ATTEMPTS RECAP (dropped {pruned_count} turns):\n"
+                                f"{summary}\n\n"
+                                f"🎯 DIRECTIVE: Try a fundamentally different approach. "
+                                f"Do NOT repeat patterns listed above."
+                            ),
+                        }]
+                        self._history = seed_msg_list + synthetic + last_four
+                        print(f"  \u2702\ufe0f  [{sp.id}] T{turn} summary-prune: "
+                              f"{pruned_count} turns → 1 summary ({len(summary)} chars)")
+                        self._log(f"[SUMMARY PRUNE at T{turn}: {pruned_count} turns compressed]\n{summary}")
+                    else:
+                        # Summariser failed — fall back to blind prune
+                        self._history = seed_msg_list + last_four
+                        print(f"  \u2702\ufe0f  [{sp.id}] T{turn} blind-prune (no summary): "
+                              f"dropped {pruned_count} turns ({pruned_chars//1000}k chars)")
+                        self._log(f"[BLIND PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
+                else:
+                    # Kill-switch disabled OR no middle to summarise — original behaviour
+                    self._history = seed_msg_list + last_four
+                    print(f"  \u2702\ufe0f  [{sp.id}] T{turn} token-prune: dropped {pruned_count} turns "
+                          f"({pruned_chars//1000}k chars, 0 results yet)")
+                    self._log(f"[TOKEN PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
 
             # Query the model
             response = await self._llm_call()
@@ -493,6 +555,62 @@ class ReactSolver:
                 # If no RESULT: lines found, try extracting from think block
                 if not result.results:
                     result = self._extract_from_think(response, result, turn)
+
+                # Swarm 3.13 — Pydantic Residual Lock (solver-side)
+                # Re-execute CHECK expressions in an isolated subprocess to
+                # verify the model didn't hallucinate a value that fails the
+                # equation's own residual. Caps retries at 2.
+                if (
+                    RESIDUAL_LOCK_ENABLED
+                    and result.status == "solved"
+                    and result.results
+                    and self._residual_rejects < 2
+                ):
+                    ok, reason, max_res = await self._residual_gate(result, sp)
+                    if not ok:
+                        self._residual_rejects += 1
+                        print(f"  🔬 [{sp.id}] RESIDUAL LOCK REJECTED "
+                              f"(worst={max_res:.2e}): {reason}")
+                        diag = (
+                            f"⛔ RESIDUAL LOCK REJECTED (attempt "
+                            f"{self._residual_rejects}/2).\n"
+                            f"Your RESULT values do NOT satisfy the equation's "
+                            f"residual check:\n  {reason}\n"
+                            f"Worst relative residual: {max_res:.3e} "
+                            f"(tolerance: {RESIDUAL_TOLERANCE_REL:.0e}).\n"
+                            "MANDATORY RETRY: Re-solve with a DIFFERENT numerical "
+                            "method.\n"
+                            "  • If you used sympy.solve(): switch to "
+                            "scipy.optimize.brentq with a sign-confirmed bracket.\n"
+                            "  • If you used fsolve: widen the initial guess range "
+                            "or try multiple seeds.\n"
+                            "  • Re-derive the equation from first principles if "
+                            "the residual magnitude is O(1) — your formula has "
+                            "a sign error or wrong term.\n"
+                            "Then emit a fresh ACTION: run_code block and a new "
+                            "FINAL_ANSWER — this time include a CHECK: line that "
+                            "prints a residual magnitude < 1e-6."
+                        )
+                        self._log(f"\n[TURN {turn} — RESIDUAL LOCK REJECTED]\n{diag}")
+                        self._history.append({
+                            "role": "user",
+                            "content": f"OBSERVATION:\n{diag}",
+                        })
+                        continue
+                    else:
+                        print(f"  🔬 [{sp.id}] RESIDUAL LOCK PASS "
+                              f"(worst={max_res:.2e}, tol={RESIDUAL_TOLERANCE_REL:.0e})")
+                        if not result.verification_note:
+                            result.verification_note = (
+                                f"residual lock pass (worst={max_res:.2e})"
+                            )
+                elif RESIDUAL_LOCK_ENABLED and self._residual_rejects >= 2:
+                    print(f"  ⚠️  [{sp.id}] Residual lock waived after 2 rejections")
+                    result.verification_note = (
+                        (result.verification_note + "; " if result.verification_note else "")
+                        + "residual lock waived (2 rejections)"
+                    )
+
                 # Pretty-print result values
                 if result.results_with_units:
                     vals_str = ", ".join(
@@ -755,6 +873,14 @@ class ReactSolver:
                                         )
                             except (ValueError, TypeError, ZeroDivisionError):
                                 pass
+                    # Swarm 3.13 — Stash CHECK lines into _locked_checks ledger
+                    cm = re.match(r'CHECK:\s*(\w+?)_residual\s*=\s*(.+)', line.strip())
+                    if cm:
+                        cvar, cexpr = cm.group(1), cm.group(2).strip()
+                        # First-write wins so an earlier, working CHECK is preserved
+                        # across later code iterations that may print noisy retries.
+                        if cvar not in self._locked_checks:
+                            self._locked_checks[cvar] = cexpr
 
                 if _violations:
                     vtext = "\n".join(_violations)
@@ -1006,6 +1132,24 @@ class ReactSolver:
         code_m = re.search(r"CODE:\s*(.*?)(?:END_ANSWER|$)", block, re.DOTALL)
         code = code_m.group(1).strip()[:3000] if code_m else ""
 
+        # Swarm 3.13 — Parse CHECK: <var>_residual = <expr> lines from FINAL_ANSWER
+        check_residuals: Dict[str, str] = {}
+        for cm in re.finditer(
+            r"CHECK:\s*(\w+?)_residual\s*=\s*([^\n]+)",
+            block,
+            re.IGNORECASE,
+        ):
+            check_residuals[cm.group(1).strip()] = cm.group(2).strip()
+        # Fallback: if a RESULT var has no CHECK in FINAL_ANSWER, pull from
+        # the _locked_checks ledger populated during _tool_run_code.
+        for var in results:
+            if var not in check_residuals and var in self._locked_checks:
+                check_residuals[var] = self._locked_checks[var]
+        missing_checks = [v for v in results if v not in check_residuals]
+        if missing_checks:
+            print(f"  ⚠️  [{self.sub_problem.id}] CHECK line missing for: "
+                  f"{', '.join(missing_checks)} — residual lock will skip these")
+
         return SolverResult(
             sub_problem_id=self.sub_problem.id,
             status=status,
@@ -1015,6 +1159,7 @@ class ReactSolver:
             verification_note=verification,
             turn_count=turn,
             raw_log="\n".join(self._log_parts),
+            check_residuals=check_residuals,
         )
 
     def _extract_from_think(self, full_response: str, existing: SolverResult, turn: int) -> SolverResult:
@@ -1056,6 +1201,219 @@ class ReactSolver:
             unit = rm.group(3).strip()
             results[var] = {"value": val, "unit": unit}
         return results
+
+    # ── Swarm 3.13: Pydantic Residual Lock + Summary Prune ───────────────────
+
+    async def _residual_gate(
+        self, result: "SolverResult", sp: "SubProblem"
+    ) -> Tuple[bool, str, float]:
+        """
+        Re-execute each CHECK expression in an isolated subprocess and verify
+        the dimensionless relative residual is below RESIDUAL_TOLERANCE_REL.
+
+        Returns:
+            (ok, reason, max_residual)
+            ok       — True only if every checked variable passes
+            reason   — human-readable diagnosis (empty on success)
+            max_res  — worst residual magnitude encountered (for logging)
+        """
+        if not RESIDUAL_LOCK_ENABLED:
+            return True, "", 0.0
+        if not _HAS_EXECUTOR:
+            return True, "executor unavailable — gate skipped", 0.0
+        if not result.results:
+            return True, "", 0.0
+        if not result.check_residuals:
+            # Tolerant: CHECK-less answers pass (warning already printed in
+            # _parse_final_answer) — orchestrator side will still try its gate
+            return True, "no CHECK lines provided", 0.0
+
+        # Build bindings: sp.inputs + result.results as locals for the subprocess.
+        # sp.inputs are ALREADY numbers (given / locked manifest). result.results
+        # carry the model's RESULT: values that we are independently verifying.
+        locals_lines = []
+        for k, v in sp.inputs.items():
+            try:
+                fv = float(v)
+                locals_lines.append(f"{k} = {fv!r}")
+            except (TypeError, ValueError):
+                continue
+        for k, v in result.results.items():
+            try:
+                fv = float(v)
+                # Don't overwrite an already-present input (locked wins)
+                if k not in sp.inputs:
+                    locals_lines.append(f"{k} = {fv!r}")
+            except (TypeError, ValueError):
+                continue
+
+        max_res = 0.0
+        failures: List[str] = []
+        for var, expr in result.check_residuals.items():
+            script = (
+                "import math\n"
+                "try:\n"
+                "    import numpy as np\n"
+                "except Exception:\n"
+                "    np = None\n"
+                "try:\n"
+                "    import mpmath\n"
+                "except Exception:\n"
+                "    mpmath = None\n"
+                + "\n".join(locals_lines) + "\n"
+                f"_res = {expr}\n"
+                "try:\n"
+                "    _res = float(_res)\n"
+                "except Exception:\n"
+                "    _res = float('inf')\n"
+                "print(f'RESIDUAL: {_res}')\n"
+            )
+            try:
+                exec_result = await EquationExecutor.execute(
+                    script, given_values={}, timeout=30
+                )
+            except Exception as e:
+                failures.append(f"{var}: gate exception {e}")
+                max_res = float("inf")
+                continue
+
+            if not exec_result.success:
+                # Dangerous-pattern filter or syntax error in the CHECK expression
+                failures.append(
+                    f"{var}: CHECK expression did not execute — {(exec_result.error or '')[:120]}"
+                )
+                max_res = float("inf")
+                continue
+
+            m = re.search(r"RESIDUAL:\s*([+-]?[\d.eE+\-]+)", exec_result.output or "")
+            if not m:
+                failures.append(f"{var}: no RESIDUAL printed by check expression")
+                max_res = float("inf")
+                continue
+            try:
+                res_val = abs(float(m.group(1)))
+            except ValueError:
+                failures.append(f"{var}: unparseable residual '{m.group(1)}'")
+                max_res = float("inf")
+                continue
+
+            # Stash for downstream debugging
+            result.check_eval_values[var] = res_val
+            if res_val > max_res:
+                max_res = res_val
+            if res_val >= RESIDUAL_TOLERANCE_REL:
+                failures.append(
+                    f"{var}: residual {res_val:.3e} exceeds tol {RESIDUAL_TOLERANCE_REL:.0e}"
+                )
+
+        if failures:
+            return False, "; ".join(failures), max_res
+        return True, "", max_res
+
+    async def _summarize_failed_attempts(
+        self, middle: List[Dict[str, str]], sp: "SubProblem"
+    ) -> str:
+        """
+        Compress a middle slice of failed turns into a 3-5 sentence recap so
+        the solver, after a history prune, still remembers what didn't work.
+        Single ollama call; does NOT propose solutions.
+        """
+        if not middle:
+            return "(no prior attempts)"
+        # Serialize transcript with per-message cap
+        parts = []
+        for msg in middle:
+            role = (msg.get("role") or "user").upper()
+            content = str(msg.get("content") or "")
+            if len(content) > 1500:
+                content = content[:1500] + "... [truncated]"
+            parts.append(f"[{role}]\n{content}")
+        transcript = "\n\n".join(parts)[:12000]  # final safety cap
+
+        prompt = (
+            "You are a debug assistant for a failing solve.\n"
+            f"Sub-problem: {sp.description}\n\n"
+            "Transcript:\n"
+            f"{transcript}\n\n"
+            "Summarize in 3-5 sentences:\n"
+            "1. Approaches attempted (libraries, methods)\n"
+            "2. Specific errors encountered (stack traces, CRootOf, NaN, "
+            "RESIDUAL LOCK rejections)\n"
+            "3. Residual magnitudes for rejected answers\n"
+            "4. Failure pattern (wrong sign? bad bracket? catastrophic "
+            "cancellation?)\n\n"
+            "Be specific. Do NOT suggest a solution."
+        )
+        system = (
+            "You are a debug assistant. Be concise, factual, specific. "
+            "Never suggest solutions."
+        )
+        try:
+            summary = await self._ollama_chat(
+                model=self.MODEL,
+                prompt=prompt,
+                system=system,
+                timeout=300,
+                num_predict=512,
+                keep_alive=600,
+            )
+        except Exception as e:
+            return f"(summary failed: {e})"
+        return (summary or "").strip() or "(summary returned empty)"
+
+    @staticmethod
+    async def _ollama_chat(
+        model: str,
+        prompt: str,
+        system: str = "",
+        timeout: int = 300,
+        num_predict: int = 512,
+        keep_alive: int = 600,
+    ) -> str:
+        """Minimal streaming Ollama /api/chat call used by the summariser."""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "keep_alive": keep_alive,
+            "options": {"temperature": 0.3, "num_predict": num_predict},
+        }
+
+        def _stream() -> str:
+            resp = requests.post(
+                f"{ReactSolver.OLLAMA_URL}/api/chat",
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            parts = []
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    delta = chunk.get("message", {}).get("content", "")
+                    if delta:
+                        parts.append(delta)
+                    if chunk.get("done", False):
+                        break
+                except json.JSONDecodeError:
+                    continue
+            return "".join(parts)
+
+        try:
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, _stream)
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content
+        except Exception as e:
+            print(f"⚠️  ReactSolver._ollama_chat({model}) error: {e}")
+            return ""
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
