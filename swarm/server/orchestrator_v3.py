@@ -122,7 +122,7 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.11 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.12 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -561,6 +561,92 @@ class OrchestratorV3:
                         ) if ar.results_with_units else "no results"
                     ) if ar.status == "solved" else "no results"
                     print(f"  🚨 AUDIT {sp_id} → {ar.status.upper()} | {vals_str}")
+
+        # ── Phase 1X: Domain Wave Gate ────────────────────────────────────
+        # Block the writer until EVERY domain (MATHEMATICS, CHEMISTRY) has
+        # at least one solved SP.  Catches the "Megaprompt Dropout" where 10+
+        # physics SPs exhaust the planner's attention and math/chem get skipped.
+        _gate_domains = ("MATHEMATICS", "CHEMISTRY")
+        domain_missed = [
+            sp for sp in plan.sub_problems
+            if self._domain_category(sp.domain, sp.description) in _gate_domains
+            and (
+                solver_results.get(sp.id) is None
+                or (solver_results[sp.id].status != "solved" and sp.expected_outputs)
+            )
+        ]
+        if domain_missed:
+            print(f"\n{_sep}")
+            print(f"Phase 1X  Domain Gate       │ {_elapsed()}")
+            print(f"  ⛔ Writer BLOCKED — {len(domain_missed)} MATH/CHEM SP(s) unsolved:")
+            for _sp in domain_missed:
+                _cat  = self._domain_category(_sp.domain, _sp.description)
+                _st   = solver_results[_sp.id].status if _sp.id in solver_results else "MISSING"
+                print(f"    {_sp.id} [{_cat}] {_st}: {_sp.description[:60]}")
+
+            # Rebuild manifest from all solved SPs so far
+            gate_manifest: Dict[str, str] = {}
+            for _pid, _pr in solver_results.items():
+                if _pr.status == "solved":
+                    if getattr(_pr, "results_with_units", None):
+                        for _var, _meta in _pr.results_with_units.items():
+                            gate_manifest[_var] = (
+                                f"{_meta.get('value','')} {_meta.get('unit','')}".strip()
+                            )
+                    elif _pr.results:
+                        for _var, _val in _pr.results.items():
+                            gate_manifest[_var] = str(_val)
+            gate_manifest_float: Dict[str, float] = {}
+            for _var, _vs in gate_manifest.items():
+                try:
+                    gate_manifest_float[_var] = float(_vs.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            gate_block = ""
+            if gate_manifest:
+                _glines = [f"  {k} = {v}" for k, v in gate_manifest.items()]
+                gate_block = (
+                    "\n🔒 COMPUTED FACTS FROM PRIOR STEPS — USE THESE DIRECTLY:\n"
+                    + "\n".join(_glines) + "\n"
+                )
+
+            gate_tasks, gate_ids = [], []
+            for _sp in domain_missed:
+                _cat = self._domain_category(_sp.domain, _sp.description)
+                for _var, _vs in gate_manifest.items():
+                    if _var not in _sp.inputs:
+                        try:
+                            _sp.inputs[_var] = float(_vs.split()[0])
+                        except (ValueError, IndexError):
+                            pass
+                _ctx = research_contexts.get(_sp.id, "")
+                _gs = ReactSolver(
+                    sub_problem=_sp, plan=plan,
+                    research_context=gate_block + (_ctx or ""),
+                    searxng_url=self.searxng_url,
+                    manifest_values=gate_manifest_float,
+                )
+                _gs._history.append({"role": "user", "content": (
+                    f"⛔ DOMAIN GATE: This {_cat} sub-problem was NOT solved in the "
+                    f"physics wave. The writer is BLOCKED until all domains are complete. "
+                    f"You MUST solve {_sp.id} now: {_sp.description}\n"
+                    f"Begin IMMEDIATELY with ACTION: run_code. No prose."
+                )})
+                gate_tasks.append(_gs.solve())
+                gate_ids.append(_sp.id)
+
+            if gate_tasks:
+                gate_res = await asyncio.gather(*gate_tasks)
+                for _gid, _gr in zip(gate_ids, gate_res):
+                    solver_results[_gid] = _gr
+                    _gvals = (
+                        ", ".join(
+                            f"{v}={d['value']:.4g}{' '+d['unit'] if d.get('unit') else ''}"
+                            for v, d in _gr.results_with_units.items()
+                        ) if _gr.results_with_units else "no results"
+                    )
+                    print(f"  ⛔→{'✅' if _gr.status=='solved' else '❌'} "
+                          f"Gate {_gid} → {_gr.status.upper()} | {_gvals} | {_gr.turn_count} turns")
 
         # ── Free VRAM before synthesis — only if switching models ─────────
         try:

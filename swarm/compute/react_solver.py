@@ -697,6 +697,28 @@ class ReactSolver:
             )
             code = mpmath_preamble + code
 
+        # ── Fix 3: Anti-v=0 guard (relativistic problems) ────────────────────
+        # If the problem is relativistic (mpmath auto-inject triggered) and the
+        # code assigns v = 0, the correction will be identically zero — wrong.
+        if _needs_mpmath:
+            _v_zero = any(re.search(p, code, re.IGNORECASE) for p in [
+                r'\bv\s*=\s*0\b',
+                r'\bvelocity\s*=\s*0\b',
+                r'\bv_0\s*=\s*0\b',
+                r'\bv_particle\s*=\s*0\b',
+            ])
+            if _v_zero:
+                return (
+                    "⛔ FORBIDDEN ASSUMPTION DETECTED — v = 0 in a relativistic problem.\n"
+                    "Setting v = 0 makes the relativistic correction identically zero — "
+                    "this defeats the purpose of the calculation.\n"
+                    "REQUIRED: compute the orbital velocity from first principles:\n"
+                    "  v = L / (m * r0)\n"
+                    "where L (angular momentum), m (mass), and r0 (equilibrium radius)\n"
+                    "are ALL in the PROBLEM PARAMETER ANCHOR or locked manifest.\n"
+                    "Remove the v=0 line and replace it with v = L / (m * r0)."
+                )
+
         if not _HAS_EXECUTOR:
             return "ERROR: EquationExecutor not available — cannot run code."
 
@@ -707,12 +729,44 @@ class ReactSolver:
             if result.success:
                 print(f"OK ({len(result.output)} chars)")
                 # Lock any RESULT: lines into the ledger (never overwrite once set)
+                # Simultaneously check for manifest violations (Fix 2)
+                _violations: List[str] = []
                 for line in result.output.splitlines():
                     m = re.match(r'RESULT:\s*(\w+)\s*=\s*(.+)', line.strip())
                     if m:
                         var, val = m.group(1), m.group(2).strip()
                         if var not in self._locked_results:
                             self._locked_results[var] = val
+                        # ── Fix 2: Manifest violation check ──────────────────
+                        # If this variable was GIVEN in sp.inputs (locked from a
+                        # prior SP) and the code produced a conflicting value,
+                        # that is numerical schizophrenia — reject it immediately.
+                        if var in self.sub_problem.inputs:
+                            try:
+                                given_val = float(self.sub_problem.inputs[var])
+                                code_val  = float(val.split()[0])
+                                if given_val != 0 and code_val != 0:
+                                    pct_diff = abs(code_val - given_val) / abs(given_val)
+                                    if pct_diff > 0.05:  # >5% threshold
+                                        _violations.append(
+                                            f"  🚨 {var}: code produced {code_val:.6g} "
+                                            f"but LOCKED input = {given_val:.6g} "
+                                            f"({pct_diff*100:.1f}% diff)"
+                                        )
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pass
+
+                if _violations:
+                    vtext = "\n".join(_violations)
+                    return (
+                        f"⛔ MANIFEST VIOLATION — code re-derived a locked input value:\n"
+                        f"{vtext}\n\n"
+                        f"These variables appear in the '# LOCKED' GIVEN VALUES block at\n"
+                        f"the top of your code. You are FORBIDDEN from assigning a new\n"
+                        f"value to any LOCKED variable. The prior SP solved them — trust it.\n"
+                        f"FIX: remove the conflicting assignment(s) and use the LOCKED value.\n\n"
+                        f"Code output (for reference):\n{result.output[:1500]}"
+                    )
                 return result.output[:4000] or "(no output)"
             else:
                 print(f"FAILED")
