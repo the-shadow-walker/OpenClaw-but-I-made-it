@@ -882,8 +882,17 @@ def _pick_menu(items, title="", hint="  ↑↓/jk  navigate   Enter  select   q/
                initial_idx=0):
     """
     Interactive arrow-key picker. Returns selected index, or -1 on cancel.
-    Falls back to a numbered list when stdin is not a tty or termios is unavailable.
+    Falls back to a numbered list when stdin is not a tty or termios unavailable.
+
+    Key fixes vs naive implementation:
+    - Uses os.read(fd, 1) NOT sys.stdin.buffer.read(1).
+      BufferedReader.read(1) silently consumes the full escape sequence into
+      its 8 KB internal buffer, leaving the fd empty, so select() times out
+      and arrow keys register as bare ESC (cancel).
+    - Uses \\r\\n not \\n.  In raw mode \\n is line-feed only; without the
+      carriage return the cursor drifts right and text scatters diagonally.
     """
+    import os as _os
     try:
         import tty, termios, select as _sel
         _has_tty = sys.stdin.isatty()
@@ -891,7 +900,6 @@ def _pick_menu(items, title="", hint="  ↑↓/jk  navigate   Enter  select   q/
         _has_tty = False
 
     if not _has_tty:
-        # Non-interactive fallback
         print(f"\n  {title}" if title else "")
         for i, item in enumerate(items, 1):
             clean = re.sub(r'\033\[[^m]*m', '', item)
@@ -907,41 +915,47 @@ def _pick_menu(items, title="", hint="  ↑↓/jk  navigate   Enter  select   q/
     old = termios.tcgetattr(fd)
 
     def _render():
-        sys.stdout.write("\033[2J\033[H\033[?25l")   # clear, home, hide cursor
+        # \r\n required — raw mode disables automatic CR on LF
+        out = ["\033[2J\033[H\033[?25l"]
         if title:
-            sys.stdout.write(f"\n  \033[1m{title}\033[0m\n  {'─'*66}\n\n")
+            out.append(f"\r\n  \033[1m{title}\033[0m\r\n  {'─'*66}\r\n\r\n")
         for i, item in enumerate(items):
             arrow = "\033[1;32m▶\033[0m" if i == idx else " "
-            sys.stdout.write(f"  {arrow} {item}\n")
-        sys.stdout.write(f"\n  \033[2m{hint}\033[0m\n")
+            out.append(f"  {arrow} {item}\r\n")
+        out.append(f"\r\n  \033[2m{hint}\033[0m\r\n")
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
+
+    def _readkey():
+        """Read one logical keypress directly from the fd (no buffering)."""
+        b = _os.read(fd, 1)
+        if b == b'\x1b':
+            # Wait up to 100 ms for the rest of the escape sequence
+            if _sel.select([fd], [], [], 0.1)[0]:
+                b2 = _os.read(fd, 1)
+                if b2 == b'[' and _sel.select([fd], [], [], 0.05)[0]:
+                    b3 = _os.read(fd, 1)
+                    if b3 == b'A': return 'UP'
+                    if b3 == b'B': return 'DOWN'
+            return 'ESC'
+        if b in (b'\r', b'\n'):   return 'ENTER'
+        if b in (b'\x03', b'\x04'): return 'QUIT'
+        return b.decode('utf-8', errors='replace')
 
     try:
         tty.setraw(fd)
         _render()
         while True:
-            ch = sys.stdin.buffer.read(1)
-            if ch == b'\x1b':
-                if _sel.select([sys.stdin.buffer], [], [], 0.05)[0]:
-                    seq = sys.stdin.buffer.read(2)
-                    if   seq == b'[A': idx = (idx - 1) % len(items); _render()
-                    elif seq == b'[B': idx = (idx + 1) % len(items); _render()
-                    # other sequences (page-up, etc.) ignored
-                else:
-                    return -1   # bare Esc
-            elif ch in (b'\r', b'\n'):
-                return idx
-            elif ch in (b'q', b'\x03', b'\x04'):
-                return -1
-            elif ch == b'k':
-                idx = (idx - 1) % len(items); _render()
-            elif ch == b'j':
-                idx = (idx + 1) % len(items); _render()
+            key = _readkey()
+            if   key in ('UP',   'k'): idx = (idx - 1) % len(items); _render()
+            elif key in ('DOWN',  'j'): idx = (idx + 1) % len(items); _render()
+            elif key == 'ENTER':        return idx
+            elif key in ('ESC', 'q', 'QUIT'): return -1
     except (KeyboardInterrupt, Exception):
         return -1
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\033[?25h\033[2J\033[H")   # show cursor, clear
+        sys.stdout.write("\033[?25h\033[2J\033[H")
         sys.stdout.flush()
 
 
