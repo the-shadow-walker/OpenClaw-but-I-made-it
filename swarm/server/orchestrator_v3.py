@@ -29,7 +29,7 @@ import json
 import re
 import requests
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 from base_agent import BaseAgent
@@ -95,6 +95,9 @@ RESIDUAL_LOCK_ORCH = os.getenv("SWARM_RESIDUAL_LOCK_ORCH", "1") != "0"
 RESIDUAL_TOLERANCE_REL_ORCH = float(os.getenv("SWARM_RESIDUAL_TOL_ORCH", "1e-6"))
 # Swarm 3.14 — Stability Gate (orchestrator side)
 STABILITY_GATE_ORCH = os.getenv("SWARM_STABILITY_GATE_ORCH", "1") != "0"
+# Swarm 3.14.1 — Plausibility Gate (Lock D): auditor peer-review for suspicious values
+PLAUSIBILITY_GATE_ENABLED = os.getenv("SWARM_PLAUSIBILITY_GATE", "1") != "0"
+PLAUSIBILITY_AUDITOR_MODEL = os.getenv("SWARM_AUDITOR_MODEL", "qwen3-coder:30b")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,6 +365,16 @@ class OrchestratorV3:
                         )
                         if sg_m:
                             rejected_vars.add(sg_m.group(1).strip())
+                        # Swarm 3.14.1 — skip vars flagged by plausibility audit
+                        pg_m = re.match(
+                            r'PLAUSIBILITY_GATE_REJECTED:\s*(.+)',
+                            log_line.strip(),
+                        )
+                        if pg_m:
+                            for _v in pg_m.group(1).split(","):
+                                _v = _v.strip()
+                                if _v:
+                                    rejected_vars.add(_v)
                     for log_line in prior_res.raw_log.splitlines():
                         rm = re.match(
                             r'RESULT:\s*([A-Za-z_]\w*)\s*=\s*([+-]?\d[\d.e+\-]*)\s*(.*)',
@@ -545,6 +558,37 @@ class OrchestratorV3:
                             )
                     except Exception:
                         pass
+
+            # Swarm 3.14.1 — Plausibility Gate (Lock D)
+            # Catches "Lazy Scientist" cheats: when the solver exits with a
+            # suspiciously round value (0.0, 1.0, -1.0) or a value equal to an
+            # input, a fresh Auditor LLM peer-reviews whether that value is
+            # physically plausible for this potential. Rejects are marked
+            # PLAUSIBILITY_GATE_REJECTED: so soft-salvage skips poisoned vars.
+            if PLAUSIBILITY_GATE_ENABLED:
+                for result in wave_results:
+                    if result.status != "solved":
+                        continue
+                    sp = sp_map.get(result.sub_problem_id)
+                    if sp is None or not result.results:
+                        continue
+                    ok_p, reason_p, rejected_p = await self._plausibility_audit(result, sp)
+                    if ok_p:
+                        if reason_p:
+                            print(f"  🕵️  PLAUSIBILITY: {sp.id} → PASS ({reason_p[:80]})")
+                    else:
+                        print(
+                            f"  🕵️  PLAUSIBILITY: {sp.id} → REJECT "
+                            f"({','.join(rejected_p)}) — {reason_p[:140]}"
+                        )
+                        result.status = "failed"
+                        result.verification_note = (
+                            (result.verification_note + "; " if result.verification_note else "")
+                            + f"plausibility audit rejected: {reason_p[:200]}"
+                        )
+                        result.raw_log = (result.raw_log or "") + (
+                            f"\nPLAUSIBILITY_GATE_REJECTED: {','.join(rejected_p)}\n"
+                        )
 
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result
@@ -868,6 +912,138 @@ class OrchestratorV3:
         return answer
 
     # ── Swarm 3.13: Orchestrator-side Residual Lock ──────────────────────────
+
+    async def _plausibility_audit(
+        self,
+        result: "SolverResult",
+        sp: "SubProblem",
+    ) -> tuple:
+        """
+        Swarm 3.14.1 — Plausibility Gate (Lock D)
+
+        When the solver returns a "suspicious" value (0.0, 1.0, -1.0,
+        or exactly equal to one of sp.inputs), spin up a fresh Auditor
+        LLM to peer-review whether that value is physically plausible
+        for this sub-problem's domain + potential.
+
+        Returns (ok: bool, reason: str, rejected_vars: List[str]).
+        Non-suspicious results return (True, "", []) immediately without
+        calling the LLM — this is cheap by design.
+        """
+        import math as _m
+        # Step 1 — triage: only audit suspicious values
+        _SUSPICIOUS_CONSTANTS = {0.0, 1.0, -1.0, 0.5, -0.5}
+        input_values = set()
+        for v in (sp.inputs or {}).values():
+            try:
+                input_values.add(float(v))
+            except (TypeError, ValueError):
+                pass
+
+        suspicious: List[Tuple[str, float, str]] = []  # (var, val, why)
+        for var, val in (result.results or {}).items():
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not _m.isfinite(fval):
+                continue  # NaN/inf handled by residual lock
+            why = None
+            if fval in _SUSPICIOUS_CONSTANTS:
+                why = f"suspiciously round ({fval})"
+            elif fval in input_values:
+                why = f"equals an input value ({fval})"
+            if why is None:
+                # Also flag "marginally stable" or "trivially" language paired with 0
+                raw = (result.raw_log or "").lower()
+                if (
+                    abs(fval) < 1e-12
+                    and any(kw in raw for kw in (
+                        "marginally stable", "marginal stability",
+                        "trivially zero", "trivial solution",
+                        "reduces to zero",
+                    ))
+                ):
+                    why = f"zero-value with 'marginally stable' escape-hatch language"
+            if why:
+                suspicious.append((var, fval, why))
+
+        if not suspicious:
+            return True, "", []
+
+        # Step 2 — ask the Auditor LLM whether each suspicious value is plausible
+        findings_str = "\n".join(f"  • {v} = {x} ({w})" for v, x, w in suspicious)
+        sp_inputs_str = ", ".join(
+            f"{k}={v}" for k, v in (sp.inputs or {}).items()
+        ) or "(none)"
+        prompt = (
+            "You are an INDEPENDENT PHYSICS AUDITOR reviewing another agent's\n"
+            "sub-problem result. The solver reported values that look suspicious\n"
+            "(round numbers or equal to an input). Decide if these are physically\n"
+            "plausible OR if the solver cheated to exit a hard problem.\n\n"
+            f"SUB-PROBLEM: {sp.id} — {sp.description}\n"
+            f"DOMAIN: {getattr(sp, 'domain', '?')}\n"
+            f"APPROACH: {getattr(sp, 'approach', '(none)')}\n"
+            f"INPUTS: {sp_inputs_str}\n\n"
+            f"SUSPICIOUS RESULTS:\n{findings_str}\n\n"
+            "Rules:\n"
+            "  • A radial oscillation frequency ω_r = 0 is NEVER physically\n"
+            "    plausible for a generic non-linear potential (1/r^3, r^4, etc.)\n"
+            "    unless V''(r0) is proven identically zero.\n"
+            "  • A result == input usually means the solver skipped the math.\n"
+            "  • 'Marginally stable' requires an exact proof, not an escape hatch.\n\n"
+            "OUTPUT EXACTLY ONE OF:\n"
+            "  PLAUSIBLE: <short justification>\n"
+            "  IMPLAUSIBLE: <var1,var2,...> — <1-sentence physical reason>\n"
+        )
+        system = (
+            "You are a rigorous physics auditor. Be skeptical. If a value looks\n"
+            "like a lazy fabrication to exit a hard computation, reject it.\n"
+            "Accept only values that have a genuine physical justification."
+        )
+        try:
+            # Import locally to avoid circular import
+            from react_solver import ReactSolver as _RS
+            reply = await _RS._ollama_chat(
+                model=PLAUSIBILITY_AUDITOR_MODEL,
+                prompt=prompt,
+                system=system,
+                timeout=300,
+                num_predict=300,
+                keep_alive=300,
+            )
+        except Exception as e:
+            # Auditor unavailable — fail OPEN (don't block the solve on infra
+            # problems) but record it
+            return True, f"auditor-unavailable ({e})", []
+
+        reply_u = (reply or "").strip()
+        if not reply_u:
+            return True, "auditor-empty", []
+
+        # Parse reply
+        if re.search(r"\bIMPLAUSIBLE\b", reply_u, re.IGNORECASE):
+            m = re.search(
+                r"IMPLAUSIBLE:\s*([A-Za-z_][\w, ]*?)\s*[—\-:]\s*(.+)",
+                reply_u,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if m:
+                rejected = [
+                    v.strip() for v in m.group(1).split(",") if v.strip()
+                ]
+                reason = m.group(2).strip()[:300]
+            else:
+                # Couldn't parse specific vars — reject ALL suspicious ones
+                rejected = [v for v, _, _ in suspicious]
+                reason = reply_u[:300]
+            # Only reject vars that actually appear in our suspicious list
+            suspicious_names = {v for v, _, _ in suspicious}
+            rejected = [v for v in rejected if v in suspicious_names] or list(suspicious_names)
+            return False, reason, rejected
+
+        # PLAUSIBLE branch
+        return True, reply_u[:200], []
 
     async def _residual_lock_check(
         self,

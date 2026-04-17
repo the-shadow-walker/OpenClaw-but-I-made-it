@@ -366,6 +366,27 @@ RULES:
     in the same solve — you will be forced to retry.
     If your expected_outputs asks for omega_r and the equilibrium turns out
     to be unstable, that IS the answer — say so. Physics brilliance ≠ fake zero.
+23. HIGH-ORDER POLYNOMIAL MANDATE: If the circular-orbit condition or any
+    root-finding problem reduces to a polynomial of degree ≥ 3 (e.g. potentials
+    containing 1/r^3 terms give quintic-or-higher equilibrium polynomials), you
+    are REQUIRED to use a numerical solver — NEVER attempt analytic closed-form.
+    APPROVED TECHNIQUES (pick one):
+      import numpy as np
+      roots = np.roots([4, 0, 0, 8, -16, -3])   # coefficients high→low degree
+      real_positive = [r.real for r in roots if abs(r.imag) < 1e-9 and r.real > 0]
+      # OR scipy.optimize.brentq(f, a, b) with a wide bracket
+      # OR scipy.optimize.newton(f, x0, fprime=fp) with a plotted seed
+    When multiple real positive roots exist (typical for 1/r^3 potentials:
+    inner UNSTABLE + outer STABLE), pick via V''(r) > 0 — Rule 22 applies.
+    FORBIDDEN: sympy.solve on polys ≥ 3 (returns CRootOf / timeouts / lambdas).
+24. ANTI-CHEAT — NO "MARGINALLY STABLE" ESCAPE HATCH: You may NOT conclude
+    "marginally stable, omega_r = 0.0" to exit a hard polynomial. "Marginally
+    stable" requires V''(r0) == 0 EXACTLY (to machine precision, CHECK proves
+    it). For any real-world potential with 1/r^3 or r^4 terms V''(r0) is almost
+    never exactly zero — claiming it is without proof is a LIE, and the
+    orchestrator's plausibility gate will reject it. If the math is hard, use
+    Rule 23's numerical solver. If you are stuck, ask via FINAL_ANSWER with
+    STATUS: failed — honesty beats a fake zero every time.
 """
 
 
@@ -532,7 +553,9 @@ class ReactSolver:
                     diag = await self._dispatch_diagnostician(sp, turn)
                 except Exception as _de:
                     diag = ""
+                    import traceback as _tb
                     print(f"  🚑 [{sp.id}] Diagnostician dispatch failed: {_de}")
+                    print(f"     trace: {_tb.format_exc()[:800]}")
                 if diag:
                     # Keep seed + diagnostician message + last 2 turns of raw history
                     seed_msg_list = self._history[:1]
@@ -1410,7 +1433,18 @@ class ReactSolver:
         last_raw = "\n\n".join(last_raw_parts)[:6000]
 
         sp_inputs_str = ", ".join(f"{k}={v}" for k, v in (sp.inputs or {}).items()) or "(none)"
-        sp_outputs_str = ", ".join(sp.expected_outputs) if getattr(sp, "expected_outputs", None) else "(none specified)"
+        # Defensive: expected_outputs may be list[str] OR list[{"name","unit"}] dicts
+        # depending on planner LLM JSON shape. Coerce both to readable strings.
+        _eo = getattr(sp, "expected_outputs", None) or []
+        _eo_parts: List[str] = []
+        for _item in _eo:
+            if isinstance(_item, dict):
+                _nm = str(_item.get("name") or _item.get("var") or "?")
+                _un = str(_item.get("unit") or "")
+                _eo_parts.append(f"{_nm} [{_un}]" if _un else _nm)
+            else:
+                _eo_parts.append(str(_item))
+        sp_outputs_str = ", ".join(_eo_parts) if _eo_parts else "(none specified)"
 
         prompt = (
             "A junior agent has been stuck for many turns on a sub-problem.\n"
