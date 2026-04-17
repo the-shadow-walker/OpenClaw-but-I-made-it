@@ -93,6 +93,8 @@ _MODEL_SMART_PLANNER = "phi4:14b"          # Planner — fast structured JSON (w
 # ── Swarm 3.13 kill switches ─────────────────────────────────────────────────
 RESIDUAL_LOCK_ORCH = os.getenv("SWARM_RESIDUAL_LOCK_ORCH", "1") != "0"
 RESIDUAL_TOLERANCE_REL_ORCH = float(os.getenv("SWARM_RESIDUAL_TOL_ORCH", "1e-6"))
+# Swarm 3.14 — Stability Gate (orchestrator side)
+STABILITY_GATE_ORCH = os.getenv("SWARM_STABILITY_GATE_ORCH", "1") != "0"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,6 +355,13 @@ class OrchestratorV3:
                                 _v = _v.strip()
                                 if _v:
                                     rejected_vars.add(_v)
+                        # Swarm 3.14 — also skip vars flagged by stability gate
+                        sg_m = re.match(
+                            r'STABILITY_GATE_REJECTED:\s*(\w+)',
+                            log_line.strip(),
+                        )
+                        if sg_m:
+                            rejected_vars.add(sg_m.group(1).strip())
                     for log_line in prior_res.raw_log.splitlines():
                         rm = re.match(
                             r'RESULT:\s*([A-Za-z_]\w*)\s*=\s*([+-]?\d[\d.e+\-]*)\s*(.*)',
@@ -488,6 +497,54 @@ class OrchestratorV3:
                             result.raw_log = (result.raw_log or "") + (
                                 f"\nRESIDUAL_LOCK_REJECTED: {','.join(failed_vars)}\n"
                             )
+
+            # Swarm 3.14 — Stability Gate (orchestrator side)
+            # Catches the "omega_r = 0.0 for an unstable orbit" cheat: if the
+            # raw_log contains CHECK: Vpp_value = <negative> AND any RESULT:
+            # omega_r ≈ 0 (not NaN), reject it and force a retry.
+            if STABILITY_GATE_ORCH:
+                for result in wave_results:
+                    if result.status != "solved":
+                        continue
+                    raw = result.raw_log or ""
+                    # Find the most recent Vpp_value CHECK line
+                    vpp_matches = re.findall(
+                        r"CHECK:\s*Vpp_value\s*=\s*([+-]?[\d.eE+\-]+)", raw
+                    )
+                    if not vpp_matches:
+                        continue
+                    try:
+                        vpp = float(vpp_matches[-1])
+                    except ValueError:
+                        continue
+                    # Look at reported omega_r in results dict
+                    omega_r = None
+                    for k, v in (result.results or {}).items():
+                        if k.lower() in ("omega_r", "omega", "omega_osc", "omega_small"):
+                            omega_r = v
+                            break
+                    if omega_r is None:
+                        continue
+                    # If Vpp < 0 AND omega_r is finite and ≈ 0, that's the lie
+                    try:
+                        import math as _m
+                        if vpp < 0 and _m.isfinite(omega_r) and abs(omega_r) < 1e-9:
+                            print(
+                                f"  ⚖️  STABILITY GATE: {result.sub_problem_id} → FAIL "
+                                f"(Vpp={vpp:.3e} < 0 but omega_r={omega_r:.3e}; "
+                                f"unstable orbit needs NaN, not 0)"
+                            )
+                            result.status = "failed"
+                            result.verification_note = (
+                                (result.verification_note + "; " if result.verification_note else "")
+                                + "stability gate: unstable equilibrium (Vpp<0) reported "
+                                  "omega_r≈0 instead of nan"
+                            )
+                            result.raw_log = raw + (
+                                f"\nSTABILITY_GATE_REJECTED: omega_r (Vpp={vpp:.3e})\n"
+                            )
+                    except Exception:
+                        pass
 
             for result in wave_results:
                 solver_results[result.sub_problem_id] = result

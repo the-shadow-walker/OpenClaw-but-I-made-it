@@ -81,6 +81,11 @@ except ImportError:
 RESIDUAL_LOCK_ENABLED = os.getenv("SWARM_RESIDUAL_LOCK", "1") != "0"
 RESIDUAL_TOLERANCE_REL = float(os.getenv("SWARM_RESIDUAL_TOL", "1e-6"))
 SUMMARY_PRUNE_ENABLED = os.getenv("SWARM_SUMMARY_PRUNE", "1") != "0"
+# ── Swarm 3.14 kill switches ──────────────────────────────────────────────────
+STABILITY_GATE_ENABLED = os.getenv("SWARM_STABILITY_GATE", "1") != "0"
+DIAGNOSTICIAN_ENABLED  = os.getenv("SWARM_DIAGNOSTICIAN",  "1") != "0"
+DIAGNOSTICIAN_TURN     = int(os.getenv("SWARM_DIAGNOSTICIAN_TURN", "14"))
+DIAGNOSTICIAN_MODEL    = os.getenv("SWARM_DIAGNOSTICIAN_MODEL", "qwen3-coder:30b")
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -336,13 +341,39 @@ RULES:
     are forced to retry. If the residual is not < 1e-6, your answer is WRONG —
     switch numerical solver (sympy → scipy.brentq), widen brackets, or re-check
     the equation derivation. Never fabricate a value to escape a hard equation.
+22. STABILITY GATE (MANDATORY BEFORE ANY ω OR FREQUENCY): Before computing any
+    small-oscillation / orbital / normal-mode frequency of the form
+       ω = sqrt(V''(r0) / m)    or    ω = sqrt(k/m)    or equivalent,
+    you MUST first compute V''(r0) (or the effective stiffness), PRINT it as
+    a CHECK line, and THEN branch on its sign:
+      Vpp = 2*L**2/(m*r0**4) - 10/r0**3 + 6      # example: d²V_eff/dr²
+      print(f"CHECK: Vpp_value = {{Vpp:.6e}}")
+      if Vpp > 0:
+          omega_r = (Vpp / m) ** 0.5
+          print(f"RESULT: stability = stable")
+          print(f"RESULT: omega_r = {{omega_r:.6g}} rad/s")
+      elif Vpp < 0:
+          # UNSTABLE — no real oscillation frequency. Never fake omega_r = 0.
+          print(f"RESULT: stability = unstable")
+          print(f"RESULT: omega_r = nan  # unstable equilibrium — imag growth rate")
+          print(f"RESULT: growth_rate = {{(-Vpp/m)**0.5:.6g}} rad/s  # 1/e-folding")
+      else:
+          print(f"RESULT: stability = marginal")
+          print(f"RESULT: omega_r = 0.0  # marginally stable, ω→0 limit")
+    FORBIDDEN: reporting omega_r = 0.0 when V'' < 0. Zero means "stable with
+    infinite period"; NaN means "not oscillatory". These are physically
+    DIFFERENT. The orchestrator rejects omega_r ≈ 0 when Vpp_value < 0 appears
+    in the same solve — you will be forced to retry.
+    If your expected_outputs asks for omega_r and the equilibrium turns out
+    to be unstable, that IS the answer — say so. Physics brilliance ≠ fake zero.
 """
 
 
 # ── ReactSolver ───────────────────────────────────────────────────────────────
 
 class ReactSolver:
-    MAX_TURNS = 15
+    # Swarm 3.14: MAX_TURNS = 20 with Diagnostician rescue at T14 (was 15 hard-cap)
+    MAX_TURNS = 20
     # qwen2.5-coder:32b: fast, code-focused, no think loops, strong format adherence.
     # Alternatives: "qwen2.5-coder:14b" (3× faster, weaker), "qwq:32b" (best reasoning, 5× slower)
     MODEL = "qwen2.5-coder:32b"
@@ -379,6 +410,8 @@ class ReactSolver:
         # Swarm 3.13 — Pydantic Residual Lock state
         self._locked_checks: Dict[str, str] = {}  # var → CHECK residual expression string
         self._residual_rejects: int = 0           # count of residual-gate rejections (cap at 2)
+        # Swarm 3.14 — Diagnostician state
+        self._diagnostician_fired: bool = False   # one-shot Senior-Review rescue flag
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -483,6 +516,41 @@ class ReactSolver:
                     print(f"  \u2702\ufe0f  [{sp.id}] T{turn} token-prune: dropped {pruned_count} turns "
                           f"({pruned_chars//1000}k chars, 0 results yet)")
                     self._log(f"[TOKEN PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
+
+            # Swarm 3.14 — Diagnostician Escalation at DIAGNOSTICIAN_TURN (default 14).
+            # Dispatches a fresh LLM with NO history to diagnose what the stuck agent is
+            # doing wrong and inject a directive. Replaces self._history middle with a
+            # single synthetic "SENIOR REVIEW" message. One-shot per SP.
+            if (
+                DIAGNOSTICIAN_ENABLED
+                and turn == DIAGNOSTICIAN_TURN
+                and not getattr(self, "_diagnostician_fired", False)
+                and not self._locked_results  # only rescue if still nothing landed
+            ):
+                self._diagnostician_fired = True
+                try:
+                    diag = await self._dispatch_diagnostician(sp, turn)
+                except Exception as _de:
+                    diag = ""
+                    print(f"  🚑 [{sp.id}] Diagnostician dispatch failed: {_de}")
+                if diag:
+                    # Keep seed + diagnostician message + last 2 turns of raw history
+                    seed_msg_list = self._history[:1]
+                    last_two = self._history[-2:] if len(self._history) >= 3 else []
+                    synthetic = [{
+                        "role": "user",
+                        "content": (
+                            f"🧠 SENIOR REVIEW (fresh {DIAGNOSTICIAN_MODEL} diagnosis — "
+                            f"your previous {turn-1} turns have been summarised):\n\n"
+                            f"{diag}\n\n"
+                            f"🎯 MANDATORY NEXT STEP: follow the directive above literally. "
+                            f"Do NOT repeat the failing pattern the senior identified."
+                        ),
+                    }]
+                    self._history = seed_msg_list + synthetic + last_two
+                    print(f"  🚑 [{sp.id}] T{turn} Diagnostician rescue: "
+                          f"injected {len(diag)} chars of senior review")
+                    self._log(f"[DIAGNOSTICIAN T{turn}]\n{diag}")
 
             # Query the model
             response = await self._llm_call()
@@ -1309,6 +1377,81 @@ class ReactSolver:
         if failures:
             return False, "; ".join(failures), max_res
         return True, "", max_res
+
+    async def _dispatch_diagnostician(
+        self, sp: "SubProblem", turn: int
+    ) -> str:
+        """
+        Swarm 3.14 — dispatch a fresh LLM (no history) to diagnose a stuck SP.
+
+        Given: sp.description, sp.inputs, sp.expected_outputs, a summary of prior
+        turns, and the last 2 raw turns. The diagnostician is instructed to
+        identify the single wrong assumption, name the specific technique to use
+        instead, and write a 3-line directive. It must NOT solve the problem.
+
+        Returns the diagnosis string (to be injected as a synthetic user message).
+        """
+        # Build a compressed recap first — reuse the summariser for consistency
+        middle = self._history[1:-2] if len(self._history) > 3 else self._history[1:]
+        try:
+            prior_summary = await self._summarize_failed_attempts(middle, sp)
+        except Exception:
+            prior_summary = "(prior recap unavailable)"
+
+        # Last two raw turns (verbatim, capped)
+        last_two = self._history[-2:] if len(self._history) >= 2 else self._history[:]
+        last_raw_parts = []
+        for msg in last_two:
+            role = (msg.get("role") or "user").upper()
+            content = str(msg.get("content") or "")
+            if len(content) > 2500:
+                content = content[:2500] + "... [truncated]"
+            last_raw_parts.append(f"[{role}]\n{content}")
+        last_raw = "\n\n".join(last_raw_parts)[:6000]
+
+        sp_inputs_str = ", ".join(f"{k}={v}" for k, v in (sp.inputs or {}).items()) or "(none)"
+        sp_outputs_str = ", ".join(sp.expected_outputs) if getattr(sp, "expected_outputs", None) else "(none specified)"
+
+        prompt = (
+            "A junior agent has been stuck for many turns on a sub-problem.\n"
+            "You are a SENIOR PHYSICIST performing a code review / rescue.\n\n"
+            f"SUB-PROBLEM: {sp.id} — {sp.description}\n"
+            f"DOMAIN: {getattr(sp, 'domain', '?')}\n"
+            f"INPUTS (locked): {sp_inputs_str}\n"
+            f"EXPECTED OUTPUTS: {sp_outputs_str}\n"
+            f"APPROACH HINT: {getattr(sp, 'approach', '(none)')}\n\n"
+            "📝 SUMMARY OF PRIOR ATTEMPTS:\n"
+            f"{prior_summary}\n\n"
+            "🔍 LAST TWO RAW TURNS:\n"
+            f"{last_raw}\n\n"
+            "Produce EXACTLY this output format (no preamble, no solution):\n"
+            "DIAGNOSIS: <one sentence naming the single root cause — wrong equation, "
+            "wrong library, wrong bracket, sign error, missed stability branch, etc.>\n"
+            "TECHNIQUE: <specific Python library + function to use — e.g. "
+            "'scipy.optimize.brentq with bracket [0.1, 5.0]' or 'mpmath.findroot with "
+            "solver=anderson'. Be concrete.>\n"
+            "DIRECTIVE: <3 lines max. Literal instructions the junior must follow. "
+            "Include what NOT to do (sympy.solve, lambda, etc.) and what TO do. "
+            "Never write the final answer yourself.>\n"
+        )
+        system = (
+            "You are a senior physicist debugging a failing autonomous solver. "
+            "Be terse, specific, and technical. Name libraries and functions. "
+            "Never solve the problem — only identify the failure mode and "
+            "prescribe the exact next technique."
+        )
+        try:
+            diagnosis = await self._ollama_chat(
+                model=DIAGNOSTICIAN_MODEL,
+                prompt=prompt,
+                system=system,
+                timeout=600,
+                num_predict=700,
+                keep_alive=300,
+            )
+        except Exception as e:
+            return f"(diagnostician failed: {e})"
+        return (diagnosis or "").strip() or "(diagnostician returned empty)"
 
     async def _summarize_failed_attempts(
         self, middle: List[Dict[str, str]], sp: "SubProblem"
