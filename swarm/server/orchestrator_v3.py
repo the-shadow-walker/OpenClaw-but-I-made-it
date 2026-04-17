@@ -416,6 +416,28 @@ class OrchestratorV3:
                         except (ValueError, IndexError):
                             pass
 
+                # Swarm 3.14.2 — Hard-Lock Consensus: scrub locked vars from
+                # this SP's expected_outputs. If a variable is already in the
+                # global_manifest (solved + residual-locked), downstream SPs
+                # must NOT re-derive it. Prevents Numerical Schizophrenia
+                # (e.g. SP2 r0=1.445 vs SP3 r0=1.259 in the same report).
+                if sp.expected_outputs and global_manifest:
+                    _scrubbed: List[Any] = []
+                    _dropped: List[str] = []
+                    for _eo in sp.expected_outputs:
+                        if isinstance(_eo, dict):
+                            _name = _eo.get("name") or _eo.get("var") or ""
+                        else:
+                            _name = str(_eo)
+                        if _name and _name in global_manifest:
+                            _dropped.append(_name)
+                        else:
+                            _scrubbed.append(_eo)
+                    if _dropped:
+                        print(f"  🔒 HARD-LOCK: {sp.id} scrubbing locked outputs "
+                              f"{_dropped} (use manifest value, do not recompute)")
+                        sp.expected_outputs = _scrubbed
+
             # Run this wave in parallel
             tasks = []
             task_sp_ids = []

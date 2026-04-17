@@ -212,21 +212,40 @@ RULES:
    compute the radius. Use SP_A's result as an input to SP_B, not a re-derivation.
    If a requirement says "verify the radius", the SP should take r from prior SP and
    verify it numerically — NOT solve a fresh equation to find a different r.
-10. MANDATORY CROSS-DOMAIN LABELS — assign these domains regardless of the overall
-    question topic:
-    - domain "calculus" or "mathematics": ANY SP whose task is to evaluate an
-      integral, compute a series sum, apply Stirling's approximation, analyze
-      convergence, or perform symbolic differentiation/integration.
-      WRONG: domain "physics" for "evaluate the improper integral ∫₀^∞ ..."
-      RIGHT: domain "calculus"
-    - domain "electrochemistry" or "chemistry": ANY SP involving Gibbs energy,
-      Helmholtz free energy, cell potential, Nernst equation, Faraday's law,
-      half-cell reactions, molar enthalpy/entropy, or thermochemistry.
-      WRONG: domain "physics" for "compute the Gibbs-Helmholtz correction"
-      RIGHT: domain "electrochemistry"
-    - domain "mechanics", "orbital_mechanics", "quantum_mechanics": for classical
-      orbits, Hamiltonians, wavefunctions, potential energy wells.
-    DO NOT default everything to "physics" — use the most specific domain string.
+10. STRICT DOMAIN TAGGING — the following rules are NON-NEGOTIABLE. Apply each
+    SP's description against these keyword lists and tag the domain accordingly.
+    The orchestrator WILL post-process and override any violation — match it
+    the first time to avoid retries.
+
+    MATHEMATICS (use domain = "mathematics"):
+      KEYWORDS: integral, integrate, ∫, series, sum, summation, Σ, converge,
+      divergence, Stirling, Taylor series, Laurent, residue, contour, limit,
+      improper integral, asymptotic, L'Hôpital, differentiate symbolically.
+      EXAMPLES: "evaluate ∫_0^∞ x^3 e^{{-ax}} dx" → domain: "mathematics"
+                "analyze convergence of Σ n!e^n/(n^n √n)" → domain: "mathematics"
+
+    CHEMISTRY (use domain = "chemistry" or "electrochemistry"):
+      KEYWORDS: Nernst, Gibbs, Gibbs-Helmholtz, ΔG, ΔH, ΔS, enthalpy, entropy,
+      cell potential, EMF, half-cell, Faraday, activity coefficient, pH, pKa,
+      reaction quotient, electrolyte, redox, equilibrium constant K.
+      EXAMPLES: "derive cell potential via Gibbs-Helmholtz" → domain: "chemistry"
+                "compute EMF vs temperature" → domain: "electrochemistry"
+
+    PHYSICS (use domain = "physics", "mechanics", "orbital_mechanics", etc.):
+      KEYWORDS: force, Newton's, Lagrangian, Hamiltonian, orbit, potential V(r),
+      relativistic, wavefunction, Schrödinger, field, charge, momentum, energy
+      conservation.
+
+    ALGORITHM:
+      For each SP, scan the description for the keyword lists above IN ORDER:
+      1. If any MATHEMATICS keyword appears → domain MUST be "mathematics"
+         (even if the SP is "part of" a bigger physics problem)
+      2. Else if any CHEMISTRY keyword appears → domain MUST be "chemistry"
+      3. Else use PHYSICS subdomain
+
+    FORBIDDEN: defaulting all SPs to the overall question domain. A physics
+    question with an integral sub-task MUST have the integral SP tagged
+    "mathematics", not "physics". The DomainGate depends on this.
 
 Respond ONLY with valid JSON (no markdown fences, no explanation):
 {{
@@ -396,6 +415,39 @@ class PlannerV2:
 
         if not sub_problems:
             raise ValueError("No sub_problems in LLM response")
+
+        # Swarm 3.14.2 — Authoritative Domain Partitions (doesn't trust the LLM).
+        # Scan each SP description for strict keyword matches. If matched,
+        # FORCE the domain to the matched category. Prevents the planner's
+        # "everything is physics" drift from hiding math/chem SPs from the
+        # DomainGate at the end.
+        _MATH_KWS = re.compile(
+            r"\b(integral|integrate|∫|series\b|summation|Σ|converge|diverge|"
+            r"stirling|taylor\s+series|laurent|residue\s+theorem|contour|"
+            r"l['’]?hôpital|l['’]?hopital|improper\s+integral|asymptotic|"
+            r"differentiate\s+symbolically|symbolic\s+integration)",
+            re.IGNORECASE,
+        )
+        _CHEM_KWS = re.compile(
+            r"\b(nernst|gibbs[-\s]?helmholtz|gibbs\s+(free\s+)?energy|ΔG|Δ?H\b|"
+            r"enthalpy|entropy|cell\s+potential|\bemf\b|half[-\s]?cell|faraday|"
+            r"activity\s+coefficient|\bpH\b|pKa|reaction\s+quotient|electrolyte|"
+            r"redox|equilibrium\s+constant|electrochemical)",
+            re.IGNORECASE,
+        )
+        for sp in sub_problems:
+            desc = sp.description or ""
+            original = sp.domain or ""
+            if _MATH_KWS.search(desc):
+                if "math" not in original.lower() and "calculus" not in original.lower():
+                    print(f"   🔖 Domain override: {sp.id} {original!r} → 'mathematics' "
+                          f"(keyword match in description)")
+                    sp.domain = "mathematics"
+            elif _CHEM_KWS.search(desc):
+                if not any(x in original.lower() for x in ("chem", "electro")):
+                    print(f"   🔖 Domain override: {sp.id} {original!r} → 'chemistry' "
+                          f"(keyword match in description)")
+                    sp.domain = "chemistry"
 
         # Topological order — use LLM's if provided, else derive
         kept_ids = {sp.id for sp in sub_problems}
