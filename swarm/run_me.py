@@ -881,6 +881,43 @@ def cmd_query(server, question):
     resp = _post(server, "/query", {"question": question}, timeout=600)
     _print_answer(resp)
 
+def cmd_kill(server: str, job_id: str):
+    """Cancel a running job by job_id."""
+    req = urllib.request.Request(
+        server.rstrip("/") + f"/jobs/{job_id}/cancel",
+        method="POST",
+        headers=_headers(),
+        data=b"",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read().decode(errors="replace")
+            try:
+                data = json.loads(body)
+                print(GREEN(f"  ✂ Cancelled {data.get('job_id', job_id)} → status={data.get('status')}"))
+                if data.get('note'):
+                    print(f"    note: {data['note']}")
+            except Exception:
+                print(body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            data = json.loads(body)
+            msg = data.get('error', body)
+        except Exception:
+            msg = body
+        if e.code == 404:
+            print(RED(f"  No such job: {job_id}"), file=sys.stderr)
+        elif e.code == 409:
+            print(f"  {msg}", file=sys.stderr)
+        else:
+            print(RED(f"  [HTTP {e.code}] {msg}"), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(RED(f"  [Connection error] {e.reason}"), file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_logs(server: str, job_id: str, tail: int = None, grep: str = None):
     """Fetch and print the full disk log for a completed or running job."""
     params = []
@@ -1674,6 +1711,7 @@ def cmd_repl(server):
     print("          :watch <job_id>   -- reconnect to running job (tail-f style)")
     print("          :logs <job_id> [tail=N] [grep=pat]")
     print("          :sp <job_id> [sp_id]  -- inspect per-SP debug logs (3.11+)")
+    print("          :kill <job_id>        -- cancel a running job")
     print("          :model               -- interactive model assignment TUI (3.11+)")
     print("          :verbose [0|1|2]  :debug [on|off]  :quit\n")
     while True:
@@ -1724,6 +1762,12 @@ def cmd_repl(server):
                 cmd_sp(server, j_id, s_id)
             else:
                 print("  Usage: :sp <job_id> [sp_id]  — list or view SP debug logs")
+        elif line.startswith(":kill ") or line.startswith(":cancel "):
+            parts = line.split()
+            if len(parts) >= 2:
+                cmd_kill(server, parts[1])
+            else:
+                print("  Usage: :kill <job_id>")
         elif line.startswith(":model"):
             cmd_model(server)
         elif line.startswith(":verbose"):
@@ -1744,7 +1788,7 @@ def cmd_repl(server):
         elif line.startswith(":"):
             cmd = line.split()[0]
             print(f"  Unknown command: {cmd}")
-            print("  Commands: :health :status :jobs :result :watch :logs :sp :model :verbose :debug")
+            print("  Commands: :health :status :jobs :result :watch :logs :sp :kill :model :verbose :debug")
         else:
             if _USE_COLOR:
                 cmd_stream(server, line)
@@ -1831,6 +1875,10 @@ def main():
         q = " ".join(args[1:])
         if not q: print("Usage: run_me.py ask \"question\"", file=sys.stderr); sys.exit(1)
         cmd_ask(server, q)
+    elif cmd in ("kill", "cancel"):
+        if len(args) < 2:
+            print("Usage: run_me.py kill <job_id>", file=sys.stderr); sys.exit(1)
+        cmd_kill(server, args[1])
     elif cmd == "stream":
         q = " ".join(args[1:])
         if not q: print("Usage: run_me.py stream \"question\"", file=sys.stderr); sys.exit(1)

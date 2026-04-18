@@ -468,6 +468,7 @@ logging.basicConfig(
 
 job_manager    = JobManager()
 running_jobs:  Dict[str, threading.Thread] = {}
+running_loops: Dict[str, asyncio.AbstractEventLoop] = {}   # for cancellation
 _rj_lock       = threading.Lock()
 
 
@@ -488,6 +489,8 @@ def _start_worker(job_id: str, question: str, since: str = None,
         asyncio.set_event_loop(loop)
         # Install tagged executor so every run_in_executor thread inherits job_id
         loop.set_default_executor(_TaggedExecutor(job_id, max_workers=8))
+        with _rj_lock:
+            running_loops[job_id] = loop
         try:
             job_manager.update_job(job_id, 'processing', progress='Initializing...',
                                    log_path=log_path)
@@ -527,6 +530,7 @@ def _start_worker(job_id: str, question: str, since: str = None,
                 progress_q.put(None)  # sentinel
             with _rj_lock:
                 running_jobs.pop(job_id, None)
+                running_loops.pop(job_id, None)
 
     thread = threading.Thread(target=_worker, daemon=True, name=f'swarm-{job_id}')
     with _rj_lock:
@@ -579,6 +583,65 @@ def list_jobs():
         return jsonify({'total': len(jobs), 'jobs': jobs}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+def _cancel_job(job_id: str) -> tuple:
+    """
+    Cancel a running job by cancelling all tasks on its event loop.
+    Returns (http_status, response_dict).
+
+    Python threads can't be forcibly killed, but we can cancel the asyncio
+    tasks running on the worker's event loop. Any awaiting coroutine
+    raises CancelledError; blocking subprocesses in run_in_executor will
+    finish their next iteration then detach. VRAM frees naturally via
+    keep_alive=0 when the Ollama streaming call is dropped.
+    """
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return 404, {'error': f'Unknown job {job_id}'}
+
+    if job['status'] in ('completed', 'failed', 'cancelled'):
+        return 409, {
+            'error': f'Job {job_id} is already {job["status"]}',
+            'status': job['status'],
+        }
+
+    with _rj_lock:
+        loop = running_loops.get(job_id)
+        thread = running_jobs.get(job_id)
+
+    if loop is None or thread is None or not thread.is_alive():
+        # Mark cancelled anyway — race where worker exited between check and now
+        job_manager.update_job(job_id, 'cancelled', error='Cancel requested but worker not running')
+        return 200, {'job_id': job_id, 'status': 'cancelled', 'note': 'worker was not alive'}
+
+    def _cancel_all():
+        try:
+            for t in asyncio.all_tasks(loop):
+                t.cancel()
+        except Exception as _e:
+            logging.warning(f"cancel_all_tasks on {job_id}: {_e}")
+
+    try:
+        loop.call_soon_threadsafe(_cancel_all)
+    except RuntimeError as e:
+        return 500, {'error': f'Failed to schedule cancel: {e}'}
+
+    job_manager.update_job(job_id, 'cancelled', error='Cancelled by user')
+    logging.info(f"Job {job_id} cancel requested")
+    return 200, {'job_id': job_id, 'status': 'cancelled'}
+
+
+@app.route('/jobs/<job_id>', methods=['DELETE'])
+def delete_job(job_id: str):
+    status, body = _cancel_job(job_id)
+    return jsonify(body), status
+
+
+@app.route('/jobs/<job_id>/cancel', methods=['POST'])
+def cancel_job(job_id: str):
+    status, body = _cancel_job(job_id)
+    return jsonify(body), status
 
 
 @app.route('/result/<job_id>', methods=['GET'])
@@ -1570,6 +1633,8 @@ def main():
     print("  POST /query_async          -- async, returns job_id")
     print("  POST /query_stream         -- SSE live progress stream")
     print("  POST /config/models        -- set model for a role")
+    print("  POST /jobs/<id>/cancel     -- cancel a running job")
+    print("  DELETE /jobs/<id>          -- cancel a running job (alias)")
     print("  POST /project/start")
     print("  POST /project/respond")
     print("=" * 62 + "\n")
