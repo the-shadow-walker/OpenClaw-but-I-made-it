@@ -129,6 +129,25 @@ def _delete(server, path):
         print(RED(f"[Connection error] {e.reason}"), file=sys.stderr)
 
 
+def _resolve_id(server, partial):
+    """
+    Resolve a partial job ID (e.g. '752dd566') to a full UUID.
+    If already a full UUID (36 chars with dashes) return as-is.
+    Otherwise fetch the jobs list and find the first match by prefix.
+    """
+    if len(partial) == 36 and partial.count("-") == 4:
+        return partial
+    try:
+        data = _get(server, "/api/v1/jobs", params={"limit": 100})
+        for j in data.get("jobs", []):
+            jid = j.get("job_id", "")
+            if jid.startswith(partial):
+                return jid
+    except SystemExit:
+        pass
+    return partial   # fall back to whatever was given; server will 404 with a clear message
+
+
 # ── Spinner ────────────────────────────────────────────────────────────────────
 
 class _Spinner:
@@ -645,14 +664,17 @@ def cmd_repl(server):
         elif line == ":jobs":
             cmd_jobs(server)
         elif line.startswith(":job "):
-            cmd_job(server, line.split(None, 1)[1].strip())
+            jid = _resolve_id(server, line.split(None, 1)[1].strip())
+            cmd_job(server, jid)
         elif line.startswith(":cancel ") or line.startswith(":kill "):
-            cmd_cancel(server, line.split(None, 1)[1].strip())
+            jid = _resolve_id(server, line.split(None, 1)[1].strip())
+            cmd_cancel(server, jid)
         elif line.startswith(":watch ") or line == ":watch":
             parts = line.split()
             if len(parts) >= 2:
+                jid = _resolve_id(server, parts[1])
                 try:
-                    stream_job(server, parts[1])
+                    stream_job(server, jid)
                 except KeyboardInterrupt:
                     print(f"\n  {DIM('Detached.')}")
             else:
