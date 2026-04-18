@@ -3,7 +3,7 @@
 The core AI agent service. Accepts natural-language instructions, uses a local LLM (Ollama) to plan and execute shell commands, with safety validation at every step.
 
 **Service:** `ollama-cmd` (systemd) — runs on port `5000`
-**Model:** `qwen3-coder:30b` (ReAct loop + code generation)
+**Models:** `qwen3-coder:30b` (ReAct loop) · `qwen3.6:35b-Grindlewalt` (code generation)
 
 ---
 
