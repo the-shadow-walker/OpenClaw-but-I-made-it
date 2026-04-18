@@ -598,6 +598,7 @@ _REPL_HELP = """\
   :jobs                    list recent jobs
   :job <id>                show job output
   :cancel <id>             cancel a job
+  :watch <id>              live-stream a running job's events
   :quick <cmd>             run a shell command directly (streaming)
   :ask <question>          NL→command via quick endpoint
   :chain <goal>            submit a multi-phase chain
@@ -647,6 +648,15 @@ def cmd_repl(server):
             cmd_job(server, line.split(None, 1)[1].strip())
         elif line.startswith(":cancel ") or line.startswith(":kill "):
             cmd_cancel(server, line.split(None, 1)[1].strip())
+        elif line.startswith(":watch ") or line == ":watch":
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    stream_job(server, parts[1])
+                except KeyboardInterrupt:
+                    print(f"\n  {DIM('Detached.')}")
+            else:
+                print(f"  Usage: :watch <job_id>")
         elif line.startswith(":quick "):
             cmd_quick(server, command=line[7:].strip())
         elif line.startswith(":ask "):
