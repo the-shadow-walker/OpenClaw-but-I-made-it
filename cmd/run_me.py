@@ -511,6 +511,43 @@ def cmd_cancel(server, job_id):
     print(f"  {YELLOW('Cancelled')} {job_id[:8]}")
 
 
+def cmd_log(server, job_id):
+    """Clear screen and dump the full, untruncated job log."""
+    j    = _get(server, f"/api/v1/jobs/{job_id}")
+    st   = j.get("status", "?")
+    icon = STATUS_ICON.get(st, "❓")
+    col  = B_GREEN if st == "completed" else (B_RED if st == "failed" else YELLOW)
+
+    # clear terminal
+    if _USE_COLOR:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+    width = _term_width()
+    sep   = CYAN("═" * min(70, width))
+    print(sep)
+    print(f"  {icon}  {col(st.upper())}  {DIM(job_id)}")
+    instr = (j.get("instruction") or "").strip()
+    if instr:
+        print(f"  {DIM('Task:')} {instr[:120]}")
+    created = j.get("created_at", "")
+    if created:
+        print(f"  {DIM('Created:')} {created[:19]}")
+    print(sep)
+    print()
+
+    out = (j.get("output") or "").strip()
+    if out:
+        print(out)        # no truncation — full log
+    else:
+        print(f"  {DIM('(no output yet)')}")
+
+    err = j.get("error", "")
+    if err:
+        print(f"\n  {RED('Error:')} {err}")
+    print()
+
+
 def cmd_chains(server):
     d      = _get(server, "/api/v1/chains")
     chains = d.get("chains", [])
@@ -615,7 +652,8 @@ _REPL_HELP = """\
   ─────────────────────────────────────────────────────────────
   :health                  service health check
   :jobs                    list recent jobs
-  :job <id>                show job output
+  :job <id>                show job output (last 4000 chars)
+  :log <id>                clear screen + full untruncated job log
   :cancel <id>             cancel a job
   :watch <id>              live-stream a running job's events
   :quick <cmd>             run a shell command directly (streaming)
@@ -666,6 +704,9 @@ def cmd_repl(server):
         elif line.startswith(":job "):
             jid = _resolve_id(server, line.split(None, 1)[1].strip())
             cmd_job(server, jid)
+        elif line.startswith(":log "):
+            jid = _resolve_id(server, line.split(None, 1)[1].strip())
+            cmd_log(server, jid)
         elif line.startswith(":cancel ") or line.startswith(":kill "):
             jid = _resolve_id(server, line.split(None, 1)[1].strip())
             cmd_cancel(server, jid)
@@ -780,6 +821,9 @@ def main():
         elif cmd == "cancel":
             if not rest: p.error("Usage: run_me.py cancel <id>")
             cmd_cancel(server, rest.strip())
+        elif cmd == "log":
+            if not rest: p.error("Usage: run_me.py log <id>")
+            cmd_log(server, rest.strip())
         elif cmd == "quick":
             if "--ask" in args:
                 idx = args.index("--ask")
