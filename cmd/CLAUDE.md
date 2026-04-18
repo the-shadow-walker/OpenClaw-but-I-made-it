@@ -72,8 +72,7 @@ Git remote: `http://10.0.0.58:3000/Grindlewalt/Jarvis.git`
 ## Architecture Notes
 
 - `server.py` adds `cmd/`, `cmd/core/`, `cmd/chain/`, `cmd/blueteam/`, `cmd/infra/` to sys.path — all flat imports inside modules continue working without changes
-- Fast model: `qwen2.5-coder:14b` (ReAct loop, 60s timeout)
-- Heavy model: `qwen3-coder:30b` (create_file/patch_file content, 300s timeout)
+- Model: `qwen3-coder:30b` (ReAct loop + code generation)
 - Service port: `5000`, no auth (local network)
 - SENTINEL auto-watch: disabled at boot, triggered by cron at 3 AM daily
 - Daily report: `~/.agent_bin/sentinel_report.md`, archives in `~/.agent_bin/sentinel_archive/`

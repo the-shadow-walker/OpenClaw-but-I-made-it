@@ -136,7 +136,7 @@ print(quick("free -h", raw=True))
 | Response time | 1–3 s | 30–120 s |
 | Multi-step tasks | No | Yes |
 | File creation/editing | No | Yes |
-| LLM model | qwen2.5-coder:14b (fast) | qwen3-coder:30b (heavy) |
+| LLM model | qwen3-coder:30b | qwen3-coder:30b |
 | Returns job_id | No | Yes |
 | Risk limit | safe/low by default | Full ReAct safety |
 

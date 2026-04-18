@@ -2,7 +2,7 @@
 # =============================================================================
 # ollama_agent_core.py  —  v3.0
 # Features in this build:
-#   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
+#   - Single model: qwen3-coder:30b (ReAct loop + code gen)
 #   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
 #   - react timeout: 180s; one-shot calls use their own per-call timeout
 #   - Chain mode CLI: --budget/-b, --yes/-y  (TaskDecomposer multi-phase)
@@ -351,19 +351,18 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 16384       # fast model (14b) — halves KV cache fill time on 3060
-    HEAVY_NUM_CTX = 8192  # heavy model (30b) — one-shot only, short prompt in/out
+    NUM_CTX = 16384       # ReAct loop context window
+    HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
 
     def __init__(
         self,
         model: str = "qwen3-coder:30b",
-        fast_model: str = "qwen2.5-coder:14b",
+        fast_model: str = "qwen3-coder:30b",
         searxng_url: str = "http://10.0.0.58:8080",
     ):
-        # heavy model — only called for actual code/file generation
+        # model used for both ReAct loop and code/file generation
         self.model = model
-        # fast model — drives the ReAct decision loop
         self.fast_model = fast_model
         self.search_agent = FlexibleSearchAgent(searxng_url)
         self.safety_validator = CommandSafetyValidator()
@@ -2201,8 +2200,7 @@ Return JSON only:
         print(f"🎯 TASK: {instruction}")
         print(f"💻 SYSTEM: {self.os_info}")
         print(f"🔄 MAX ITERATIONS: {self.max_react_iterations}")
-        print(f"⚡ FAST MODEL: {self.fast_model}  (ReAct loop)")
-        print(f"🧠 HEAVY MODEL: {self.model}  (code generation)")
+        print(f"🧠 MODEL: {self.fast_model}")
         print(f"🛡️  SAFETY: Enabled")
         if incoming_handoff:
             print(f"🔗 CHAIN HANDOFF: from '{incoming_handoff.get('source_instruction', '')[:60]}'")
