@@ -93,11 +93,11 @@ GENERAL RULES:
     before deciding your next action. The diagnosis identifies the root cause — follow it.
 17. To start a server (uvicorn, gunicorn, node, nginx): ALWAYS background it with
     stdin explicitly closed to prevent subprocess pipe hangs:
-      nohup uvicorn main:app --host 127.0.0.1 --port 8000 </dev/null >/tmp/server.log 2>&1 &
+      nohup uvicorn main:app --host 0.0.0.0 --port 8000 </dev/null >/tmp/server.log 2>&1 &
     CRITICAL: include </dev/null BEFORE the output redirect, or the command will hang.
     NEVER use --reload (it spawns child processes that hold pipes open and cause timeouts).
     After backgrounding, confirm with a separate execute_command: sleep 2 && curl -sf http://localhost:8000/
-    If curl fails, read the log: cat /tmp/server.log | tail -20
+    If curl fails, read the log: use read_file on /tmp/server.log
 17b. Prefer manage_server over nohup for persistent servers — it tracks the PID and
      lets you stop/restart cleanly. Always redirect logs in the command:
      {{"action":"start","name":"backend","command":"uvicorn main:app --port 8000 >/tmp/backend.log 2>&1"}}
@@ -151,6 +151,17 @@ GENERAL RULES:
     ❌ python -m fastapi init, django-admin startproject, flask new, express init
     ✅ Create project structure manually using create_file for each file needed.
     If a package error says "install X to use Y command", create the files manually instead.
+32. ALWAYS bind servers to host 0.0.0.0 (not 127.0.0.1) unless the task explicitly
+    requires local-only access. 0.0.0.0 makes the server reachable from other machines
+    on the network. 127.0.0.1 silently blocks all LAN/external connections.
+33. ALWAYS create __init__.py in every Python directory you create. Without it, Python
+    cannot import modules from that directory. When you create app/, app/routes/, app/models/
+    etc., immediately create app/__init__.py, app/routes/__init__.py, app/models/__init__.py.
+    Missing __init__.py is the #1 cause of ModuleNotFoundError in from-scratch projects.
+34. To read a file (source code, logs, configs): ALWAYS use the read_file tool.
+    NEVER use execute_command with `cat`, `head`, `tail`, or `less` to read file content.
+    read_file returns the FULL content directly to you — cat via execute_command is limited
+    to 4000 chars of output. Use execute_command only for running programs, not reading files.
 
 CODE / FILE GENERATION RULES:
 10. For create_file: ALWAYS set "content": "" and write a detailed "description"
@@ -1308,6 +1319,118 @@ Return JSON only:
             lines.append(f"[{role}] {snippet}")
         return "\n".join(lines)
 
+    # ── Auto-compactor ────────────────────────────────────────────────────────
+
+    def _estimate_react_tokens(
+        self, react_history: List[Dict], system_prompt: str
+    ) -> int:
+        """Rough token estimate for the full context (system + pinned + history).
+        Uses 3 chars-per-token — conservative for code/JSON which tokenises densely.
+        """
+        chars = len(system_prompt)
+        chars += sum(len(str(m.get("content", ""))) for m in self.pinned_messages)
+        chars += sum(len(str(m.get("content", ""))) for m in react_history)
+        return chars // 3
+
+    def _compress_react_history(
+        self,
+        react_history: List[Dict],
+        system_prompt: str,
+        instruction: str,
+        iteration: int,
+        max_iter: int,
+    ) -> List[Dict]:
+        """Replace react_history with a dense structured summary.
+
+        Called automatically when estimated tokens exceed NUM_CTX - 1500.
+        Preserves the last 2 messages for immediate continuity, then prepends
+        a model-generated summary of everything before them.
+        """
+        msg_count  = len(react_history)
+        est_tokens = self._estimate_react_tokens(react_history, system_prompt)
+        print(
+            f"\n🗜️  AUTO-COMPRESS: ~{est_tokens} tokens in context "
+            f"(threshold {self.NUM_CTX - 1500}).  "
+            f"Summarising {msg_count} messages…"
+        )
+
+        # Build a readable snapshot of the history to feed the summariser.
+        # Cap each message at 1200 chars so the compressor prompt itself
+        # doesn't overflow (we're already near the limit).
+        snapshot_parts: List[str] = []
+        for i, msg in enumerate(react_history):
+            role    = msg["role"].upper()
+            content = str(msg.get("content", ""))
+            if len(content) > 1200:
+                content = content[:1100] + f" … [{len(content) - 1100} chars omitted]"
+            snapshot_parts.append(f"[{role} #{i+1}]\n{content}")
+        snapshot = "\n\n".join(snapshot_parts)
+
+        compress_prompt = (
+            f"You are compressing the working memory of an AI agent mid-task.\n\n"
+            f"TASK: {instruction[:600]}\n"
+            f"PROGRESS: iteration {iteration} of {max_iter} "
+            f"({max_iter - iteration} remaining)\n\n"
+            f"FULL HISTORY ({msg_count} messages):\n"
+            f"{snapshot}\n\n"
+            f"Write a DETAILED STRUCTURED SUMMARY that will REPLACE the above history.\n"
+            f"The agent will continue working from this summary alone — include every\n"
+            f"detail it needs: file paths, commands, outputs, errors, current state.\n\n"
+            f"Use this exact format:\n\n"
+            f"## TASK\n"
+            f"[The full goal — exactly what needs to be accomplished]\n\n"
+            f"## ACCOMPLISHED\n"
+            f"[Everything finished so far — specific files created, services started,\n"
+            f"commands that succeeded, URLs confirmed working, etc.]\n\n"
+            f"## CURRENT STATE\n"
+            f"[The exact state of the system right now: what is running, what files exist,\n"
+            f"what ports are open, what the screen shows, etc.]\n\n"
+            f"## FAILED ATTEMPTS\n"
+            f"[Everything tried that failed and WHY — to avoid repeating mistakes]\n\n"
+            f"## NEXT STEPS\n"
+            f"[The specific remaining actions needed to complete the task, in order]"
+        )
+
+        summary = self._call_model_oneshot(
+            self.model,
+            compress_prompt,
+            system_prompt=None,
+            timeout=120,
+        )
+
+        if not summary or len(summary) < 100:
+            # Compression failed — fall back to hard trim to prevent overflow
+            print("⚠️  Compression failed — falling back to hard trim (last 5 messages)")
+            return react_history[-5:]
+
+        compressed_msg = {
+            "role": "user",
+            "content": (
+                f"[CONTEXT AUTO-COMPRESSED — {msg_count} messages → summary "
+                f"at iteration {iteration}/{max_iter}]\n\n"
+                f"{summary}\n\n"
+                f"Continue from the NEXT STEPS above. "
+                f"Output valid JSON for your next action."
+            ),
+        }
+
+        # Keep the last 2 messages so the agent has immediate continuity
+        tail = react_history[-2:] if len(react_history) >= 2 else react_history
+        new_history = [compressed_msg] + tail
+
+        saved_tokens = est_tokens - self._estimate_react_tokens(new_history, system_prompt)
+        print(
+            f"✅ Compression done — saved ~{saved_tokens} tokens, "
+            f"new history: {len(new_history)} messages"
+        )
+        if _debug_logger:
+            _debug_logger.log("context_compressed", {
+                "iteration": iteration,
+                "messages_before": msg_count,
+                "tokens_saved": saved_tokens,
+            })
+        return new_history
+
     def _generate_file_content(
         self,
         path: str,
@@ -1738,11 +1861,18 @@ Return JSON only:
             print(f"\n{'=' * 70}")
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
-            # Trim history to keep context window manageable.
-            # 12 messages × ~2k chars each ≈ 6k tokens — well inside 16k.
-            # Entries being rotated out have their thought/confidence stripped
-            # to compress them further before discarding.
-            if len(react_history) > 10:
+            # ── Context management ────────────────────────────────────────
+            # 1. Auto-compress when approaching the context window limit.
+            #    Triggered when estimated tokens > NUM_CTX - 1500 (leaving
+            #    room for the model's response + safety buffer).
+            # 2. Simple trim for normal operation (keeps first + last 9).
+            _est = self._estimate_react_tokens(react_history, system_prompt)
+            if _est > self.NUM_CTX - 1500:
+                react_history = self._compress_react_history(
+                    react_history, system_prompt, instruction,
+                    iteration, max_iter,
+                )
+            elif len(react_history) > 10:
                 keep_tail = react_history[-9:]
                 react_history = react_history[:1] + keep_tail
 
@@ -2099,7 +2229,7 @@ Return JSON only:
                     f"OBSERVATION [iteration {iteration}] — ✅ SUCCESS\n"
                     f"Tool: {tool}\n"
                     f"Args: {json.dumps(args)}\n"
-                    f"Output:\n{result.output[:800]}\n"
+                    f"Output:\n{result.output[:4000]}\n"
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )
