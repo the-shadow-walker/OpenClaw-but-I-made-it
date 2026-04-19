@@ -15,13 +15,14 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Optional
 import secrets
+import subprocess
 import sys
 
 # Modules live in cmd/ and its subpackages. Add all of them to sys.path so
 # existing flat imports (from ollama_agent_core import X, etc.) keep working
 # without any changes inside the module files themselves.
 _CMD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cmd")
-for _sub in ("", "core", "chain", "blueteam", "infra"):
+for _sub in ("", "core", "chain", "blueteam", "infra", "guiagent"):
     _d = os.path.join(_CMD_DIR, _sub) if _sub else _CMD_DIR
     if os.path.isdir(_d) and _d not in sys.path:
         sys.path.insert(0, _d)
@@ -39,6 +40,19 @@ try:
     _BLUETEAM_AVAILABLE = True
 except ImportError:
     _BLUETEAM_AVAILABLE = False
+
+try:
+    from gui_agent import GUIAgent as _GUIAgent
+    _GUI_AVAILABLE = True
+except ImportError:
+    _GUI_AVAILABLE = False
+
+try:
+    import smart_logger as _smart_logger
+    _SMART_LOGGER_AVAILABLE = True
+except ImportError:
+    _smart_logger = None
+    _SMART_LOGGER_AVAILABLE = False
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
@@ -77,6 +91,9 @@ SERVICE_FEATURES = [
     "Inbox watcher: drop job/chain JSON into ./agent_inbox/ for pickup",
     "SSE event stream: GET /api/v1/events | State snapshot: GET /api/v1/state",
     "SENTINEL blue team: /api/v1/blueteam/* (scan, investigate, watch, alerts, status)",
+    "Quick command: /api/v1/quick (synchronous, no ReAct loop, LLM → command → result)",
+    "Smart logger: continuous filtered event log → ~/.agent_bin/smart_events.jsonl",
+    "Daily smart report: 3 AM cron, 15-min cap, senior-analyst LLM synthesis",
 ]
 
 SERVICE_VERSION = "3.3.0-sentinel"
@@ -312,6 +329,20 @@ class JobRunner:
                         agent.execution_log = result.get('execution_log', [])
                         agent.react_trace = result.get('trace', [])
 
+                    elif job.get('job_type') == 'gui_task':
+                        # GUI desktop automation job — runs via GUIAgent + qwen3.5:35b vision
+                        if not _GUI_AVAILABLE:
+                            raise RuntimeError("gui_agent module not available")
+                        gui = _GUIAgent()
+                        gui.agent.current_job_id = job_id
+                        result = gui.run(
+                            task=instruction,
+                            max_iterations=job.get('max_iterations', 30),
+                        )
+                        job['success'] = result.get('success', False)
+                        agent.execution_log = []
+                        agent.react_trace = gui.agent.react_trace
+
                     elif job.get('chain_id') and job.get('subtask_index') is not None:
                         _original_print(f"[worker] loading chain state for {job['chain_id'][:8]}", flush=True)
                         chain_state = TaskChain.load(job['chain_id'])
@@ -434,6 +465,48 @@ class JobRunner:
 
 # Initialize job runner
 job_runner = JobRunner()
+
+# ── Quick command singleton (lazy-initialized, no ReAct loop) ─────────────────
+_quick_agent = None
+_quick_agent_lock = threading.Lock()
+
+def _get_quick_agent():
+    """Lazy singleton for the /api/v1/quick path."""
+    global _quick_agent
+    if _quick_agent is None:
+        with _quick_agent_lock:
+            if _quick_agent is None:
+                _quick_agent = OllamaCommandAgent(model='qwen2.5-coder:14b')
+    return _quick_agent
+
+
+def _daily_report_scheduler() -> None:
+    """Background thread: fire a daily_report() at 3 AM every day."""
+    from datetime import timedelta
+    while True:
+        now      = datetime.now()
+        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        secs = (next_run - now).total_seconds()
+        _original_print(
+            f"[daily-report] next run at {next_run.strftime('%Y-%m-%d %H:%M')} "
+            f"({secs / 3600:.1f} h from now)"
+        )
+        time.sleep(secs)
+        if _BLUETEAM_AVAILABLE:
+            try:
+                _original_print("[daily-report] generating smart daily report…")
+                result = _get_sentinel().daily_report()
+                _original_print(
+                    f"[daily-report] done — "
+                    f"{result.get('events_analyzed', 0)} events analysed, "
+                    f"{result.get('report_length', 0)} chars written"
+                )
+            except Exception as e:
+                _original_print(f"[daily-report] error: {e}")
+        else:
+            _original_print("[daily-report] skipped — blueteam_agent not available")
 
 
 def _submit_subtask_job(chain_id: str, chain_data: dict, index: int, retry_count: int, incoming_handoff):
@@ -685,6 +758,203 @@ def health():
     })
 
 
+@app.route('/api/v1/quick', methods=['POST'])
+@require_api_key
+def quick_command():
+    """
+    Run a single command synchronously with no job queue and no ReAct planning loop.
+    Ideal for simple read-only queries: uptime, disk, memory, process list, etc.
+
+    Request body — provide exactly one of:
+      {"question": "what is the uptime of my server?"}  -- fast model picks the command
+      {"command": "uptime"}                              -- raw command, skips LLM
+
+    Optional fields:
+      "timeout":    int   seconds before the command is killed    (default 15)
+      "allow_risk": str   highest risk level to permit            (default "low")
+                          accepts: "safe" | "low" | "medium"
+
+    Response (synchronous — no job_id):
+      {
+        "command":    "uptime",
+        "stdout":     " 13:45:12 up 3 days ...",
+        "stderr":     "",
+        "returncode": 0,
+        "success":    true,
+        "elapsed_ms": 38,
+        "risk":       "safe"
+      }
+
+    Error responses:
+      400  missing question/command
+      403  command blocked by safety validator (risk too high or destructive)
+      408  command timed out
+      500  LLM returned empty output
+    """
+    data = request.get_json() or {}
+    question  = data.get('question', '').strip()
+    command   = data.get('command', '').strip()
+    timeout   = int(data.get('timeout', 15))
+    max_risk  = data.get('allow_risk', 'low')   # "safe" | "low" | "medium"
+
+    if not question and not command:
+        return jsonify({'error': 'Provide either "question" or "command"'}), 400
+
+    t0 = time.time()
+
+    # 1. If a natural-language question was given, translate it to a command
+    if question and not command:
+        agent = _get_quick_agent()
+        system = (
+            "You are a Linux command translator. "
+            "Given a question about system state, reply with ONLY the single shell command "
+            "that best answers it — no explanation, no markdown, no backticks, no newlines. "
+            "Prefer read-only / informational commands (uptime, df, free, ps, systemctl status, "
+            "journalctl, netstat, ss, ip, cat /proc/*, uname, etc.). "
+            "Never output rm, kill, shutdown, reboot, dd, mkfs, or any destructive command."
+        )
+        for _attempt in range(2):
+            command = agent._call_model_oneshot(
+                agent.fast_model, question, system_prompt=system, timeout=30
+            ).strip().strip('`').strip()
+            if command:
+                break
+
+        if not command:
+            return jsonify({'error': 'LLM did not return a command — try again or use "command" directly'}), 500
+
+    # 2. Safety check via the agent's validator
+    agent = _get_quick_agent()
+    is_safe, detected_risk, reason = agent.safety_validator.validate_command(command)
+
+    risk_order   = {'safe': 0, 'low': 1, 'medium': 2, 'high': 3, 'blocked': 4}
+    max_allowed  = risk_order.get(max_risk, 1)
+    effective    = risk_order.get(detected_risk, 2)
+
+    if not is_safe or effective > max_allowed:
+        return jsonify({
+            'error':   f'Command blocked — risk "{detected_risk}" exceeds allowed "{max_risk}"',
+            'reason':  reason,
+            'command': command,
+            'risk':    detected_risk,
+        }), 403
+
+    # 3. Execute directly (synchronous — no job queue, no confirmation prompt)
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True,
+            timeout=timeout, executable='/bin/bash',
+        )
+        elapsed = int((time.time() - t0) * 1000)
+        return jsonify({
+            'command':    command,
+            'stdout':     result.stdout,
+            'stderr':     result.stderr,
+            'returncode': result.returncode,
+            'success':    result.returncode == 0,
+            'elapsed_ms': elapsed,
+            'risk':       detected_risk,
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': f'Command timed out after {timeout}s', 'command': command}), 408
+    except Exception as e:
+        return jsonify({'error': str(e), 'command': command}), 500
+
+
+@app.route('/api/v1/quick/stream', methods=['POST', 'GET'])
+@require_api_key
+def quick_stream():
+    """
+    SSE streaming version of /api/v1/quick.
+
+    GET:  /api/v1/quick/stream?q=<question>
+    POST: {"question": "..."} or {"command": "..."}
+
+    Events:
+      {"type": "start",  "command": "df -h"}
+      {"type": "output", "data": "Filesystem  Size  Used...\\n"}
+      {"type": "done",   "returncode": 0, "success": true, "elapsed_ms": 234}
+      {"type": "error",  "msg": "..."}
+    """
+    if request.method == 'GET':
+        data = {'question': request.args.get('q', '').strip()}
+    else:
+        data = request.get_json() or {}
+
+    question = data.get('question', '').strip()
+    command  = data.get('command', '').strip()
+    timeout  = int(data.get('timeout', 15))
+    max_risk = data.get('allow_risk', 'low')
+
+    def generate():
+        nonlocal command
+        t0 = time.time()
+
+        # 1. Resolve NL question → shell command (same logic as /quick)
+        if question and not command:
+            agent = _get_quick_agent()
+            system = (
+                "You are a Linux command translator. "
+                "Given a question about system state, reply with ONLY the single shell command "
+                "that best answers it — no explanation, no markdown, no backticks, no newlines. "
+                "Prefer read-only / informational commands (uptime, df, free, ps, systemctl status, "
+                "journalctl, netstat, ss, ip, cat /proc/*, uname, etc.). "
+                "Never output rm, kill, shutdown, reboot, dd, mkfs, or any destructive command."
+            )
+            cmd = ''
+            for _attempt in range(2):
+                cmd = agent._call_model_oneshot(
+                    agent.fast_model, question, system_prompt=system, timeout=30
+                ).strip().strip('`').strip()
+                if cmd:
+                    break
+            if not cmd:
+                yield f"data: {json.dumps({'type': 'error', 'msg': 'LLM did not return a command — try again or use \"command\" directly'})}\n\n"
+                return
+            command = cmd
+
+        if not command:
+            yield f"data: {json.dumps({'type': 'error', 'msg': 'Provide either \"question\" or \"command\"'})}\n\n"
+            return
+
+        # 2. Safety check
+        agent = _get_quick_agent()
+        is_safe, detected_risk, reason = agent.safety_validator.validate_command(command)
+        risk_order  = {'safe': 0, 'low': 1, 'medium': 2, 'high': 3, 'blocked': 4}
+        max_allowed = risk_order.get(max_risk, 1)
+        effective   = risk_order.get(detected_risk, 2)
+        if not is_safe or effective > max_allowed:
+            yield f"data: {json.dumps({'type': 'error', 'msg': f'Command blocked — risk \"{detected_risk}\" exceeds allowed \"{max_risk}\"', 'command': command})}\n\n"
+            return
+
+        # 3. Emit start
+        yield f"data: {json.dumps({'type': 'start', 'command': command})}\n\n"
+
+        # 4. Run and stream output line by line
+        try:
+            proc = subprocess.Popen(
+                command, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, executable='/bin/bash',
+            )
+            for line in proc.stdout:
+                yield f"data: {json.dumps({'type': 'output', 'data': line})}\n\n"
+            proc.wait(timeout=timeout)
+            elapsed = int((time.time() - t0) * 1000)
+            yield f"data: {json.dumps({'type': 'done', 'returncode': proc.returncode, 'success': proc.returncode == 0, 'elapsed_ms': elapsed})}\n\n"
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            yield f"data: {json.dumps({'type': 'error', 'msg': f'Command timed out after {timeout}s', 'command': command})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'msg': str(e), 'command': command})}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
 @app.route('/api/v1/execute', methods=['POST'])
 @require_api_key
 def execute_command():
@@ -785,37 +1055,112 @@ def get_job_status(job_id: str):
     return jsonify(public_job)
 
 
+def _parse_react_output_events(text: str) -> list:
+    """
+    Parse a chunk of ReAct agent output text into structured SSE events.
+    Returns list of event dicts with type: thinking | action | output | result.
+    Output events carry both 'data' (new schema) and 'content' (backward compat).
+    """
+    events = []
+    lines = text.split('\n')
+    in_output_block = False
+    pending_tool = None
+    output_buf = []
+
+    def flush_output():
+        if output_buf:
+            chunk = '\n'.join(output_buf) + '\n'
+            events.append({'type': 'output', 'data': chunk, 'content': chunk})
+            output_buf.clear()
+
+    for line in lines:
+        stripped = line.strip()
+
+        if '🔄 ReAct Iteration' in line or '======' in line:
+            flush_output()
+            in_output_block = False
+
+        elif '💭 Thought:' in line:
+            flush_output()
+            in_output_block = False
+            content = line.split('💭 Thought:', 1)[1].strip()
+            if content:
+                events.append({'type': 'thinking', 'content': content})
+
+        elif '🎯 Tool:' in line:
+            flush_output()
+            in_output_block = False
+            pending_tool = line.split('🎯 Tool:', 1)[1].split('|')[0].strip()
+
+        elif stripped.startswith('$ ') and pending_tool is not None:
+            events.append({'type': 'action', 'tool': pending_tool, 'command': stripped[2:]})
+            pending_tool = None
+
+        elif stripped == 'Output:':
+            in_output_block = True
+
+        elif '✅ FINISH:' in line:
+            flush_output()
+            in_output_block = False
+            content = line.split('✅ FINISH:', 1)[1].strip()
+            events.append({'type': 'result', 'content': content})
+
+        elif '🔧 Running:' in line or '❌ Ollama call failed' in line:
+            in_output_block = False
+
+        elif in_output_block and (line.startswith('  ') or (stripped and not stripped.startswith('●'))):
+            output_buf.append(line[2:] if line.startswith('  ') else line)
+
+    flush_output()
+    return events
+
+
 @app.route('/api/v1/jobs/<job_id>/stream', methods=['GET'])
 @require_api_key
 def stream_job_output(job_id: str):
     """
-    Stream job output in real-time using Server-Sent Events (SSE)
+    SSE stream of a running ReAct job's live thought/action/output log.
+
+    Events:
+      {"type": "thinking", "content": "I need to check disk usage..."}
+      {"type": "action",   "tool": "execute_command", "command": "df -h"}
+      {"type": "output",   "data": "Filesystem  Size...\\n", "content": "..."}
+      {"type": "result",   "content": "All partitions healthy..."}
+      {"type": "done",     "status": "completed"}
+      {"type": "complete", "status": "completed", "success": true}  -- backward compat
+      {"type": "error",    "msg": "..."}
+
+    Connection stays open until job reaches a terminal state, then closes.
     """
     if job_id not in jobs:
         return jsonify({'error': 'Job not found'}), 404
-    
+
     def generate():
         job = jobs[job_id]
         last_output_len = 0
-        
-        while job['status'] in ['queued', 'running']:
-            current_output = job.get('output', '')
-            
-            # Send new output
+
+        while job['status'] in ('queued', 'running'):
+            current_output = job.get('output', '') or ''
             if len(current_output) > last_output_len:
-                new_output = current_output[last_output_len:]
-                yield f"data: {json.dumps({'type': 'output', 'content': new_output})}\n\n"
+                new_text = current_output[last_output_len:]
                 last_output_len = len(current_output)
-            
-            # Send status updates
-            yield f"data: {json.dumps({'type': 'status', 'status': job['status']})}\n\n"
-            
+                for event in _parse_react_output_events(new_text):
+                    yield f"data: {json.dumps(event)}\n\n"
             time.sleep(0.5)
-        
-        # Send final status
-        yield f"data: {json.dumps({'type': 'complete', 'status': job['status'], 'success': job.get('success')})}\n\n"
-    
-    return Response(generate(), mimetype='text/event-stream')
+
+        # Drain any remaining output after job finishes
+        current_output = job.get('output', '') or ''
+        if len(current_output) > last_output_len:
+            for event in _parse_react_output_events(current_output[last_output_len:]):
+                yield f"data: {json.dumps(event)}\n\n"
+
+        # Terminal events — new schema + backward-compat complete
+        status = job.get('status', 'completed')
+        yield f"data: {json.dumps({'type': 'done', 'status': status})}\n\n"
+        yield f"data: {json.dumps({'type': 'complete', 'status': status, 'success': job.get('success')})}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route('/api/v1/jobs', methods=['GET'])
@@ -1343,6 +1688,79 @@ def blueteam_report():
     return content, 200, {'Content-Type': 'text/markdown; charset=utf-8'}
 
 
+# ── GUI automation endpoint ────────────────────────────────────────────────────
+
+@app.route('/api/v1/gui', methods=['POST'])
+@require_api_key
+def gui_task():
+    """Submit a desktop GUI automation task (runs as a background job).
+
+    Body: {"instruction": "open Firefox and navigate to example.com",
+           "max_iterations": 30}
+    Returns: {"job_id": "...", "status": "queued"}
+    """
+    if not _GUI_AVAILABLE:
+        return jsonify({'error': 'gui_agent module not available'}), 503
+
+    data = request.get_json(silent=True) or {}
+    instruction = (data.get('instruction') or '').strip()
+    if not instruction:
+        return jsonify({'error': '"instruction" is required'}), 400
+
+    job_id = str(uuid.uuid4())
+    job = {
+        'job_id': job_id,
+        'job_type': 'gui_task',
+        'instruction': instruction,
+        'max_iterations': int(data.get('max_iterations', 30)),
+        'status': 'queued',
+        'created_at': datetime.now().isoformat(),
+        'output': '',
+        'error': '',
+    }
+    job_runner.submit(job)
+    return jsonify({'job_id': job_id, 'status': 'queued'})
+
+
+@app.route('/api/v1/blueteam/daily_report/run', methods=['POST'])
+@require_api_key
+def blueteam_run_daily_report():
+    """Manually trigger the smart daily report (synchronous, returns when done).
+
+    Caps at 16 minutes (same 15-min internal limit plus 1 min buffer).
+    Useful for testing or forcing an early report before the 3 AM cron.
+
+    Returns:
+        {"success": true, "report_length": N, "events_analyzed": N, "report_path": "..."}
+    """
+    if not _BLUETEAM_AVAILABLE:
+        return jsonify({'error': 'blueteam_agent module not available'}), 503
+
+    import concurrent.futures
+
+    def _run():
+        return _get_sentinel().daily_report()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as exe:
+        future = exe.submit(_run)
+        try:
+            result = future.result(timeout=960)  # 16-min outer wall
+            return jsonify({
+                'success':          result.get('success', True),
+                'finish_summary':   result.get('finish_summary', ''),
+                'report_length':    result.get('report_length', 0),
+                'events_analyzed':  result.get('events_analyzed', 0),
+                'report_path':      result.get('report_path', ''),
+            })
+        except concurrent.futures.TimeoutError:
+            return jsonify({
+                'success': False,
+                'error':   'Report generation timed out after 16 minutes',
+            }), 408
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")
@@ -1358,6 +1776,7 @@ if __name__ == '__main__':
     print(f"Auth: DISABLED (local-network mode)")
     print(f"Port: 5000  |  Max Concurrent Jobs: {MAX_CONCURRENT_JOBS}")
     print(f"Endpoints:")
+    print(f"  POST   /api/v1/quick             - Quick command (sync, no ReAct loop)")
     print(f"  POST   /api/v1/execute           - Execute command")
     print(f"  GET    /api/v1/jobs/<id>         - Get job status")
     print(f"  GET    /api/v1/jobs/<id>/stream  - Stream output")
@@ -1376,9 +1795,10 @@ if __name__ == '__main__':
     print(f"  POST   /api/v1/blueteam/investigate - SENTINEL investigation (job)")
     print(f"  POST   /api/v1/blueteam/watch/start - Start anomaly watcher")
     print(f"  POST   /api/v1/blueteam/watch/stop  - Stop anomaly watcher")
-    print(f"  GET    /api/v1/blueteam/report   - Current SENTINEL daily report (.md)")
-    print(f"  GET    /api/v1/blueteam/alerts   - Recent security alerts")
-    print(f"  GET    /api/v1/blueteam/status   - Watcher status + last scan")
+    print(f"  GET    /api/v1/blueteam/report          - Current SENTINEL daily report (.md)")
+    print(f"  POST   /api/v1/blueteam/daily_report/run - Run smart daily report now")
+    print(f"  GET    /api/v1/blueteam/alerts         - Recent security alerts")
+    print(f"  GET    /api/v1/blueteam/status         - Watcher status + last scan")
     print("=" * 70)
     print("\nChecking for interrupted chains...")
     _resume_running_chains()
@@ -1388,6 +1808,18 @@ if __name__ == '__main__':
     print(f"📥 Inbox watcher started  →  {os.path.abspath(_INBOX_DIR)}")
     print(f"📝 Debug logs            →  {os.path.abspath('./logs/')}")
     print(f"📊 State file            →  {os.path.abspath(_STATE_PATH)}")
+
+    # Start smart logger (continuous filtered event log)
+    if _SMART_LOGGER_AVAILABLE:
+        _smart_logger.start()
+    else:
+        print("⚠️  smart_logger not available — daily reports will have no event context")
+
+    # Start daily report scheduler (fires at 3 AM each day)
+    threading.Thread(
+        target=_daily_report_scheduler, daemon=True, name="DailyReportScheduler"
+    ).start()
+    print(f"📋 Daily report scheduler started  →  fires at 03:00 each day")
 
     # SENTINEL auto-watch disabled — triggered externally (cron at 3 AM)
     # To re-enable: POST /api/v1/blueteam/watch/start or uncomment below

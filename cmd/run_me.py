@@ -584,6 +584,28 @@ def cmd_chain_status(server, chain_id):
     print()
 
 
+def cmd_gui(server, task, max_iterations=30, no_stream=False):
+    print(f"  {CYAN('GUI task:')} {task[:80]}", flush=True)
+    resp   = _post(server, "/api/v1/gui", {"instruction": task, "max_iterations": max_iterations})
+    job_id = resp["job_id"]
+    print(f"  {DIM('job_id')} = {YELLOW(job_id)}\n", flush=True)
+    if no_stream:
+        deadline = time.time() + POLL_TIMEOUT
+        while time.time() < deadline:
+            j  = _get(server, f"/api/v1/jobs/{job_id}")
+            st = j.get("status", "?")
+            if st not in ("queued", "running"):
+                out = (j.get("output") or "").strip()
+                if out:
+                    print(out)
+                icon = STATUS_ICON.get(st, "❓")
+                print(f"\n  {icon}  {st.upper()}")
+                return
+            time.sleep(POLL_INTERVAL)
+    else:
+        stream_job(server, job_id)
+
+
 def cmd_sentinel(server):
     d        = _get(server, "/api/v1/blueteam/status")
     watching = d.get("watching", False)
@@ -661,6 +683,7 @@ _REPL_HELP = """\
   :chain <goal>            submit a multi-phase chain
   :chains                  list chains
   :chain-status <id>       chain detail
+  :gui <task>              run GUI desktop automation task
   :sentinel                SENTINEL watcher status
   :scan [focus]            run security scan
   :report                  daily security report
@@ -730,6 +753,8 @@ def cmd_repl(server):
             cmd_chains(server)
         elif line.startswith(":chain-status "):
             cmd_chain_status(server, line.split(None, 1)[1].strip())
+        elif line.startswith(":gui "):
+            cmd_gui(server, line[5:].strip())
         elif line == ":sentinel":
             cmd_sentinel(server)
         elif line == ":scan" or line.startswith(":scan "):
@@ -837,6 +862,9 @@ def main():
         elif cmd in ("chain-status", "chain_status"):
             if not rest: p.error("Usage: run_me.py chain-status <id>")
             cmd_chain_status(server, rest.strip())
+        elif cmd == "gui":
+            if not rest: p.error("Usage: run_me.py gui \"task\"")
+            cmd_gui(server, rest, no_stream=opts.no_stream)
         elif cmd == "sentinel":                  cmd_sentinel(server)
         elif cmd == "scan":                      cmd_scan(server, focus=rest)
         elif cmd == "report":                    cmd_report(server)
