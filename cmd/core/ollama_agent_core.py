@@ -378,7 +378,7 @@ class OllamaCommandAgent:
             self.safety_validator,
             self.search_agent,
             self.memory,
-            explain_cb=self.explain_command_detailed,
+            explain_cb=None,  # disabled: 20s/call × every command = massive GPU waste on single-model setup
         )
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
@@ -1197,7 +1197,7 @@ JSON only."""
             f"Recent actions:\n{trace_text}\n\n"
             f"Write the progress markdown file."
         )
-        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=20)
+        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=3)
         if not content:
             return
         try:
@@ -1240,7 +1240,7 @@ JSON only."""
             self.fast_model,
             f"Command/operation:\n{command_info}",
             system,
-            timeout=15,
+            timeout=5,
         ).strip().upper()
 
         if "UNSAFE" in verdict:

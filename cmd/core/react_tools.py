@@ -566,33 +566,57 @@ class ToolRegistry:
             return ToolResult(False, "", "No path provided", {})
         offset = int(args.get("offset", 0))
         limit  = int(args.get("limit", 200))
+
+        # Track ALL reads (any offset) per path — catches pagination loops too
+        self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
+        total_reads = self._read_file_counts[path]
+
+        # Hard block at 8 total reads of the same file
+        if total_reads > 8:
+            fname = os.path.basename(path)
+            return ToolResult(
+                False, "",
+                f"BLOCKED: {fname} has been read {total_reads} times this phase. "
+                f"Re-reading is NOT helping. You MUST take a different action:\n"
+                f"• Use execute_command: grep -n 'symbol' {path}\n"
+                f"• Use execute_command: python3 -c \"import ast; ...\" to inspect structure\n"
+                f"• Use patch_file or create_file to fix what you already know is wrong\n"
+                f"• If imports are missing, ADD them — don't keep reading the file.",
+                {"read_blocked": True, "total_reads": total_reads}
+            )
+
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
             total = len(lines)
             slice_ = lines[offset : offset + limit]
             content = "".join(slice_)
+
+            # Header so model always knows exactly where it is
+            end_line = min(offset + limit, total)
+            header = f"[FILE: {path} | TOTAL: {total} lines | SHOWING: lines {offset+1}-{end_line}]\n"
+            content = header + content
+
             remaining = total - (offset + limit)
             if remaining > 0:
                 content += (
-                    f"\n\n[... {remaining} more lines not shown. "
-                    f"Call read_file with offset={offset + limit} to continue reading.]"
+                    f"\n[... {remaining} more lines. "
+                    f"Use offset={offset + limit} to continue, "
+                    f"or grep to find specific content instead of paginating.]"
                 )
-            # Track no-offset re-reads and inject redirect note at 3rd read
-            if offset == 0:
-                self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
-                count = self._read_file_counts[path]
-                if count >= 3:
-                    content += (
-                        f"\n\n⚠️  You have read {path} from the top {count} times. "
-                        f"If you haven't found what you need:\n"
-                        f"• Use offset= to read a different section\n"
-                        f"• Use execute_command with grep/sed to locate specific content\n"
-                        f"• Proceed with what you already know — re-reading rarely helps"
-                    )
+
+            # Warn at 4+ reads regardless of offset
+            if total_reads >= 4:
+                content += (
+                    f"\n\n⚠️  READ #{total_reads} of {path}. "
+                    f"You have {8 - total_reads} reads left before this file is blocked.\n"
+                    f"STOP re-reading. Use grep or just patch what you know is wrong."
+                )
+
             return ToolResult(True, content, "", {
                 "path": path, "total_lines": total,
                 "shown_lines": len(slice_), "offset": offset,
+                "total_reads": total_reads,
             })
         except FileNotFoundError:
             return ToolResult(False, "", f"File not found: {path}", {})
