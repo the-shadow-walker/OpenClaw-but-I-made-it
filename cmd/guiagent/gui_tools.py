@@ -39,12 +39,15 @@ class GUIToolRegistry(ToolRegistry):
     }
 
     def __init__(self, screen: GUIScreen, input_ctrl: GUIInput,
-                 call_vision_fn, **kwargs):
+                 call_vision_fn, event_cb=None, **kwargs):
         super().__init__(**kwargs)
         self.TOOL_NAMES = self.GUI_TOOL_NAMES
         self.screen = screen
         self.input_ctrl = input_ctrl
         self.call_vision_fn = call_vision_fn  # fn(prompt: str, image_b64: str) -> str
+        # Optional callback: event_cb(event_type: str, payload: dict)
+        # Used by gui_server.py to stream live events to connected browsers.
+        self.event_cb = event_cb
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -81,6 +84,13 @@ class GUIToolRegistry(ToolRegistry):
                 {"available": available},
             )
 
+        # Emit action event before execution (skip for screenshot — it emits its own)
+        if self.event_cb and tool != "screenshot":
+            try:
+                self.event_cb("action", {"tool": tool, "args": args})
+            except Exception:
+                pass
+
         handlers = {
             "screenshot":   self._handle_screenshot,
             "click":        self._handle_click,
@@ -93,7 +103,21 @@ class GUIToolRegistry(ToolRegistry):
             "wait":         self._handle_wait,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
-        return handlers[tool](args)
+        result = handlers[tool](args)
+
+        # Emit result event (skip screenshot — vision response is already in result.output)
+        if self.event_cb and tool != "screenshot":
+            try:
+                self.event_cb("result", {
+                    "tool": tool,
+                    "success": result.success,
+                    "output": result.output[:500] if result.output else "",
+                    "error": result.error[:300] if result.error else "",
+                })
+            except Exception:
+                pass
+
+        return result
 
     # ── GUI tool handlers ────────────────────────────────────────────────────
 
@@ -101,9 +125,17 @@ class GUIToolRegistry(ToolRegistry):
         try:
             img = self.screen.capture()
             grid_img = self.screen.overlay_grid(img)
+            b64 = self.screen.to_base64(grid_img)
+
+            # Emit screenshot immediately — before OCR/vision, so UI updates fast
+            if self.event_cb:
+                try:
+                    self.event_cb("screenshot", {"image": b64})
+                except Exception:
+                    pass
+
             elements = self.screen.ocr_elements(img)
             text_map = self.screen.build_text_map(elements)
-            b64 = self.screen.to_base64(grid_img)
 
             w, h = img.size
             ocr_section = f"OCR text positions (for precise clicking):\n{text_map}"
@@ -113,11 +145,24 @@ class GUIToolRegistry(ToolRegistry):
 
             # Call vision model with the annotated image
             vision_response = self.call_vision_fn(observation_prompt, b64)
+
+            # Emit vision response as a result event
+            if self.event_cb:
+                try:
+                    self.event_cb("vision", {"text": vision_response[:1000]})
+                except Exception:
+                    pass
+
             return ToolResult(
                 True, vision_response, "",
                 {"screenshot": True, "ocr_count": len(elements)},
             )
         except Exception as e:
+            if self.event_cb:
+                try:
+                    self.event_cb("error", {"text": f"Screenshot failed: {e}"})
+                except Exception:
+                    pass
             return ToolResult(False, "", f"Screenshot failed: {e}", {})
 
     def _handle_click(self, args):

@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 from ollama_agent_core import OllamaCommandAgent
@@ -98,10 +99,13 @@ def _call_vision(model: str, prompt: str, image_b64: str,
 class GUIAgent:
     MODEL = "qwen3.5:35b"
 
-    def __init__(self, display=":99", screen_w=1280, screen_h=720):
+    def __init__(self, display=":99", screen_w=1280, screen_h=720, event_cb=None):
         self.display = display
         self.screen_w = screen_w
         self.screen_h = screen_h
+        # Optional callback: event_cb(event_type: str, payload: dict)
+        # Called for screenshot, action, result, vision, error events.
+        self.event_cb = event_cb
 
         self.agent = OllamaCommandAgent(model=self.MODEL, fast_model=self.MODEL)
         self.screen = GUIScreen(display, screen_w, screen_h)
@@ -111,6 +115,7 @@ class GUIAgent:
             screen=self.screen,
             input_ctrl=self.input_ctrl,
             call_vision_fn=lambda prompt, img: _call_vision(self.MODEL, prompt, img),
+            event_cb=event_cb,
             safety_validator=self.agent.safety_validator,
             search_agent=self.agent.search_agent,
             memory=self.agent.memory,
@@ -158,11 +163,60 @@ class GUIAgent:
         )
 
         self.agent.max_react_iterations = max_iterations
-        return self.agent.run_react(
-            task,
-            system_prompt_override=system_prompt,
-            tool_whitelist=GUIToolRegistry.GUI_TOOL_NAMES,
-        )
+        self.agent.react_trace = []  # fresh trace for this run
+
+        # Start trace watcher: polls react_trace and emits "thought" events
+        stop_watcher = threading.Event()
+        if self.event_cb:
+            watcher = threading.Thread(
+                target=self._trace_watcher,
+                args=(stop_watcher,),
+                daemon=True,
+            )
+            watcher.start()
+
+        try:
+            result = self.agent.run_react(
+                task,
+                system_prompt_override=system_prompt,
+                tool_whitelist=GUIToolRegistry.GUI_TOOL_NAMES,
+            )
+        finally:
+            stop_watcher.set()
+
+        # Emit done event
+        if self.event_cb:
+            try:
+                self.event_cb("done", {
+                    "success": result.get("success", False),
+                    "summary": result.get("summary", ""),
+                    "iterations": len(self.agent.react_trace),
+                })
+            except Exception:
+                pass
+
+        return result
+
+    def _trace_watcher(self, stop_event: threading.Event):
+        """Background thread: watches react_trace and emits thought events."""
+        seen = 0
+        while not stop_event.is_set():
+            trace = self.agent.react_trace
+            if len(trace) > seen:
+                for entry in trace[seen:]:
+                    thought = entry.get("thought", "")
+                    if thought and self.event_cb:
+                        try:
+                            self.event_cb("thought", {
+                                "iteration": entry.get("iteration", seen + 1),
+                                "thought": thought,
+                                "confidence": entry.get("confidence", 0),
+                                "tool": entry.get("tool", ""),
+                            })
+                        except Exception:
+                            pass
+                seen = len(trace)
+            stop_event.wait(0.1)
 
 
 # ── Standalone CLI ────────────────────────────────────────────────────────────
