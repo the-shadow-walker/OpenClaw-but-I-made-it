@@ -1716,10 +1716,13 @@ def gui_task():
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
         'output': '',
-        'error': '',
+        'execution_log': [],
+        'success': None,
     }
-    job_runner.submit(job)
-    return jsonify({'job_id': job_id, 'status': 'queued'})
+    jobs[job_id] = job
+    job_runner.submit_job(job_id)
+    return jsonify({'job_id': job_id, 'status': 'queued',
+                    'created_at': job['created_at']}), 202
 
 
 @app.route('/api/v1/blueteam/daily_report/run', methods=['POST'])
