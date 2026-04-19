@@ -351,7 +351,7 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 16384       # ReAct loop context window
+    NUM_CTX = 32768       # ReAct loop context window (matches qwen3.6:35b-Grindlewalt Modelfile)
     HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
 
@@ -1827,7 +1827,7 @@ Return JSON only:
             tool = parsed.get("tool", "")
             args = parsed.get("args", {})
 
-            print(f"💭 Thought: {thought[:120]}")
+            print(f"💭 Thought: {thought}")
             print(f"🎯 Tool: {tool}  |  Confidence: {confidence}%")
 
             if not tool:
