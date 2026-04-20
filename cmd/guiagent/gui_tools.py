@@ -63,6 +63,8 @@ class GUIToolRegistry(ToolRegistry):
         # While set, click/scroll coords are auto-translated from zoom-space to full-screen.
         # Cleared by _handle_screenshot.
         self._zoom_region = None
+        # Tracks the last tool dispatched — used to block back-to-back screenshots
+        self._last_tool_called = None
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -103,6 +105,19 @@ class GUIToolRegistry(ToolRegistry):
                 {"available": available},
             )
 
+        # Block consecutive screenshots — you must act between them (use wait + screenshot if loading)
+        if tool == "screenshot" and self._last_tool_called == "screenshot":
+            return ToolResult(
+                False, "",
+                (
+                    "CONSECUTIVE SCREENSHOT BLOCKED: You already have a screenshot. "
+                    "Take an action first (click, type, key, cmd, scroll, wait, zoom) "
+                    "based on what you saw. If waiting for a page to load: "
+                    'wait {"seconds": 2} then screenshot.'
+                ),
+                {"consecutive_screenshot": True},
+            )
+
         # Emit action event before execution (skip for screenshot — it emits its own)
         if self.event_cb and tool != "screenshot":
             try:
@@ -126,6 +141,7 @@ class GUIToolRegistry(ToolRegistry):
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
         result = handlers[tool](args)
+        self._last_tool_called = tool  # track for consecutive-screenshot guard
 
         # Emit result event (skip screenshot — vision response is already in result.output)
         if self.event_cb and tool != "screenshot":
