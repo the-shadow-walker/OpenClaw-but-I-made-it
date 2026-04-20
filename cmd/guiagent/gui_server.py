@@ -139,7 +139,7 @@ def start():
     if not task:
         return jsonify({"error": "task is required"}), 400
     max_iter = int(data.get("max_iterations", 30))
-    display  = data.get("display", ":99")
+    display  = data.get("display", ":0")
 
     with _lock:
         if _agent_state["status"] == "running":

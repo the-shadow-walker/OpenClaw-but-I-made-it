@@ -6,6 +6,7 @@ sends the annotated image to the vision model (Ollama vision API), receives a JS
 executes it via xdotool, and loops.
 """
 
+import glob
 import json
 import os
 import re
@@ -20,94 +21,154 @@ from gui_input import GUIInput
 from gui_tools import GUIToolRegistry, GUI_TOOLS_TEXT
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+# ── System prompts ─────────────────────────────────────────────────────────────
 
-GUI_SYSTEM_PROMPT_TEMPLATE = """\
-You are a desktop automation agent controlling a headless Linux server desktop.
+# Real KDE desktop (:0) — full Plasma environment
+_KDE_SYSTEM_PROMPT = """\
+You are a desktop automation agent controlling a KDE Plasma desktop on a Linux server.
 
 ═══════════════════════ ENVIRONMENT ═══════════════════════
-OS: Arch Linux server (no physical monitor)
-Virtual display: Xvfb :99 — a full X11 display running at 1280×720 pixels
-Window manager: kwin_x11 — already running, handles window placement and focus
-Baseline terminal: xterm — always visible on screen (black bg, white text, monospace font)
-DISPLAY env is already set to :99 — any app you launch from xterm renders in this display
+OS: Arch Linux with KDE Plasma (X11 session, real desktop)
+Display: :0 at 1920×1080 — the real user desktop with wallpaper, panels, and running apps
+Window manager: kwin_x11
+Browser: Brave Browser (command: brave-browser)
+Terminal: Konsole (KDE's terminal — search for it in the app launcher)
 
 WHAT YOU CAN DO:
-• Open a web browser: click xterm to focus it, type "brave-browser &", press Enter.
-  The browser WILL render and appear on screen — this is a fully functional X11 display.
-  (Brave Browser is the installed browser — NOT firefox or chromium.)
-• Run any GUI or terminal application: type its name in xterm, press Enter.
-• Navigate websites, fill forms, click buttons — exactly as on a physical desktop.
-• Use keyboard shortcuts: Ctrl+L (browser address bar), Ctrl+T (new tab), Ctrl+W (close tab),
-  Ctrl+A (select all), Ctrl+C/V (copy/paste), Return (confirm), Escape (cancel), Tab (next field).
+• Open the application launcher: click the grid/menu icon in the taskbar (bottom-left area)
+  OR press the Super key (Windows key) to open KRunner/launcher
+• Open Brave Browser: right-click the desktop → Run Command → type "brave-browser", Enter
+  OR click its icon in the taskbar, OR open a terminal and type "brave-browser &"
+• Open a terminal: search for "Konsole" in the app launcher, or right-click desktop
+• Control any open application: click on it, type, scroll, use keyboard shortcuts
+• Use keyboard shortcuts: Ctrl+L (browser address bar), Ctrl+T (new tab), Super (launcher),
+  Alt+F2 (KRunner run dialog), Ctrl+Alt+T (terminal shortcut if configured)
 
 COORDINATE SYSTEM — 8×8 GRID:
 The screen is divided into an 8×8 grid. top-left=(0,0), bottom-right=(8,8).
-Decimals are required for precision: (3.5, 1.2) not (3, 1).
-Column 0=left edge → Column 8=right edge
-Row 0=top edge → Row 8=bottom edge
+Decimals required for precision: (3.5, 1.2) not (3, 1).
+Column 0=left edge → Column 8=right edge; Row 0=top → Row 8=bottom
 
-Approximate landmarks on a 1280×720 display:
-  xterm window body         ≈ (0.1, 0.1) to (7.9, 7.5)
-  xterm prompt/text area    ≈ (0.5, 4.0)  [center of terminal]
-  browser title bar         ≈ (4.0, 0.15)
-  browser address bar       ≈ (4.0, 0.5)  [after browser opens]
-  browser close button (X)  ≈ (7.85, 0.15)
-  browser page body         ≈ (4.0, 4.0)
-  browser tabs bar          ≈ (2.0, 0.2)
+Approximate KDE Plasma landmarks at 1920×1080:
+  KDE taskbar (bottom panel)  ≈ y=7.7 to y=8.0
+  App launcher button         ≈ (0.15, 7.85)
+  Desktop body                ≈ (0.0, 0.0) to (8.0, 7.7)
+  Browser address bar         ≈ (4.0, 0.5) [when browser is focused]
+  Browser close button        ≈ (7.9, 0.15)
 
-OCR TEXT POSITIONS (read these carefully every screenshot):
-After each screenshot you receive a list like:
-  "File"     @ grid 0.40, 0.10   ← click x=0.40, y=0.10 to activate "File"
-  "http://…" @ grid 4.00, 0.50   ← browser address bar is here
-  "Submit"   @ grid 3.80, 6.20   ← button is here
-ALWAYS prefer OCR coordinates for text elements — they are pixel-accurate.
-If a text element is missing from OCR, use the image grid overlay to estimate.
+OCR TEXT POSITIONS (read every screenshot):
+  "Firefox"  @ grid 0.40, 0.10   ← click x=0.40, y=0.10
+  "http://…" @ grid 4.00, 0.50
+ALWAYS use OCR coordinates for text elements — they are pixel-accurate.
 
-HOW TO USE XTERM:
-1. Click inside the xterm window body to give it keyboard focus
-2. Type your command (you will see it appear on screen after screenshot)
-3. Press Enter to run it
-4. Call screenshot to see the result
-5. Background apps: append " &" so xterm stays responsive (e.g. "brave-browser &")
-6. The shell prompt looks like "$ " or "% " — you are ready when you see it
+HOW TO OPEN A BROWSER:
+Option A: Alt+F2 → type "brave-browser" → Enter
+Option B: Click app launcher → search "Brave" → click result
+Option C: If a terminal is open: type "brave-browser &" → Enter
 
-HOW TO USE A BROWSER:
-Step 1 — Launch:    click xterm → type "brave-browser &" → key Return → wait 3s → screenshot
-Step 2 — Navigate:  key {{"combo": "ctrl+l"}} → type {{"text": "https://example.com"}} → key {{"combo": "Return"}}
-Step 3 — Interact:  screenshot to see page → use OCR coords to click links/buttons/fields
-Step 4 — Type text: click the input field first → screenshot to confirm focus → type {{"text": "..."}}
-Step 5 — Scroll:    scroll {{"direction": "down"}} when the browser page body is in focus
+HOW TO NAVIGATE A BROWSER:
+After opening: key {{"combo": "ctrl+l"}} → type URL → key {{"combo": "Return"}}
+New tab: key {{"combo": "ctrl+t"}}
+Scroll: scroll {{"direction": "down"}}
+
+HOW TO OPEN A TERMINAL (Konsole):
+Option A: key {{"combo": "ctrl+alt+t"}}
+Option B: Alt+F2 → type "konsole" → Enter
+Option C: Right-click desktop → open terminal
 
 ═══════════════════════ TASK & BUDGET ═══════════════════════
 CURRENT TASK: {task}
 ITERATION BUDGET: {max_iterations} total iterations
-WARNING: At {budget_warn} iterations remaining, call finish() immediately with current progress.
+At {budget_warn} iterations remaining: call finish() immediately.
 
 ═══════════════════════ AVAILABLE TOOLS ═══════════════════════
 {available_tools}
 
 ═══════════════════════ OUTPUT FORMAT ═══════════════════════
-Every single response MUST be one valid JSON object — NO prose, NO markdown, NOTHING else:
-{{"thought": "step-by-step reasoning about what you see and what to do next", "confidence": 85, "tool": "tool_name", "args": {{}}}}
-
-confidence 0–100: your certainty that this action is correct.
-If confidence < 70: call screenshot to gather more evidence before acting.
+Every response MUST be one valid JSON object — NO prose, nothing else:
+{{"thought": "step-by-step reasoning", "confidence": 85, "tool": "tool_name", "args": {{}}}}
 
 ═══════════════════════ RULES ═══════════════════════
-1.  ALWAYS call screenshot first — never act blind
-2.  After EVERY action (click, type, key, scroll), call screenshot to verify the result
-3.  Use OCR coordinates for text — do not invent pixel positions
-4.  To type in any field: click it first, verify focus in screenshot, then type
-5.  If a click misses: screenshot → re-read OCR list → recalculate → retry
+1.  ALWAYS call screenshot first — see before acting
+2.  After EVERY action (click, type, key, scroll), call screenshot to verify
+3.  Use OCR coordinates for text — never invent positions
+4.  To type in a field: click it first, verify focus in screenshot, then type
+5.  If a click misses: screenshot → re-read OCR → recalculate → retry
 6.  Waiting for app to load: wait {{"seconds": 3}} then screenshot
 7.  confidence < 70: screenshot first, act second
-8.  NEVER repeat the exact same tool+args 4 times in a row — try a different approach
+8.  NEVER repeat the exact same tool+args 4 times in a row
 9.  Task complete: finish {{"summary": "what was accomplished", "success": true}}
-10. Irreversibly stuck / impossible: finish {{"summary": "what failed and why", "success": false}}
-11. Do NOT close xterm — it is your only way to launch new applications
+10. Irreversibly stuck: finish {{"summary": "what failed and why", "success": false}}
 
 Begin by calling screenshot to see the current screen state.
+"""
+
+# Headless virtual display (:99) — Xvfb + xterm
+_HEADLESS_SYSTEM_PROMPT = """\
+You are a desktop automation agent controlling a headless Linux server desktop.
+
+═══════════════════════ ENVIRONMENT ═══════════════════════
+OS: Arch Linux server (no physical monitor)
+Virtual display: Xvfb :99 — a full X11 display running at 1280×720 pixels
+Window manager: kwin_x11 — already running
+Baseline terminal: xterm — always visible on screen (black bg, white text)
+Browser: Brave Browser (command: brave-browser)
+
+WHAT YOU CAN DO:
+• Open Brave Browser: click xterm → type "brave-browser &" → Enter.
+  The browser WILL render — this is a full X11 display.
+  (Brave is installed — do NOT use firefox or chromium.)
+• Run any GUI app: type its name in xterm, press Enter.
+
+COORDINATE SYSTEM — 8×8 GRID:
+top-left=(0,0), bottom-right=(8,8). Decimals required: (3.5, 1.2).
+
+Approximate landmarks at 1280×720:
+  xterm window body         ≈ (0.1, 0.1) to (7.9, 7.5)
+  xterm text/prompt area    ≈ (0.5, 4.0)
+  browser address bar       ≈ (4.0, 0.5)  [after browser opens]
+  browser close button      ≈ (7.85, 0.15)
+
+OCR TEXT POSITIONS:
+  "File"     @ grid 0.40, 0.10   ← click x=0.40, y=0.10
+ALWAYS use OCR coordinates for text — pixel-accurate.
+
+HOW TO USE XTERM:
+1. Click inside xterm body to focus it
+2. Type command, press Enter
+3. Background apps: "brave-browser &" (not blocking)
+4. Screenshot to verify result
+
+HOW TO NAVIGATE A BROWSER:
+Launch: type "brave-browser &" in xterm → Enter → wait 3s → screenshot
+Navigate: key {{"combo": "ctrl+l"}} → type URL → key {{"combo": "Return"}}
+
+═══════════════════════ TASK & BUDGET ═══════════════════════
+CURRENT TASK: {task}
+ITERATION BUDGET: {max_iterations} total iterations
+At {budget_warn} iterations remaining: call finish() immediately.
+
+═══════════════════════ AVAILABLE TOOLS ═══════════════════════
+{available_tools}
+
+═══════════════════════ OUTPUT FORMAT ═══════════════════════
+Every response MUST be one valid JSON object — NO prose, nothing else:
+{{"thought": "step-by-step reasoning", "confidence": 85, "tool": "tool_name", "args": {{}}}}
+
+═══════════════════════ RULES ═══════════════════════
+1.  ALWAYS call screenshot first
+2.  After EVERY action, call screenshot to verify
+3.  Use OCR coordinates for text
+4.  To type: click field first, verify focus, then type
+5.  If click misses: screenshot → re-read OCR → retry
+6.  Waiting for load: wait {{"seconds": 3}} then screenshot
+7.  confidence < 70: screenshot first
+8.  NEVER repeat same tool+args 4× in a row
+9.  Task complete: finish {{"summary": "...", "success": true}}
+10. Stuck: finish {{"summary": "...", "success": false}}
+11. Do NOT close xterm
+
+Begin by calling screenshot.
 """
 
 
@@ -142,7 +203,7 @@ def _call_vision(model: str, prompt: str, image_b64: str,
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         return content
     except subprocess.TimeoutExpired:
-        return "Vision call timed out after 180s — try again"
+        return f"Vision call timed out after {timeout}s — try again"
     except (json.JSONDecodeError, KeyError) as e:
         stderr = result.stderr[:200] if result else ""
         return f"Vision call failed (parse error): {e}  stderr={stderr}"
@@ -155,14 +216,17 @@ def _call_vision(model: str, prompt: str, image_b64: str,
 class GUIAgent:
     MODEL = "qwen3.6:35b-Grindlewalt"
 
-    def __init__(self, display=":99", screen_w=1280, screen_h=720, event_cb=None, stop_event=None):
+    def __init__(self, display=":0", screen_w=1920, screen_h=1080,
+                 event_cb=None, stop_event=None):
         self.display = display
-        self.screen_w = screen_w
-        self.screen_h = screen_h
-        # Optional callback: event_cb(event_type: str, payload: dict)
-        # Called for screenshot, action, result, vision, error events.
         self.event_cb = event_cb
         self.stop_event = stop_event
+
+        # Headless virtual display uses different resolution
+        if display == ":99":
+            screen_w, screen_h = 1280, 720
+        self.screen_w = screen_w
+        self.screen_h = screen_h
 
         self.agent = OllamaCommandAgent(model=self.MODEL, fast_model=self.MODEL)
         self.screen = GUIScreen(display, screen_w, screen_h)
@@ -179,91 +243,138 @@ class GUIAgent:
             memory=self.agent.memory,
         )
 
-    def setup_display(self):
-        """Ensure the virtual display is up with a window manager and terminal.
+    def _refresh_xauth(self):
+        """Find the current SDDM xauth cookie and merge it into ~/.Xauthority."""
+        home = os.path.expanduser("~")
+        xauth_dest = os.path.join(home, ".Xauthority")
+        candidates = sorted(
+            glob.glob("/tmp/xauth_*"),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        env_base = {**os.environ, "DISPLAY": self.display}
+        for f in candidates:
+            if not os.access(f, os.R_OK):
+                continue
+            # Test if this cookie gives access to the display
+            r = subprocess.run(
+                ["xdotool", "getdisplaygeometry"],
+                env={**env_base, "XAUTHORITY": f},
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                # Merge into ~/.Xauthority
+                extract = subprocess.run(
+                    ["xauth", "extract", "-", self.display],
+                    env={"XAUTHORITY": f},
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["xauth", "merge", "-"],
+                    input=extract.stdout,
+                    env={"XAUTHORITY": xauth_dest},
+                    capture_output=True,
+                )
+                print(f"  Xauth refreshed from {f}")
+                return True
+        return False
 
-        Steps:
-          1. Start Xvfb :99 if the display isn't alive yet.
-          2. Start kwin_x11 if no window manager is running — needed so windows
-             can be moved/resized and don't stack behind each other.
-          3. Start xterm so there is always something visible on the screen
-             (avoids the pure-black-screen problem on a headless server).
+    def setup_display(self):
+        """Ensure the target display is accessible.
+
+        For :0 (real KDE desktop): verify access, refresh xauth if needed.
+        For :99 (headless): start Xvfb + kwin_x11 + xterm if not running.
         """
         env = {**os.environ, "DISPLAY": self.display}
 
-        # ── 1. Xvfb ─────────────────────────────────────────────────────────
+        # Check if display is already accessible
+        r = subprocess.run(
+            ["xdotool", "getdisplaygeometry"],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
+
+        if r.returncode != 0:
+            if self.display == ":0":
+                # Real desktop: try refreshing xauth
+                print("  Display :0 not accessible — refreshing xauth...")
+                if self._refresh_xauth():
+                    r = subprocess.run(
+                        ["xdotool", "getdisplaygeometry"],
+                        env=env, capture_output=True, text=True, timeout=5,
+                    )
+                    if r.returncode == 0:
+                        print(f"  Display :0 ready: {r.stdout.strip()}")
+                        return
+                raise RuntimeError(
+                    "Cannot access display :0. Is KDE running? "
+                    "Check: sudo systemctl status sddm"
+                )
+            else:
+                # Headless: start Xvfb
+                self._setup_headless()
+                return
+
+        geom = r.stdout.strip()
+        if self.display == ":0":
+            print(f"  KDE desktop :0 ready: {geom}")
+        else:
+            print(f"  Display {self.display} active: {geom}")
+            # Headless display: ensure kwin + xterm are running
+            self._ensure_headless_apps()
+
+    def _setup_headless(self):
+        """Start Xvfb :99 + kwin_x11 + xterm from scratch."""
+        env = {**os.environ, "DISPLAY": self.display}
+        print(f"  Starting Xvfb {self.display} ({self.screen_w}×{self.screen_h})...")
+        subprocess.Popen(
+            ["Xvfb", self.display, "-screen", "0",
+             f"{self.screen_w}x{self.screen_h}x24"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.5)
         r = subprocess.run(
             ["xdotool", "getdisplaygeometry"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
-            print(f"  Starting Xvfb {self.display} ({self.screen_w}×{self.screen_h})...")
-            subprocess.Popen(
-                ["Xvfb", self.display, "-screen", "0",
-                 f"{self.screen_w}x{self.screen_h}x24"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            raise RuntimeError(
+                f"Xvfb failed to start on {self.display}: {r.stderr[:200]}"
             )
-            time.sleep(1.5)
-            r = subprocess.run(
-                ["xdotool", "getdisplaygeometry"],
-                env=env, capture_output=True, text=True, timeout=5,
-            )
-            if r.returncode != 0:
-                raise RuntimeError(
-                    f"Xvfb failed to start on {self.display}: {r.stderr[:200]}"
-                )
-            print(f"  Xvfb ready: {r.stdout.strip()}")
-        else:
-            print(f"  Display {self.display} active: {r.stdout.strip()}")
+        print(f"  Xvfb ready: {r.stdout.strip()}")
+        self._ensure_headless_apps()
 
-        # ── 2. Window manager (kwin_x11, from installed KDE) ────────────────
-        # pgrep searches by process name, not display — good enough since this
-        # server only runs one virtual display.
-        wm_running = subprocess.run(
-            ["pgrep", "-x", "kwin_x11"],
-            capture_output=True,
-        ).returncode == 0
+    def _ensure_headless_apps(self):
+        """Start kwin_x11 and xterm if not already running (headless display)."""
+        env = {**os.environ, "DISPLAY": self.display}
 
-        if not wm_running:
-            print("  Starting kwin_x11 window manager...")
+        if subprocess.run(["pgrep", "-x", "kwin_x11"], capture_output=True).returncode != 0:
+            print("  Starting kwin_x11...")
             subprocess.Popen(
-                ["kwin_x11"],
-                env={**env, "DISPLAY": self.display},
+                ["kwin_x11"], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             time.sleep(1.2)
             print("  kwin_x11 ready")
-        else:
-            print("  kwin_x11 already running")
 
-        # ── 3. xterm baseline ────────────────────────────────────────────────
-        # Always start a terminal so the display is never pitch-black.
-        # Uses a geometry that fills most of the virtual screen.
-        xterm_running = subprocess.run(
-            ["pgrep", "-x", "xterm"],
-            capture_output=True,
-        ).returncode == 0
-
-        if not xterm_running:
+        if subprocess.run(["pgrep", "-x", "xterm"], capture_output=True).returncode != 0:
             print("  Starting xterm...")
             subprocess.Popen(
                 ["xterm", "-geometry", "155x42+20+20",
                  "-bg", "black", "-fg", "white",
                  "-fa", "Monospace", "-fs", "11"],
-                env={**env, "DISPLAY": self.display},
+                env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             time.sleep(0.8)
             print("  xterm ready")
-        else:
-            print("  xterm already running")
 
     def run(self, task: str, max_iterations: int = 30) -> dict:
         """Run the GUI agent on a task. Returns run_react result dict."""
         self.setup_display()
 
         budget_warn = max(5, max_iterations // 5)
-        system_prompt = GUI_SYSTEM_PROMPT_TEMPLATE.format(
+        template = _KDE_SYSTEM_PROMPT if self.display == ":0" else _HEADLESS_SYSTEM_PROMPT
+        system_prompt = template.format(
             task=task,
             available_tools=GUI_TOOLS_TEXT,
             max_iterations=max_iterations,
@@ -271,9 +382,8 @@ class GUIAgent:
         )
 
         self.agent.max_react_iterations = max_iterations
-        self.agent.react_trace = []  # fresh trace for this run
+        self.agent.react_trace = []
 
-        # Start trace watcher: polls react_trace and emits "thought" events
         stop_watcher = threading.Event()
         if self.event_cb:
             watcher = threading.Thread(
@@ -292,7 +402,6 @@ class GUIAgent:
         finally:
             stop_watcher.set()
 
-        # Emit done event
         if self.event_cb:
             try:
                 self.event_cb("done", {
@@ -330,13 +439,11 @@ class GUIAgent:
 # ── Standalone CLI ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    task = " ".join(sys.argv[1:]) or "open xterm and type hello"
+    task = " ".join(sys.argv[1:]) or "take a screenshot and describe the desktop"
     print(f"\nGUI Agent — model: {GUIAgent.MODEL}")
     print(f"Task: {task}\n")
     agent = GUIAgent()
     result = agent.run(task)
     success = result.get("success", False)
     summary = result.get("summary", "")
-    print(f"\n{'✅' if success else '⚠️ '} {'SUCCESS' if success else 'FINISHED'}")
-    if summary:
-        print(f"   {summary}")
+    print(f"\n{'OK' if success else 'DONE'}: {summary}")
