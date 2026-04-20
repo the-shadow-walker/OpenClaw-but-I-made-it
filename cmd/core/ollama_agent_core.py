@@ -504,12 +504,13 @@ class OllamaCommandAgent:
         }
 
         try:
-            result = subprocess.run(
-                ["curl", "-s", "http://localhost:11434/api/chat",
-                 "-d", json.dumps(request_data)],
-                capture_output=True, text=True, timeout=timeout,
-            )
-            return json.loads(result.stdout)["message"]["content"]
+            import http.client as _http
+            body = json.dumps(request_data).encode()
+            conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
+            conn.request("POST", "/api/chat", body=body,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return json.loads(resp.read())["message"]["content"]
         except Exception as e:
             print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
             return ""
