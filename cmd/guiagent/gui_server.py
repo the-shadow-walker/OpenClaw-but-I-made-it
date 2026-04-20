@@ -677,14 +677,17 @@ async function startAgent() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({task, max_iterations: maxIter}),
     });
-    const d = await r.json();
+    const text = await r.text();
+    let d = {};
+    try { d = JSON.parse(text); } catch { /* server returned non-JSON (HTML error page) */ }
     if (!r.ok) {
-      addEntry('error', '✗', esc(d.error || 'Failed to start'));
+      const msg = d.error || text.slice(0, 300) || `HTTP ${r.status}`;
+      addEntry('error', '✗', esc(msg));
       setStatus('error');
       setRunning(false);
     }
   } catch (e) {
-    addEntry('error', '✗', esc(String(e)));
+    addEntry('error', '✗', esc(`Could not reach server: ${e.message || e}`));
     setStatus('error');
     setRunning(false);
   }
