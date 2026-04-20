@@ -128,20 +128,23 @@ File manager / terminal:
   Ctrl+H             show hidden files
   Ctrl+L             focus path / address bar
 
-══════════════════ CLICKING STRATEGY ══════════════════
-When you must use the mouse:
-1. screenshot → study image → locate target element
-2. Identify the element's bounding box → calculate its CENTER in 16×16 coords
-3. click at that center point
-4. screenshot immediately → verify expected change happened
-5. If missed: try ±0.5 offset in each direction, one at a time
-6. After 3 failed clicks on the same element: switch strategy (shortcut, cmd, different element)
+══════════════════ CLICKING STRATEGY — MANDATORY ZOOM-FIRST ══════════════════
+NEVER click directly from a full-screen view. Every click requires zoom first.
 
-ZOOM for precision (small buttons, dense UI, dialog checkboxes):
-  zoom {{"x": 8.0, "y": 12.0}}          # zoom into 1×1 cell at (8,12)
-  zoom {{"x": 8.0, "y": 12.0, "w": 2, "h": 2}}  # zoom 2×2 cell region
-  After zoom: a 16×16 sub-grid covers that region. Clicks auto-translate to full-screen.
-  Call screenshot to return to full-screen view.
+REQUIRED FLOW:
+  1. screenshot → identify the rough area where the target lives (note grid coords)
+  2. zoom {{"x": <cx>, "y": <cy>, "w": 2, "h": 2}}
+       → First zoom. Read the VERIFY prompt in the observation:
+         • Target VISIBLE → proceed to step 3
+         • Target NOT VISIBLE → screenshot, re-identify, zoom a different area
+  3. zoom {{"x": <cx2>, "y": <cy2>, "w": 0.5, "h": 0.5}}
+       → Second zoom (tighter). Read the VERIFY prompt again:
+         • Target CLEARLY VISIBLE → click {{"x": ..., "y": ...}} in sub-grid
+         • Not clear enough → zoom tighter (w=0.3, h=0.3)
+  4. click / double_click / right_click → ONLY after zoom confirms target is visible
+
+  After click: screenshot → verify result. If missed → start over from step 1.
+  After 3 failed clicks: switch strategy (keyboard shortcut, Tab+Enter, cmd).
 
 SCROLLING (always provide x,y so mouse is over the right window):
   scroll {{"direction": "down", "x": 8.0, "y": 8.0}}  # scroll center of screen
@@ -173,14 +176,15 @@ These are your saved discoveries from past sessions. Trust them.
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
-3.  After EVERY GUI action: screenshot to verify it worked
-4.  If a click misses: recalculate center from new screenshot, never same coords twice
-5.  Stuck on a button? Try Enter, Tab+Enter, or keyboard shortcut instead
-6.  Use OCR grid coords for text elements — never guess
-7.  NEVER repeat same tool+args 4× in a row
-8.  Learned something useful (binary path, UI quirk, keyboard shortcut)? → note it immediately
-9.  Task done → finish {{"summary": "what happened", "success": true}}
-10. Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
+3.  ZOOM before EVERY click — screenshot → zoom (×2) → verify → click. No exceptions.
+4.  After EVERY click: screenshot to verify it worked
+5.  If a click misses: screenshot → zoom fresh, NEVER reuse old coords
+6.  Stuck on a button? Try Enter, Tab+Enter, or keyboard shortcut instead
+7.  Use OCR sub-grid coords in zoomed view for text elements
+8.  NEVER repeat same tool+args 4× in a row
+9.  Learned something useful (binary path, UI quirk, keyboard shortcut)? → note it immediately
+10. Task done → finish {{"summary": "what happened", "success": true}}
+11. Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
 
 Start: can cmd accomplish this, or do I need the GUI?
 """
@@ -218,12 +222,18 @@ Browser (Brave):
   Ctrl+T             new tab     Ctrl+W  close tab    Ctrl+R  refresh
   Ctrl+F             find        F11     fullscreen
 
-══════════════════ CLICKING STRATEGY ══════════════════
-1. screenshot → locate target → calculate bounding box center in 16×16 coords
-2. click center → screenshot to verify → if missed try ±0.5 offset
-3. After 3 failures: switch to shortcut or cmd
-4. For precision: zoom {{"x": cx, "y": cy}} → 16×16 sub-grid → clicks auto-translate
-5. Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
+══════════════════ CLICKING STRATEGY — MANDATORY ZOOM-FIRST ══════════════════
+NEVER click directly from a full-screen view. Every click requires zoom first.
+
+REQUIRED FLOW:
+  1. screenshot → rough area identified
+  2. zoom {{"x": cx, "y": cy, "w": 2, "h": 2}} → VERIFY target visible?
+       YES → step 3    NO → screenshot, re-identify, zoom elsewhere
+  3. zoom {{"x": cx2, "y": cy2, "w": 0.5, "h": 0.5}} → tighter zoom → VERIFY?
+       YES → click in sub-grid    NO → zoom tighter
+  4. click {{"x": ..., "y": ...}} → only after zoom confirms target
+  5. screenshot → verify. Miss → back to step 1.
+  Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
@@ -246,12 +256,13 @@ These are your saved discoveries from past sessions. Trust them.
 {notes}
 
 ══════════════════ RULES ══════════════════
-1.  cmd FIRST   2. Shortcuts before clicking   3. Screenshot to verify every GUI action
-4.  If click misses: recalculate from screenshot, never repeat same coords
-5.  Use OCR coords for text   6. Never repeat same tool+args 4× in a row
-7.  Learned something useful (binary path, UI quirk)? → note it immediately
-8.  Done → finish {{"summary": "...", "success": true}}
-9.  Stuck → finish {{"summary": "...", "success": false}}   10. Do NOT close xterm
+1.  cmd FIRST   2. Shortcuts before clicking
+3.  ZOOM before EVERY click — screenshot → zoom (×2) → verify → click
+4.  After every click: screenshot to verify   5. Miss → start over with fresh zoom
+6.  Use OCR sub-grid coords   7. Never repeat same tool+args 4× in a row
+8.  Learned something useful? → note it
+9.  Done → finish {{"summary": "...", "success": true}}
+10. Stuck → finish {{"summary": "...", "success": false}}   11. Do NOT close xterm
 
 Start: cmd or GUI?
 """
