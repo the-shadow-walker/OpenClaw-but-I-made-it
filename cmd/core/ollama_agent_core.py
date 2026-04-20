@@ -420,6 +420,7 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
+            "keep_alive": -1,
             "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -453,6 +454,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "keep_alive": -1,
             "options": {"num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -497,6 +499,7 @@ class OllamaCommandAgent:
             "model": self.fast_model,
             "messages": messages,
             "stream": False,
+            "keep_alive": -1,
             "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
 
