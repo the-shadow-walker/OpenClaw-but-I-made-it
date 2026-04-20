@@ -420,7 +420,7 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
-            "keep_alive": -1,
+            "keep_alive": "10m",
             "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -454,7 +454,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "keep_alive": -1,
+            "keep_alive": "10m",
             "options": {"num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -513,6 +513,23 @@ class OllamaCommandAgent:
         except Exception as e:
             print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
             return ""
+
+    def _reset_keep_alive(self, keep_alive: str = "10m"):
+        """Send a no-op request to reset the model's keep_alive expiry timer.
+
+        Called at the end of run_react so the model unloads after `keep_alive`
+        of idle time, freeing VRAM for other processes.  During the job loop,
+        call_ollama_react uses keep_alive=-1 to prevent mid-job unloading.
+        """
+        try:
+            subprocess.run(
+                ["curl", "-s", "http://localhost:11434/api/generate",
+                 "-d", json.dumps({"model": self.model, "prompt": "",
+                                   "keep_alive": keep_alive})],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
 
     def call_ollama_heavy(
         self,
@@ -2329,6 +2346,10 @@ Return JSON only:
                 print(f"\n💾 Incomplete task state saved → {state_path}")
             except Exception:
                 pass
+
+        # Job done — reset keep_alive so the model can unload after 10m idle
+        # (during the loop it was -1 so the model stayed hot between iterations)
+        self._reset_keep_alive("10m")
 
         return result_dict
 
