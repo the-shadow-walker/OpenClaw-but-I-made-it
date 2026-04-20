@@ -139,9 +139,11 @@ REQUIRED FLOW:
          • Target NOT VISIBLE → screenshot, re-identify, zoom a different area
   3. zoom {{"x": <cx2>, "y": <cy2>, "w": 0.5, "h": 0.5}}
        → Second zoom (tighter). Read the VERIFY prompt again:
-         • Target CLEARLY VISIBLE → click {{"x": ..., "y": ...}} in sub-grid
+         • Target CLEARLY VISIBLE → run the CROSSHAIR CHECK (see below), then click
          • Not clear enough → zoom tighter (w=0.3, h=0.3)
-  4. click / double_click / right_click → ONLY after zoom confirms target is visible
+  4. CROSSHAIR CHECK → verify x (vertical line through center) and y (horizontal
+       line through center) independently before committing coordinates
+  5. click / double_click / right_click → ONLY after crosshair check confirms center
 
   After click: screenshot → verify result. If missed → start over from step 1.
   After 3 failed clicks: switch strategy (keyboard shortcut, Tab+Enter, cmd).
@@ -157,6 +159,25 @@ Columns 0=left edge → 16=right edge
 Rows    0=top edge  → 16=bottom edge
 OCR text positions in screenshot output are pixel-accurate — always prefer them.
 NEVER invent coordinates without taking a screenshot first.
+
+══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
+Before every click, verify x and y independently using this 2-pass method:
+
+  X PASS — find the exact column:
+    Pick a candidate x value. Imagine a vertical line running top-to-bottom
+    at that x. Ask: does that line pass through the HORIZONTAL CENTER of the
+    target element? If it hits the left or right edge instead of the middle,
+    adjust x until the vertical line bisects the element cleanly.
+
+  Y PASS — find the exact row:
+    Pick a candidate y value. Imagine a horizontal line running left-to-right
+    at that y. Ask: does that line pass through the VERTICAL CENTER of the
+    target element? If it clips the top or bottom edge instead of the middle,
+    adjust y until the horizontal line bisects the element cleanly.
+
+  COMMIT: Only use (x, y) once BOTH passes confirm the intersection lands
+          squarely in the center of the element — not on its border or nearby.
+          If uncertain after 2 passes, zoom tighter and repeat.
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
@@ -239,6 +260,16 @@ REQUIRED FLOW:
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
 OCR positions from screenshot are pixel-accurate — use them.
 NEVER invent coordinates without a screenshot first.
+
+══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
+Before every click, verify x and y independently:
+
+  X PASS: imagine a vertical line at your candidate x — does it pass through
+          the HORIZONTAL CENTER of the target? Adjust until it does.
+  Y PASS: imagine a horizontal line at your candidate y — does it pass through
+          the VERTICAL CENTER of the target? Adjust until it does.
+  COMMIT: only click once both lines intersect squarely on the element center.
+          If uncertain, zoom tighter and repeat.
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
