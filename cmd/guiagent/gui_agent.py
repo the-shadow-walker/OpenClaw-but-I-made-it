@@ -15,6 +15,23 @@ import sys
 import threading
 import time
 
+# ── Debug log ─────────────────────────────────────────────────────────────────
+
+GUI_DEBUG_LOG = "/tmp/gui_agent_debug.jsonl"
+_log_lock = threading.Lock()
+
+
+def _gui_log(entry: dict):
+    """Append one JSONL entry to the GUI debug log (thread-safe)."""
+    try:
+        entry.setdefault("ts", time.strftime("%H:%M:%S"))
+        line = json.dumps(entry, default=str) + "\n"
+        with _log_lock:
+            with open(GUI_DEBUG_LOG, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        pass
+
 from ollama_agent_core import OllamaCommandAgent
 from gui_screen import GUIScreen
 from gui_input import GUIInput
@@ -402,6 +419,18 @@ class GUIAgent:
         """Run the GUI agent on a task. Returns run_react result dict."""
         self.setup_display()
 
+        # Fresh log for each job
+        try:
+            with _log_lock:
+                with open(GUI_DEBUG_LOG, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "type": "job_start", "ts": time.strftime("%H:%M:%S"),
+                        "task": task, "display": self.display,
+                        "budget": max_iterations,
+                    }) + "\n")
+        except Exception:
+            pass
+
         budget_warn = max(5, max_iterations // 5)
         template = _KDE_SYSTEM_PROMPT if self.display == ":0" else _HEADLESS_SYSTEM_PROMPT
         system_prompt = template.format(
@@ -432,6 +461,13 @@ class GUIAgent:
         finally:
             stop_watcher.set()
 
+        _gui_log({
+            "type": "job_end",
+            "success": result.get("success", False),
+            "summary": result.get("summary", ""),
+            "iterations": len(self.agent.react_trace),
+        })
+
         if self.event_cb:
             try:
                 self.event_cb("done", {
@@ -445,23 +481,55 @@ class GUIAgent:
         return result
 
     def _trace_watcher(self, stop_event: threading.Event):
-        """Background thread: watches react_trace and emits thought events."""
+        """Background thread: watches react_trace, emits thought events, writes debug log."""
         seen = 0
         while not stop_event.is_set():
             trace = self.agent.react_trace
             if len(trace) > seen:
                 for entry in trace[seen:]:
                     thought = entry.get("thought", "")
+                    tool    = entry.get("tool", "")
+                    n       = entry.get("iteration", seen + 1)
+                    conf    = entry.get("confidence", 0)
+
+                    # Emit thought event for browser UI
                     if thought and self.event_cb:
                         try:
                             self.event_cb("thought", {
-                                "iteration": entry.get("iteration", seen + 1),
-                                "thought": thought,
-                                "confidence": entry.get("confidence", 0),
-                                "tool": entry.get("tool", ""),
+                                "iteration": n, "thought": thought,
+                                "confidence": conf, "tool": tool,
                             })
                         except Exception:
                             pass
+
+                    # Write structured debug log entry
+                    result = entry.get("result")
+                    args   = entry.get("args", {})
+                    # Strip large base64 strings from args
+                    safe_args = {k: v for k, v in args.items()
+                                 if not (isinstance(v, str) and len(v) > 500)}
+                    log_e = {
+                        "type": "iter", "n": n, "tool": tool,
+                        "confidence": conf,
+                        "thought": thought[:400] if thought else "",
+                        "args": safe_args,
+                    }
+                    if result is not None:
+                        meta = result.metadata or {}
+                        if meta.get("screenshot"):
+                            log_e["result"] = {
+                                "ok": result.success,
+                                "ocr": meta.get("ocr_count", 0),
+                            }
+                        else:
+                            log_e["result"] = {
+                                "ok": result.success,
+                                "out": (result.output or "")[:600],
+                                "err": (result.error or "")[:200],
+                                "rc":  meta.get("returncode"),
+                            }
+                    _gui_log(log_e)
+
                 seen = len(trace)
             stop_event.wait(0.1)
 

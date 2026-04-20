@@ -16,6 +16,7 @@ Usage:
   python run_me.py chains                   # list all chains
   python run_me.py chain-status <id>        # chain detail
   python run_me.py sentinel                 # SENTINEL status
+  python run_me.py guilog                   # full debug log of last GUI agent run
   python run_me.py scan [focus]             # run security scan
   python run_me.py report                   # daily security report
   python run_me.py alerts                   # recent security alerts
@@ -36,6 +37,7 @@ import sys, os, json, time, argparse, threading
 import urllib.request, urllib.error, urllib.parse
 
 DEFAULT_SERVER = os.environ.get("JARVIS_URL", "http://10.0.0.58:5000")
+GUI_SERVER     = os.environ.get("GUI_AGENT_URL", "http://10.0.0.58:5005")
 POLL_INTERVAL  = 2
 POLL_TIMEOUT   = 600
 
@@ -606,6 +608,121 @@ def cmd_gui(server, task, max_iterations=30, no_stream=False):
         stream_job(server, job_id)
 
 
+def cmd_guilog(gui_server=None):
+    """Fetch and pretty-print the GUI agent debug log from /tmp/gui_agent_debug.jsonl."""
+    url = (gui_server or GUI_SERVER).rstrip("/") + "/log"
+    req = urllib.request.Request(url, headers=_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+    except urllib.error.URLError as e:
+        print(RED(f"  [Connection error] {e.reason}  ({url})"), file=sys.stderr)
+        return
+    except urllib.error.HTTPError as e:
+        print(RED(f"  [HTTP {e.code}] {url}"), file=sys.stderr)
+        return
+
+    entries = data.get("entries", [])
+    if not entries:
+        print(f"  {DIM('No GUI debug log yet — run a GUI task first.')}")
+        return
+
+    width = _term_width()
+    if _USE_COLOR:
+        sys.stdout.write("\033[2J\033[H")  # clear screen
+        sys.stdout.flush()
+
+    print(CYAN("═" * min(70, width)))
+    print(f"  {BOLD('GUI Agent Debug Log')}  {DIM(str(len(entries)) + ' entries')}")
+    print(CYAN("═" * min(70, width)))
+    print()
+
+    TOOL_ICON = {
+        "cmd": "⚡", "screenshot": "📷", "click": "🖱", "double_click": "🖱",
+        "right_click": "🖱", "type": "⌨", "key": "⌨", "scroll": "↕",
+        "drag": "↔", "wait": "⏳", "finish": "🏁",
+    }
+
+    for e in entries:
+        t  = e.get("type", "")
+        ts = DIM(e.get("ts", ""))
+
+        if t == "job_start":
+            print(f"  {BOLD(B_CYAN('▶ JOB START'))}  {ts}")
+            print(f"    Task:    {YELLOW(e.get('task','')[:100])}")
+            print(f"    Display: {e.get('display','')}   Budget: {e.get('budget','')} iters")
+            print()
+
+        elif t == "iter":
+            n    = e.get("n", "?")
+            tool = e.get("tool", "?")
+            conf = e.get("confidence", 0)
+            icon = TOOL_ICON.get(tool, "▸")
+            thought = e.get("thought", "")
+
+            print(f"  {DIM(f'[{n}]')} {YELLOW(f'{icon} {tool}')}  {DIM(f'{conf}%')}  {ts}")
+            if thought:
+                # Wrap thought to terminal width
+                tw = min(width - 8, 90)
+                words, line = thought.split(), ""
+                lines_out = []
+                for w in words:
+                    if len(line) + len(w) + 1 > tw:
+                        lines_out.append(line)
+                        line = w
+                    else:
+                        line = (line + " " + w).strip()
+                if line:
+                    lines_out.append(line)
+                for l in lines_out[:3]:  # cap at 3 lines
+                    print(f"    {DIM(l)}")
+
+            args = e.get("args", {})
+            if args:
+                args_str = json.dumps(args)
+                if len(args_str) > 120:
+                    args_str = args_str[:117] + "..."
+                print(f"    {CYAN('args:')} {args_str}")
+
+            res = e.get("result", {})
+            if res:
+                ok = res.get("ok", True)
+                col = B_GREEN if ok else B_RED
+                mark = "✓" if ok else "✗"
+                if tool == "screenshot":
+                    print(f"    {col(mark)} OCR: {res.get('ocr', 0)} elements")
+                else:
+                    out = (res.get("out") or "").strip()
+                    err = (res.get("err") or "").strip()
+                    rc  = res.get("rc")
+                    rc_str = f"  rc={rc}" if rc is not None and rc != 0 else ""
+                    if out:
+                        out_lines = out.splitlines()
+                        for ol in out_lines[:4]:
+                            print(f"    {col(mark)} {ol[:120]}")
+                        if len(out_lines) > 4:
+                            print(f"    {DIM(f'… +{len(out_lines)-4} more lines')}")
+                    elif err:
+                        print(f"    {col(mark)} {RED(err[:120])}{rc_str}")
+                    else:
+                        print(f"    {col(mark + rc_str)}")
+            print()
+
+        elif t == "job_end":
+            ok  = e.get("success", False)
+            col = B_GREEN if ok else B_RED
+            print(CYAN("─" * min(60, width)))
+            print(f"  {col('✅ DONE' if ok else '⚠️  FINISHED')}  "
+                  f"{e.get('iterations', '?')} iterations  {ts}")
+            summary = e.get("summary", "")
+            if summary:
+                print(f"  {summary[:200]}")
+            print()
+
+    print(DIM(f"  log: /tmp/gui_agent_debug.jsonl  ({len(entries)} entries)"))
+    print()
+
+
 def cmd_sentinel(server):
     d        = _get(server, "/api/v1/blueteam/status")
     watching = d.get("watching", False)
@@ -684,6 +801,7 @@ _REPL_HELP = """\
   :chains                  list chains
   :chain-status <id>       chain detail
   :gui <task>              run GUI desktop automation task
+  :guilog                  full debug log of last GUI agent run
   :sentinel                SENTINEL watcher status
   :scan [focus]            run security scan
   :report                  daily security report
@@ -755,6 +873,8 @@ def cmd_repl(server):
             cmd_chain_status(server, line.split(None, 1)[1].strip())
         elif line.startswith(":gui "):
             cmd_gui(server, line[5:].strip())
+        elif line == ":guilog":
+            cmd_guilog()
         elif line == ":sentinel":
             cmd_sentinel(server)
         elif line == ":scan" or line.startswith(":scan "):
@@ -865,6 +985,7 @@ def main():
         elif cmd == "gui":
             if not rest: p.error("Usage: run_me.py gui \"task\"")
             cmd_gui(server, rest, no_stream=opts.no_stream)
+        elif cmd == "guilog":                    cmd_guilog()
         elif cmd == "sentinel":                  cmd_sentinel(server)
         elif cmd == "scan":                      cmd_scan(server, focus=rest)
         elif cmd == "report":                    cmd_report(server)

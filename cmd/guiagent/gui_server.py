@@ -168,6 +168,25 @@ def status():
     return jsonify(s)
 
 
+@app.route("/log")
+def get_log():
+    """Return the GUI agent debug log as a JSON list of entries."""
+    log_path = "/tmp/gui_agent_debug.jsonl"
+    entries = []
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except FileNotFoundError:
+        pass
+    return jsonify({"entries": entries, "count": len(entries)})
+
+
 @app.route("/screenshot")
 def screenshot():
     img = _agent_state.get("last_screenshot")
