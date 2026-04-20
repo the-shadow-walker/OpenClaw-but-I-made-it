@@ -102,7 +102,8 @@ def _run_agent(task: str, max_iterations: int, display: str):
     _broadcast("log", {"text": f"Starting task: {task}", "level": "info"})
 
     try:
-        agent = GUIAgent(display=display, event_cb=_broadcast)
+        _stop_requested.clear()  # reset from any previous stop
+        agent = GUIAgent(display=display, event_cb=_broadcast, stop_event=_stop_requested)
         result = agent.run(task, max_iterations=max_iterations)
         success = result.get("success", False)
         summary = result.get("summary", "")

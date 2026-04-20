@@ -39,7 +39,7 @@ class GUIToolRegistry(ToolRegistry):
     }
 
     def __init__(self, screen: GUIScreen, input_ctrl: GUIInput,
-                 call_vision_fn, event_cb=None, **kwargs):
+                 call_vision_fn, event_cb=None, stop_event=None, **kwargs):
         super().__init__(**kwargs)
         self.TOOL_NAMES = self.GUI_TOOL_NAMES
         self.screen = screen
@@ -48,11 +48,17 @@ class GUIToolRegistry(ToolRegistry):
         # Optional callback: event_cb(event_type: str, payload: dict)
         # Used by gui_server.py to stream live events to connected browsers.
         self.event_cb = event_cb
+        # Optional threading.Event — if set, dispatch returns a finish(stop) result
+        self.stop_event = stop_event
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
     def dispatch(self, tool, args, confidence, confirm_cb=None):
         """Route GUI tool calls — completely replaces parent handler_map."""
+
+        # Stop-requested check — fires finish() so run_react exits cleanly
+        if self.stop_event and self.stop_event.is_set():
+            return self._handle_finish({"summary": "Stopped by user request.", "success": False})
 
         # Stuck-loop guard
         call_key = (tool, json.dumps(args, sort_keys=True))

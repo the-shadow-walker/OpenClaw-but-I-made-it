@@ -33,8 +33,9 @@ Baseline terminal: xterm — always visible on screen (black bg, white text, mon
 DISPLAY env is already set to :99 — any app you launch from xterm renders in this display
 
 WHAT YOU CAN DO:
-• Open a web browser: click xterm to focus it, type "firefox &" or "chromium &", press Enter.
+• Open a web browser: click xterm to focus it, type "brave-browser &", press Enter.
   The browser WILL render and appear on screen — this is a fully functional X11 display.
+  (Brave Browser is the installed browser — NOT firefox or chromium.)
 • Run any GUI or terminal application: type its name in xterm, press Enter.
 • Navigate websites, fill forms, click buttons — exactly as on a physical desktop.
 • Use keyboard shortcuts: Ctrl+L (browser address bar), Ctrl+T (new tab), Ctrl+W (close tab),
@@ -68,11 +69,11 @@ HOW TO USE XTERM:
 2. Type your command (you will see it appear on screen after screenshot)
 3. Press Enter to run it
 4. Call screenshot to see the result
-5. Background apps: append " &" so xterm stays responsive (e.g. "firefox &")
+5. Background apps: append " &" so xterm stays responsive (e.g. "brave-browser &")
 6. The shell prompt looks like "$ " or "% " — you are ready when you see it
 
 HOW TO USE A BROWSER:
-Step 1 — Launch:    click xterm → type "firefox &" → key Return → wait 3s → screenshot
+Step 1 — Launch:    click xterm → type "brave-browser &" → key Return → wait 3s → screenshot
 Step 2 — Navigate:  key {{"combo": "ctrl+l"}} → type {{"text": "https://example.com"}} → key {{"combo": "Return"}}
 Step 3 — Interact:  screenshot to see page → use OCR coords to click links/buttons/fields
 Step 4 — Type text: click the input field first → screenshot to confirm focus → type {{"text": "..."}}
@@ -113,7 +114,7 @@ Begin by calling screenshot to see the current screen state.
 # ── Vision call ───────────────────────────────────────────────────────────────
 
 def _call_vision(model: str, prompt: str, image_b64: str,
-                 system: str = None, timeout: int = 90) -> str:
+                 system: str = None, timeout: int = 180) -> str:
     """Send a base64 PNG image + text prompt to an Ollama vision model."""
     messages = []
     if system:
@@ -141,7 +142,7 @@ def _call_vision(model: str, prompt: str, image_b64: str,
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         return content
     except subprocess.TimeoutExpired:
-        return "Vision call timed out after 90s — try again"
+        return "Vision call timed out after 180s — try again"
     except (json.JSONDecodeError, KeyError) as e:
         stderr = result.stderr[:200] if result else ""
         return f"Vision call failed (parse error): {e}  stderr={stderr}"
@@ -154,13 +155,14 @@ def _call_vision(model: str, prompt: str, image_b64: str,
 class GUIAgent:
     MODEL = "qwen3.6:35b-Grindlewalt"
 
-    def __init__(self, display=":99", screen_w=1280, screen_h=720, event_cb=None):
+    def __init__(self, display=":99", screen_w=1280, screen_h=720, event_cb=None, stop_event=None):
         self.display = display
         self.screen_w = screen_w
         self.screen_h = screen_h
         # Optional callback: event_cb(event_type: str, payload: dict)
         # Called for screenshot, action, result, vision, error events.
         self.event_cb = event_cb
+        self.stop_event = stop_event
 
         self.agent = OllamaCommandAgent(model=self.MODEL, fast_model=self.MODEL)
         self.screen = GUIScreen(display, screen_w, screen_h)
@@ -171,6 +173,7 @@ class GUIAgent:
             input_ctrl=self.input_ctrl,
             call_vision_fn=lambda prompt, img: _call_vision(self.MODEL, prompt, img),
             event_cb=event_cb,
+            stop_event=stop_event,
             safety_validator=self.agent.safety_validator,
             search_agent=self.agent.search_agent,
             memory=self.agent.memory,

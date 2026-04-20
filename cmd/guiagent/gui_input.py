@@ -29,6 +29,29 @@ class GUIInput:
             env=env, capture_output=True, text=True, timeout=timeout,
         )
 
+    def _get_xterm_wid(self):
+        """Return the first xterm window ID, or None if not found."""
+        r = self._xdo("search", "--class", "XTerm")
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().split("\n")[0]
+        return None
+
+    def focus_xterm(self):
+        """Find the xterm window and give it keyboard focus."""
+        wid = self._get_xterm_wid()
+        if wid:
+            self._xdo("windowactivate", "--sync", wid)
+            self._xdo("windowfocus", "--sync", wid)
+            time.sleep(0.1)
+            return f"Focused xterm window {wid}"
+        return "xterm window not found"
+
+    def _ensure_focused(self):
+        """If no window has keyboard focus, focus xterm as fallback."""
+        r = self._xdo("getactivewindow")
+        if r.returncode != 0 or not r.stdout.strip():
+            self.focus_xterm()
+
     def click(self, gx, gy):
         px, py = self._grid_to_px(gx, gy)
         self._xdo("mousemove", "--sync", str(px), str(py))
@@ -48,10 +71,14 @@ class GUIInput:
         return f"Right-clicked at grid ({gx}, {gy}) → pixel ({px}, {py})"
 
     def type_text(self, text):
-        self._xdo("type", "--clearmodifiers", "--", text)
+        # Ensure some window has focus so keystrokes land
+        self._ensure_focused()
+        self._xdo("type", "--clearmodifiers", "--", text, timeout=30)
         return f"Typed: {text[:60]}{'...' if len(text) > 60 else ''}"
 
     def key(self, combo):
+        # Ensure some window has focus so the key combo lands
+        self._ensure_focused()
         self._xdo("key", "--clearmodifiers", combo)
         return f"Key: {combo}"
 
