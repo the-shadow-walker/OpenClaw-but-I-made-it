@@ -235,7 +235,6 @@ class GUIAgent:
         self.agent.tool_registry = GUIToolRegistry(
             screen=self.screen,
             input_ctrl=self.input_ctrl,
-            call_vision_fn=lambda prompt, img: _call_vision(self.MODEL, prompt, img),
             event_cb=event_cb,
             stop_event=stop_event,
             safety_validator=self.agent.safety_validator,

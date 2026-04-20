@@ -39,17 +39,19 @@ class GUIToolRegistry(ToolRegistry):
     }
 
     def __init__(self, screen: GUIScreen, input_ctrl: GUIInput,
-                 call_vision_fn, event_cb=None, stop_event=None, **kwargs):
+                 event_cb=None, stop_event=None, **kwargs):
         super().__init__(**kwargs)
         self.TOOL_NAMES = self.GUI_TOOL_NAMES
         self.screen = screen
         self.input_ctrl = input_ctrl
-        self.call_vision_fn = call_vision_fn  # fn(prompt: str, image_b64: str) -> str
         # Optional callback: event_cb(event_type: str, payload: dict)
         # Used by gui_server.py to stream live events to connected browsers.
         self.event_cb = event_cb
         # Optional threading.Event — if set, dispatch returns a finish(stop) result
         self.stop_event = stop_event
+        # Set by _handle_screenshot; picked up by ollama_agent_core.run_react
+        # to inline the image into the next ReAct model call (no separate vision call).
+        self.pending_image = None
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -131,38 +133,37 @@ class GUIToolRegistry(ToolRegistry):
         try:
             img = self.screen.capture()
             grid_img = self.screen.overlay_grid(img)
-            b64 = self.screen.to_base64(grid_img)
 
-            # Emit screenshot immediately — before OCR/vision, so UI updates fast
+            # Full-res base64 → browser UI only
+            b64_full = self.screen.to_base64(grid_img)
             if self.event_cb:
                 try:
-                    self.event_cb("screenshot", {"image": b64})
+                    self.event_cb("screenshot", {"image": b64_full})
                 except Exception:
                     pass
+
+            # Downscaled base64 → inlined into next ReAct model call
+            # 960px wide instead of 1920 — ~6× smaller, much faster inference
+            self.pending_image = self.screen.to_base64_model(grid_img, max_w=960)
 
             elements = self.screen.ocr_elements(img)
             text_map = self.screen.build_text_map(elements)
-
             w, h = img.size
-            ocr_section = f"OCR text positions (for precise clicking):\n{text_map}"
-            observation_prompt = (
-                f"SCREEN [{w}×{h}] — 8×8 grid overlaid.\n{ocr_section}"
+
+            obs = (
+                f"[SCREENSHOT {w}×{h} — 8×8 grid overlaid, image attached]\n"
+                f"OCR text positions (use these coords for precise clicks):\n"
+                f"{text_map}\n"
+                f"Examine the image and decide your next action."
             )
 
-            # Call vision model with the annotated image
-            vision_response = self.call_vision_fn(observation_prompt, b64)
-
-            # Emit vision response as a result event
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": vision_response[:1000]})
+                    self.event_cb("vision", {"text": f"{w}×{h} — {len(elements)} OCR elements"})
                 except Exception:
                     pass
 
-            return ToolResult(
-                True, vision_response, "",
-                {"screenshot": True, "ocr_count": len(elements)},
-            )
+            return ToolResult(True, obs, "", {"screenshot": True, "ocr_count": len(elements)})
         except Exception as e:
             if self.event_cb:
                 try:

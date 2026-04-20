@@ -2233,7 +2233,14 @@ Return JSON only:
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )
-            react_history.append({"role": "user", "content": obs})
+            # If a GUI screenshot tool set pending_image, inline it so the
+            # ReAct model sees the screen directly — no separate vision call needed.
+            _pending_img = getattr(self.tool_registry, "pending_image", None)
+            if _pending_img:
+                react_history.append({"role": "user", "content": obs, "images": [_pending_img]})
+                self.tool_registry.pending_image = None
+            else:
+                react_history.append({"role": "user", "content": obs})
 
             # Stagnation / forward progress enforcement
             _idle = iteration - _last_progress_iteration
