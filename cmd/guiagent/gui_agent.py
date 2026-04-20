@@ -97,7 +97,7 @@ def _call_vision(model: str, prompt: str, image_b64: str,
 # ── GUIAgent ──────────────────────────────────────────────────────────────────
 
 class GUIAgent:
-    MODEL = "qwen3.5:35b"
+    MODEL = "qwen3.6:35b-Grindlewalt"
 
     def __init__(self, display=":99", screen_w=1280, screen_h=720, event_cb=None):
         self.display = display
@@ -122,33 +122,83 @@ class GUIAgent:
         )
 
     def setup_display(self):
-        """Start Xvfb :99 if not already running, verify with xdotool."""
+        """Ensure the virtual display is up with a window manager and terminal.
+
+        Steps:
+          1. Start Xvfb :99 if the display isn't alive yet.
+          2. Start kwin_x11 if no window manager is running — needed so windows
+             can be moved/resized and don't stack behind each other.
+          3. Start xterm so there is always something visible on the screen
+             (avoids the pure-black-screen problem on a headless server).
+        """
         env = {**os.environ, "DISPLAY": self.display}
-        r = subprocess.run(
-            ["xdotool", "getdisplaygeometry"],
-            env=env, capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            print(f"  Display {self.display} active: {r.stdout.strip()}")
-            return
 
-        print(f"  Starting Xvfb {self.display} ({self.screen_w}×{self.screen_h})...")
-        subprocess.Popen(
-            ["Xvfb", self.display, "-screen", "0",
-             f"{self.screen_w}x{self.screen_h}x24"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1.5)
-
+        # ── 1. Xvfb ─────────────────────────────────────────────────────────
         r = subprocess.run(
             ["xdotool", "getdisplaygeometry"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
-            raise RuntimeError(
-                f"Xvfb failed to start on {self.display}: {r.stderr[:200]}"
+            print(f"  Starting Xvfb {self.display} ({self.screen_w}×{self.screen_h})...")
+            subprocess.Popen(
+                ["Xvfb", self.display, "-screen", "0",
+                 f"{self.screen_w}x{self.screen_h}x24"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-        print(f"  Xvfb ready: {r.stdout.strip()}")
+            time.sleep(1.5)
+            r = subprocess.run(
+                ["xdotool", "getdisplaygeometry"],
+                env=env, capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"Xvfb failed to start on {self.display}: {r.stderr[:200]}"
+                )
+            print(f"  Xvfb ready: {r.stdout.strip()}")
+        else:
+            print(f"  Display {self.display} active: {r.stdout.strip()}")
+
+        # ── 2. Window manager (kwin_x11, from installed KDE) ────────────────
+        # pgrep searches by process name, not display — good enough since this
+        # server only runs one virtual display.
+        wm_running = subprocess.run(
+            ["pgrep", "-x", "kwin_x11"],
+            capture_output=True,
+        ).returncode == 0
+
+        if not wm_running:
+            print("  Starting kwin_x11 window manager...")
+            subprocess.Popen(
+                ["kwin_x11"],
+                env={**env, "DISPLAY": self.display},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.2)
+            print("  kwin_x11 ready")
+        else:
+            print("  kwin_x11 already running")
+
+        # ── 3. xterm baseline ────────────────────────────────────────────────
+        # Always start a terminal so the display is never pitch-black.
+        # Uses a geometry that fills most of the virtual screen.
+        xterm_running = subprocess.run(
+            ["pgrep", "-x", "xterm"],
+            capture_output=True,
+        ).returncode == 0
+
+        if not xterm_running:
+            print("  Starting xterm...")
+            subprocess.Popen(
+                ["xterm", "-geometry", "155x42+20+20",
+                 "-bg", "black", "-fg", "white",
+                 "-fa", "Monospace", "-fs", "11"],
+                env={**env, "DISPLAY": self.display},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.8)
+            print("  xterm ready")
+        else:
+            print("  xterm already running")
 
     def run(self, task: str, max_iterations: int = 30) -> dict:
         """Run the GUI agent on a task. Returns run_react result dict."""

@@ -330,13 +330,13 @@ class JobRunner:
                         agent.react_trace = result.get('trace', [])
 
                     elif job.get('job_type') == 'gui_task':
-                        # GUI desktop automation job — runs via GUIAgent + qwen3.5:35b vision
+                        # GUI desktop automation job — runs via GUIAgent (qwen3.6:35b-Grindlewalt)
                         if not _GUI_AVAILABLE:
                             raise RuntimeError("gui_agent module not available")
                         gui = _GUIAgent()
                         gui.agent.current_job_id = job_id
                         result = gui.run(
-                            task=instruction,
+                            task=job['instruction'],
                             max_iterations=job.get('max_iterations', 30),
                         )
                         job['success'] = result.get('success', False)
