@@ -71,6 +71,9 @@ class GUIToolRegistry(ToolRegistry):
         # Counts consecutive zoom calls since the last click/screenshot.
         # When this hits 2 the model is told to stop seeking precision and just click.
         self._zooms_since_action = 0
+        # OCR elements from the last full screenshot, as raw pixel coords.
+        # Reused by _handle_zoom so we never OCR tiny crops (unreliable at <240px).
+        self._last_ocr_elements = []   # [{text, cx_px, cy_px}]
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -297,12 +300,22 @@ class GUIToolRegistry(ToolRegistry):
             self.pending_image  = self.screen.to_base64_model(panel, max_w=1280)
             self.pending_images = None   # not used for zoom anymore
 
-            # ── OCR on cropped region, remapped to zoom 16×16 space ───────────
-            elements = self.screen.ocr_elements(cropped)
-            for e in elements:
-                e["grid_x"] = round(e["cx"] / zoom_w * 16, 2)
-                e["grid_y"] = round(e["cy"] / zoom_h * 16, 2)
-            text_map = self.screen.build_text_map(elements)
+            # ── Reuse full-screenshot OCR — filter to zoom region ─────────────
+            # Never OCR the tiny crop — at 240×135px tesseract returns garbage.
+            # Instead filter the stored full-image elements (pixel coords) to
+            # those that fall inside the zoom box, then translate to zoom-space.
+            zoom_elements = []
+            for e in self._last_ocr_elements:
+                cx, cy = e["cx_px"], e["cy_px"]
+                if x_min <= cx <= x_max and y_min <= cy <= y_max:
+                    zoom_elements.append({
+                        "text":   e["text"],
+                        "cx":     cx - x_min,
+                        "cy":     cy - y_min,
+                        "grid_x": round((cx - x_min) / zoom_w * 16, 2),
+                        "grid_y": round((cy - y_min) / zoom_h * 16, 2),
+                    })
+            text_map = self.screen.build_text_map(zoom_elements)
 
             # Update zoom region AFTER all calculations
             self._zoom_region = (x_min, y_min, x_max, y_max)
@@ -353,8 +366,13 @@ class GUIToolRegistry(ToolRegistry):
             self.pending_image = self.screen.to_base64_model(grid_img, max_w=960)
 
             elements = self.screen.ocr_elements(img)
-            text_map = self.screen.build_text_map(elements)
             w, h = img.size
+            # Store with raw pixel coords so zoom can reuse without re-OCR'ing tiny crops
+            self._last_ocr_elements = [
+                {"text": e["text"], "cx_px": e["cx"], "cy_px": e["cy"]}
+                for e in elements
+            ]
+            text_map = self.screen.build_text_map(elements)
 
             cursor_note = ""
             if cursor:

@@ -536,15 +536,31 @@ class GUIAgent:
             self._inhibit_cookie = None
 
     def _heartbeat(self, stop_event: threading.Event):
-        """Layer 3: simulate user activity every 60s as belt-and-suspenders.
-        Uses xdg-screensaver reset which resets the idle timer without
-        moving the mouse or interfering with agent actions.
+        """Layer 3: simulate user activity every 45s as belt-and-suspenders.
+
+        Uses two methods that work without D-Bus (which isn't available in
+        the systemd service environment):
+        - xset s reset   — resets X11 screensaver idle timer (no D-Bus needed)
+        - 1px mouse wiggle — strongest possible signal; KDE cannot ignore it
         """
         env = {**os.environ, "DISPLAY": self.display}
-        while not stop_event.wait(60):
+        while not stop_event.wait(45):
             try:
+                # Reset X11 screensaver timer
                 subprocess.run(
-                    ["xdg-screensaver", "reset"],
+                    ["xset", "s", "reset"],
+                    env=env, capture_output=True, timeout=3,
+                )
+            except Exception:
+                pass
+            try:
+                # Micro mouse wiggle — 1px right then back; genuine activity signal
+                subprocess.run(
+                    ["xdotool", "mousemove_relative", "--", "1", "0"],
+                    env=env, capture_output=True, timeout=3,
+                )
+                subprocess.run(
+                    ["xdotool", "mousemove_relative", "--", "-1", "0"],
                     env=env, capture_output=True, timeout=3,
                 )
             except Exception:
