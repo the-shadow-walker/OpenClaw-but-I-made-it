@@ -450,6 +450,19 @@ class GUIAgent:
             # Headless display: ensure kwin + xterm are running
             self._ensure_headless_apps()
 
+        # Prevent display sleep/lock during agent run
+        try:
+            subprocess.run(
+                ["xset", "s", "off"],
+                env=env, capture_output=True, timeout=3,
+            )
+            subprocess.run(
+                ["xset", "-dpms"],
+                env=env, capture_output=True, timeout=3,
+            )
+        except Exception:
+            pass
+
     def _setup_headless(self):
         """Start Xvfb :99 + kwin_x11 + xterm from scratch."""
         env = {**os.environ, "DISPLAY": self.display}
