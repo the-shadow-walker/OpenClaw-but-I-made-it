@@ -68,6 +68,9 @@ class GUIToolRegistry(ToolRegistry):
         self._zoom_region = None
         # Tracks the last tool dispatched — used to block back-to-back screenshots
         self._last_tool_called = None
+        # Counts consecutive zoom calls since the last click/screenshot.
+        # When this hits 2 the model is told to stop seeking precision and just click.
+        self._zooms_since_action = 0
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -119,6 +122,20 @@ class GUIToolRegistry(ToolRegistry):
                     'wait {"seconds": 2} then screenshot.'
                 ),
                 {"consecutive_screenshot": True},
+            )
+
+        # Block excess zooming — 2 zooms in a row without clicking means stop fine-tuning and act
+        if tool == "zoom" and self._zooms_since_action >= 2:
+            return ToolResult(
+                False, "",
+                (
+                    "TOO MANY ZOOMS: you have zoomed twice without clicking anything. "
+                    "You are close enough — stop seeking perfection and click now. "
+                    "Use the OCR coordinates from the last zoom observation, "
+                    "do your X-pass then Y-pass mentally, and click. "
+                    "If you are genuinely lost, call screenshot to reset."
+                ),
+                {"too_many_zooms": True},
             )
 
         # Emit action event before execution (skip for screenshot — it emits its own)
@@ -289,23 +306,21 @@ class GUIToolRegistry(ToolRegistry):
 
             # Update zoom region AFTER all calculations
             self._zoom_region = (x_min, y_min, x_max, y_max)
+            self._zooms_since_action += 1
 
             obs = (
                 f"[ZOOM {zoom_w}×{zoom_h}px — full-screen center ({cx_fs:.2f},{cy_fs:.2f})]\n"
                 f"One image sent — LEFT panel: full screen with red box (spatial context).\n"
                 f"                 RIGHT panel: zoomed view with 16×16 sub-grid (click here).\n"
                 f"Sub-grid coords (0-16) auto-translate to full-screen for clicks.\n"
-                f"To zoom tighter: zoom {{\"x\": <sub-x>, \"y\": <sub-y>, \"w\": 0.5, \"h\": 0.5}}\n"
-                f"  (sub-x/y are in the RIGHT panel's 0-16 space — they auto-translate)\n"
                 f"Call screenshot to return to full-screen view.\n"
                 f"OCR in zoomed view (RIGHT panel coords):\n{text_map}\n"
                 f"\n"
                 f"══ VERIFY BEFORE CLICKING ══\n"
                 f"LEFT panel: is the red box over the CORRECT screen region?\n"
                 f"RIGHT panel: is your target element CLEARLY VISIBLE?\n"
-                f"  BOTH YES → crosshair-check coords → click\n"
-                f"  Wrong area → screenshot, re-identify, zoom elsewhere\n"
-                f"  Not visible → zoom tighter (smaller w/h) or different area"
+                f"  BOTH YES → crosshair-check coords → CLICK NOW (no more zooming)\n"
+                f"  Wrong area → screenshot, re-identify, zoom elsewhere"
             )
             if self.event_cb:
                 try:
@@ -317,8 +332,9 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 
     def _handle_screenshot(self, args):
-        self._zoom_region = None   # always exit zoom mode on full screenshot
-        self.pending_images = None  # clear dual-image from any prior zoom
+        self._zoom_region = None        # always exit zoom mode on full screenshot
+        self.pending_images = None      # clear dual-image from any prior zoom
+        self._zooms_since_action = 0    # reset zoom counter on full screenshot
         try:
             img = self.screen.capture()
             cursor = self.input_ctrl._last_click_px  # (px, py) or None
@@ -395,6 +411,7 @@ class GUIToolRegistry(ToolRegistry):
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             x, y = self._apply_zoom(x, y)
+            self._zooms_since_action = 0
             msg = self.input_ctrl.click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -410,6 +427,7 @@ class GUIToolRegistry(ToolRegistry):
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             x, y = self._apply_zoom(x, y)
+            self._zooms_since_action = 0
             msg = self.input_ctrl.double_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -425,6 +443,7 @@ class GUIToolRegistry(ToolRegistry):
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             x, y = self._apply_zoom(x, y)
+            self._zooms_since_action = 0
             msg = self.input_ctrl.right_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
