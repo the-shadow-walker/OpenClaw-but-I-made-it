@@ -206,22 +206,29 @@ class GUIToolRegistry(ToolRegistry):
 
     def _handle_zoom(self, args):
         try:
-            cx = float(args.get("x", 8.0))  # center in full-screen 16×16
+            cx = float(args.get("x", 8.0))
             cy = float(args.get("y", 8.0))
-            w  = float(args.get("w", 1.0))  # width  in grid cells (default 1 cell)
-            h  = float(args.get("h", 1.0))  # height in grid cells (default 1 cell)
+            w  = float(args.get("w", 1.0))
+            h  = float(args.get("h", 1.0))
 
             if not (0 <= cx <= 16 and 0 <= cy <= 16):
                 return ToolResult(False, "", "zoom center out of range (0-16)", {})
+
+            # ── Coordinate translation ─────────────────────────────────────────
+            # If already zoomed, the caller is using coords in the CURRENT zoom-space
+            # (0-16 of the cropped region), same as click/scroll do.
+            # Translate to full-screen before computing crop boundaries.
+            cx_fs, cy_fs = self._apply_zoom(cx, cy)
 
             img = self.screen.capture()
             sw, sh = img.size
             cell_w = sw / 16.0
             cell_h = sh / 16.0
 
-            # Compute crop boundaries
-            cx_px = cx / 16.0 * sw
-            cy_px = cy / 16.0 * sh
+            cx_px  = cx_fs / 16.0 * sw
+            cy_px  = cy_fs / 16.0 * sh
+
+            # w/h are still in grid-cell units of the FULL SCREEN grid
             x_min = max(0, int(cx_px - (w / 2.0) * cell_w))
             y_min = max(0, int(cy_px - (h / 2.0) * cell_h))
             x_max = min(sw, int(cx_px + (w / 2.0) * cell_w))
@@ -233,20 +240,23 @@ class GUIToolRegistry(ToolRegistry):
             zoom_w = x_max - x_min
             zoom_h = y_max - y_min
 
-            # ── Image 1: full screen with 16×16 grid + red box marking zoom region ──
-            cursor = self.input_ctrl._last_click_px
-            full_grid = self.screen.overlay_grid(img, cursor=cursor)
+            # ── Build full-screen context image with red box ───────────────────
+            cursor        = self.input_ctrl._last_click_px
+            full_grid     = self.screen.overlay_grid(img, cursor=cursor)
             full_with_box = self.screen.draw_zoom_overlay(full_grid, x_min, y_min, x_max, y_max)
 
-            # ── Image 2: zoomed region with its own 16×16 grid ──
-            cropped = img.crop((x_min, y_min, x_max, y_max))
+            # ── Build zoomed detail image ──────────────────────────────────────
+            cropped     = img.crop((x_min, y_min, x_max, y_max))
             zoom_cursor = None
-            lcp = cursor
-            if lcp and x_min <= lcp[0] <= x_max and y_min <= lcp[1] <= y_max:
-                zoom_cursor = (lcp[0] - x_min, lcp[1] - y_min)
+            if cursor and x_min <= cursor[0] <= x_max and y_min <= cursor[1] <= y_max:
+                zoom_cursor = (cursor[0] - x_min, cursor[1] - y_min)
             zoomed_grid = self.screen.overlay_grid(cropped, cursor=zoom_cursor)
 
-            # Send zoomed image to browser UI (for live display)
+            # ── Compose single side-by-side panel for the model ───────────────
+            # One image = reliable; two separate images risk the model ignoring one.
+            panel = self.screen.compose_zoom_panel(full_with_box, zoomed_grid, max_w=1280)
+
+            # Send zoomed view to browser UI (live display), panel to model
             b64_browser = self.screen.to_base64(zoomed_grid)
             if self.event_cb:
                 try:
@@ -254,41 +264,39 @@ class GUIToolRegistry(ToolRegistry):
                 except Exception:
                     pass
 
-            # Both images downscaled for model — [full_with_box, zoomed_grid]
-            self.pending_images = [
-                self.screen.to_base64_model(full_with_box, max_w=960),
-                self.screen.to_base64_model(zoomed_grid, max_w=960),
-            ]
-            self.pending_image = None  # clear single-image slot
+            self.pending_image  = self.screen.to_base64_model(panel, max_w=1280)
+            self.pending_images = None   # not used for zoom anymore
 
-            # OCR on cropped region, coords remapped to zoom 16×16 space
+            # ── OCR on cropped region, remapped to zoom 16×16 space ───────────
             elements = self.screen.ocr_elements(cropped)
             for e in elements:
                 e["grid_x"] = round(e["cx"] / zoom_w * 16, 2)
                 e["grid_y"] = round(e["cy"] / zoom_h * 16, 2)
             text_map = self.screen.build_text_map(elements)
 
+            # Update zoom region AFTER all calculations
             self._zoom_region = (x_min, y_min, x_max, y_max)
 
             obs = (
-                f"[ZOOM {zoom_w}×{zoom_h}px — centered at grid ({cx},{cy})]\n"
-                f"You are receiving TWO images:\n"
-                f"  IMAGE 1 — Full screen ({sw}×{sh}) with red box showing exactly where you zoomed.\n"
-                f"  IMAGE 2 — Zoomed view with a 16×16 sub-grid. Use these coords to click.\n"
-                f"Clicks in this sub-grid auto-translate to full-screen. Call screenshot to exit zoom.\n"
-                f"OCR text in zoomed view (sub-grid coords):\n{text_map}\n"
+                f"[ZOOM {zoom_w}×{zoom_h}px — full-screen center ({cx_fs:.2f},{cy_fs:.2f})]\n"
+                f"One image sent — LEFT panel: full screen with red box (spatial context).\n"
+                f"                 RIGHT panel: zoomed view with 16×16 sub-grid (click here).\n"
+                f"Sub-grid coords (0-16) auto-translate to full-screen for clicks.\n"
+                f"To zoom tighter: zoom {{\"x\": <sub-x>, \"y\": <sub-y>, \"w\": 0.5, \"h\": 0.5}}\n"
+                f"  (sub-x/y are in the RIGHT panel's 0-16 space — they auto-translate)\n"
+                f"Call screenshot to return to full-screen view.\n"
+                f"OCR in zoomed view (RIGHT panel coords):\n{text_map}\n"
                 f"\n"
                 f"══ VERIFY BEFORE CLICKING ══\n"
-                f"Look at IMAGE 1: is the red box around the CORRECT region of the screen?\n"
-                f"Look at IMAGE 2: is your target element CLEARLY VISIBLE?\n"
-                f"  BOTH YES → click using sub-grid coords from IMAGE 2\n"
-                f"             (zoom tighter if you need more precision: smaller w/h)\n"
-                f"  NO (wrong area) → call screenshot, re-identify the target, zoom elsewhere\n"
-                f"  NO (element not visible) → zoom a different area or zoom tighter"
+                f"LEFT panel: is the red box over the CORRECT screen region?\n"
+                f"RIGHT panel: is your target element CLEARLY VISIBLE?\n"
+                f"  BOTH YES → crosshair-check coords → click\n"
+                f"  Wrong area → screenshot, re-identify, zoom elsewhere\n"
+                f"  Not visible → zoom tighter (smaller w/h) or different area"
             )
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — {len(elements)} OCR — dual-image"})
+                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — panel — {len(elements)} OCR"})
                 except Exception:
                     pass
             return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(elements)})

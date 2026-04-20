@@ -184,6 +184,40 @@ class GUIScreen:
 
         return img
 
+    def compose_zoom_panel(self, full_with_box, zoomed_grid, max_w=1280):
+        """Compose a single side-by-side image: [FULL SCREEN | ZOOMED VIEW].
+
+        Returns one PIL Image with labeled panels so the model always sees
+        both the spatial context and the precision detail in a single frame.
+        """
+        divider = 4
+        label_h = 18
+        left_w  = int(max_w * 0.62)
+        right_w = max_w - left_w - divider
+
+        fw, fh = full_with_box.size
+        left  = full_with_box.resize((left_w,  int(fh * left_w  / fw)),  Image.LANCZOS)
+        zw, zh = zoomed_grid.size
+        right = zoomed_grid.resize((right_w, int(zh * right_w / zw)), Image.LANCZOS)
+
+        total_h = label_h + max(left.height, right.height)
+        canvas  = Image.new("RGB", (max_w, total_h), (20, 20, 20))
+        draw    = ImageDraw.Draw(canvas)
+
+        # Label bar — left
+        draw.rectangle([0, 0, left_w - 1, label_h - 1], fill=(30, 30, 70))
+        draw.text((4, 3), "IMAGE 1 — FULL SCREEN  (red box = zoomed region)", fill=(180, 180, 255))
+        # Label bar — right
+        draw.rectangle([left_w + divider, 0, max_w - 1, label_h - 1], fill=(30, 60, 30))
+        draw.text((left_w + divider + 4, 3), "IMAGE 2 — ZOOMED VIEW  (use these coords to click)", fill=(180, 255, 180))
+
+        canvas.paste(left,  (0,            label_h))
+        canvas.paste(right, (left_w + divider, label_h))
+        # Divider line
+        draw.rectangle([left_w, 0, left_w + divider - 1, total_h], fill=(220, 50, 50))
+
+        return canvas
+
     def to_base64(self, img):
         """Encode PIL Image as base64 PNG string (full resolution)."""
         buf = io.BytesIO()

@@ -132,18 +132,21 @@ File manager / terminal:
 NEVER click directly from a full-screen view. Every click requires zoom first.
 
 REQUIRED FLOW:
-  1. screenshot → identify the rough area where the target lives (note grid coords)
-  2. zoom {{"x": <cx>, "y": <cy>, "w": 2, "h": 2}}
-       → First zoom. Read the VERIFY prompt in the observation:
-         • Target VISIBLE → proceed to step 3
-         • Target NOT VISIBLE → screenshot, re-identify, zoom a different area
-  3. zoom {{"x": <cx2>, "y": <cy2>, "w": 0.5, "h": 0.5}}
-       → Second zoom (tighter). Read the VERIFY prompt again:
-         • Target CLEARLY VISIBLE → run the CROSSHAIR CHECK (see below), then click
-         • Not clear enough → zoom tighter (w=0.3, h=0.3)
-  4. CROSSHAIR CHECK → verify x (vertical line through center) and y (horizontal
-       line through center) independently before committing coordinates
-  5. click / double_click / right_click → ONLY after crosshair check confirms center
+  1. screenshot → identify the rough region where the target lives
+  2. zoom {{"x": <cx>, "y": <cy>, "w": 2, "h": 2}}   ← full-screen 0-16 coords
+       You receive ONE image with two labeled panels:
+         LEFT  — full screen with a red box showing exactly where you zoomed
+         RIGHT — zoomed view with its own 16×16 sub-grid
+       Verify: LEFT box over correct region? RIGHT panel shows the target?
+         • YES to both → proceed to step 3 or click directly
+         • NO (wrong area) → screenshot, re-identify, try different coords
+  3. zoom {{"x": <rx>, "y": <ry>, "w": 0.5, "h": 0.5}}  ← RIGHT panel 0-16 coords
+       Second zoom uses RIGHT panel coords (auto-translated to full-screen).
+       Repeat verify: LEFT box correct? RIGHT panel shows target clearly?
+         • YES → CROSSHAIR CHECK → click
+         • NO → zoom tighter or screenshot to reset
+  4. CROSSHAIR CHECK (see below) → verify x and y independently
+  5. click / double_click / right_click → sub-grid coords from the RIGHT panel
 
   After click: screenshot → verify result. If missed → start over from step 1.
   After 3 failed clicks: switch strategy (keyboard shortcut, Tab+Enter, cmd).
@@ -247,12 +250,14 @@ Browser (Brave):
 NEVER click directly from a full-screen view. Every click requires zoom first.
 
 REQUIRED FLOW:
-  1. screenshot → rough area identified
-  2. zoom {{"x": cx, "y": cy, "w": 2, "h": 2}} → VERIFY target visible?
-       YES → step 3    NO → screenshot, re-identify, zoom elsewhere
-  3. zoom {{"x": cx2, "y": cy2, "w": 0.5, "h": 0.5}} → tighter zoom → VERIFY?
-       YES → click in sub-grid    NO → zoom tighter
-  4. click {{"x": ..., "y": ...}} → only after zoom confirms target
+  1. screenshot → identify rough region
+  2. zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}  ← full-screen coords
+       ONE image, two panels: LEFT=full screen+red box, RIGHT=zoomed sub-grid
+       Verify LEFT box correct + RIGHT shows target?
+       YES → step 3 or click    NO → screenshot and re-identify
+  3. zoom {{"x": rx, "y": ry, "w": 0.5, "h": 0.5}}  ← RIGHT panel coords (auto-translate)
+       Verify again: YES → crosshair check → click    NO → zoom tighter/elsewhere
+  4. click sub-grid coords from RIGHT panel (auto-translate to full-screen)
   5. screenshot → verify. Miss → back to step 1.
   Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
