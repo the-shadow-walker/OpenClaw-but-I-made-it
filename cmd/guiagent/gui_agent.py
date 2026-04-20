@@ -49,17 +49,9 @@ The screen is divided into a 16×16 grid. top-left=(0,0), bottom-right=(16,16).
 Decimals required for precision: (7.5, 2.4) not (7, 2).
 Column 0=left edge → Column 16=right edge; Row 0=top → Row 16=bottom
 
-Approximate KDE Plasma landmarks at 1920×1080:
-  KDE taskbar (bottom panel)  ≈ y=15.3 to y=16.0
-  App launcher button         ≈ (0.3, 15.7)
-  Desktop body                ≈ (0.0, 0.0) to (16.0, 15.3)
-  Browser address bar         ≈ (8.0, 0.9) [when browser is focused]
-  Browser close button        ≈ (15.9, 0.3)
-
-OCR TEXT POSITIONS (read every screenshot):
-  "File"     @ grid 0.80, 0.20   ← click x=0.80, y=0.20
-  "http://…" @ grid 8.00, 0.90
-ALWAYS use OCR coordinates for text elements — they are pixel-accurate.
+OCR TEXT POSITIONS (read every screenshot — these are pixel-accurate):
+ALWAYS use the grid coordinates from OCR output to click text elements.
+Never invent or guess coordinates — take a screenshot first.
 
 HOW TO OPEN A WEBSITE (PREFERRED — use launch tool):
   launch {{"command": "brave-browser https://www.youtube.com"}}
@@ -126,15 +118,9 @@ WHAT YOU CAN DO:
 COORDINATE SYSTEM — 16×16 GRID:
 top-left=(0,0), bottom-right=(16,16). Decimals required: (7.5, 2.4).
 
-Approximate landmarks at 1280×720:
-  xterm window body         ≈ (0.2, 0.2) to (15.8, 15.0)
-  xterm text/prompt area    ≈ (1.0, 8.0)
-  browser address bar       ≈ (8.0, 0.9)  [after browser opens]
-  browser close button      ≈ (15.7, 0.3)
-
-OCR TEXT POSITIONS:
-  "File"     @ grid 0.40, 0.10   ← click x=0.40, y=0.10
-ALWAYS use OCR coordinates for text — pixel-accurate.
+OCR TEXT POSITIONS (read every screenshot — these are pixel-accurate):
+ALWAYS use the grid coordinates from OCR output to click text elements.
+Never invent or guess coordinates — take a screenshot first.
 
 HOW TO OPEN A WEBSITE (PREFERRED — use launch tool):
   launch {{"command": "brave-browser https://www.youtube.com"}}
