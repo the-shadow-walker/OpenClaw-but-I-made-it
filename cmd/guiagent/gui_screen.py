@@ -1,5 +1,5 @@
 """
-gui_screen.py — screenshot capture, 8×8 grid overlay, OCR, base64 encoding.
+gui_screen.py — screenshot capture, 16×16 grid overlay, OCR, base64 encoding.
 """
 
 import base64
@@ -42,7 +42,7 @@ class GUIScreen:
             raise RuntimeError(f"Screenshot failed: {r.stderr.decode()[:200]}")
         return Image.open(path).convert("RGB")
 
-    def overlay_grid(self, img, n=8):
+    def overlay_grid(self, img, n=16):
         """Draw labeled n×n grid on a copy of img. Returns new PIL Image."""
         img = img.copy()
         draw = ImageDraw.Draw(img)
@@ -101,8 +101,8 @@ class GUIScreen:
             bh = data["height"][i]
             cx = x + bw / 2
             cy = y + bh / 2
-            grid_x = round(cx / w * 8, 2)
-            grid_y = round(cy / h * 8, 2)
+            grid_x = round(cx / w * 16, 2)
+            grid_y = round(cy / h * 16, 2)
             elements.append({
                 "text": text,
                 "cx": cx,

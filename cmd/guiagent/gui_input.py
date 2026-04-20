@@ -14,9 +14,9 @@ class GUIInput:
         self.screen_h = screen_h
 
     def _grid_to_px(self, gx, gy):
-        """Convert 8×8 grid coordinates to pixel coordinates."""
-        px = int((float(gx) / 8.0) * self.screen_w)
-        py = int((float(gy) / 8.0) * self.screen_h)
+        """Convert 16×16 grid coordinates to pixel coordinates."""
+        px = int((float(gx) / 16.0) * self.screen_w)
+        py = int((float(gy) / 16.0) * self.screen_h)
         px = max(0, min(self.screen_w - 1, px))
         py = max(0, min(self.screen_h - 1, py))
         return px, py

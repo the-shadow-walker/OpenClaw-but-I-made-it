@@ -3,6 +3,8 @@ gui_tools.py — GUIToolRegistry extending ToolRegistry with GUI automation tool
 """
 
 import json
+import os
+import subprocess
 import time
 
 from react_tools import ToolRegistry, ToolResult
@@ -11,6 +13,7 @@ from gui_input import GUIInput
 
 
 GUI_TOOL_SCHEMAS = {
+    "launch":       '  launch        — {"command": str}  # run a shell command on the server (e.g. open a browser/URL)',
     "screenshot":   '  screenshot    — {}',
     "click":        '  click         — {"x": float, "y": float}',
     "double_click": '  double_click  — {"x": float, "y": float}',
@@ -34,7 +37,7 @@ class GUIToolRegistry(ToolRegistry):
     """
 
     GUI_TOOL_NAMES = {
-        "screenshot", "click", "double_click", "right_click",
+        "launch", "screenshot", "click", "double_click", "right_click",
         "type", "key", "scroll", "drag", "wait", "finish",
     }
 
@@ -100,6 +103,7 @@ class GUIToolRegistry(ToolRegistry):
                 pass
 
         handlers = {
+            "launch":       self._handle_launch,
             "screenshot":   self._handle_screenshot,
             "click":        self._handle_click,
             "double_click": self._handle_double_click,
@@ -128,6 +132,23 @@ class GUIToolRegistry(ToolRegistry):
         return result
 
     # ── GUI tool handlers ────────────────────────────────────────────────────
+
+    def _handle_launch(self, args):
+        try:
+            command = str(args.get("command", "")).strip()
+            if not command:
+                return ToolResult(False, "", "launch requires 'command'", {})
+            env = {**os.environ, "DISPLAY": self.input_ctrl.display}
+            xauth = os.path.expanduser("~/.Xauthority")
+            if os.path.exists(xauth):
+                env["XAUTHORITY"] = xauth
+            proc = subprocess.Popen(
+                command, shell=True, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return ToolResult(True, f"Launched: {command} (pid {proc.pid})", "", {"pid": proc.pid})
+        except Exception as e:
+            return ToolResult(False, "", f"Launch failed: {e}", {})
 
     def _handle_screenshot(self, args):
         try:
@@ -176,8 +197,8 @@ class GUIToolRegistry(ToolRegistry):
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))
-            if not (0 <= x <= 8 and 0 <= y <= 8):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–8)", {})
+            if not (0 <= x <= 16 and 0 <= y <= 16):
+                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             msg = self.input_ctrl.click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -187,8 +208,8 @@ class GUIToolRegistry(ToolRegistry):
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))
-            if not (0 <= x <= 8 and 0 <= y <= 8):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y}", {})
+            if not (0 <= x <= 16 and 0 <= y <= 16):
+                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             msg = self.input_ctrl.double_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -198,8 +219,8 @@ class GUIToolRegistry(ToolRegistry):
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))
-            if not (0 <= x <= 8 and 0 <= y <= 8):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y}", {})
+            if not (0 <= x <= 16 and 0 <= y <= 16):
+                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
             msg = self.input_ctrl.right_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -242,8 +263,8 @@ class GUIToolRegistry(ToolRegistry):
             x2 = float(args.get("x2", 0))
             y2 = float(args.get("y2", 0))
             for coord, val in [("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)]:
-                if not (0 <= val <= 8):
-                    return ToolResult(False, "", f"{coord}={val} out of range (0–8)", {})
+                if not (0 <= val <= 16):
+                    return ToolResult(False, "", f"{coord}={val} out of range (0–16)", {})
             msg = self.input_ctrl.drag(x1, y1, x2, y2)
             return ToolResult(True, msg, "", {})
         except Exception as e:

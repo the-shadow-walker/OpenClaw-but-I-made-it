@@ -1,7 +1,7 @@
 """
 gui_agent.py — GUIAgent: vision-based desktop automation powered by qwen3.6:35b-Grindlewalt.
 
-The agent takes screenshots, overlays an 8×8 grid, runs OCR for text positions,
+The agent takes screenshots, overlays a 16×16 grid, runs OCR for text positions,
 sends the annotated image to the vision model (Ollama vision API), receives a JSON action,
 executes it via xdotool, and loops.
 """
@@ -44,27 +44,30 @@ WHAT YOU CAN DO:
 • Use keyboard shortcuts: Ctrl+L (browser address bar), Ctrl+T (new tab), Super (launcher),
   Alt+F2 (KRunner run dialog), Ctrl+Alt+T (terminal shortcut if configured)
 
-COORDINATE SYSTEM — 8×8 GRID:
-The screen is divided into an 8×8 grid. top-left=(0,0), bottom-right=(8,8).
-Decimals required for precision: (3.5, 1.2) not (3, 1).
-Column 0=left edge → Column 8=right edge; Row 0=top → Row 8=bottom
+COORDINATE SYSTEM — 16×16 GRID:
+The screen is divided into a 16×16 grid. top-left=(0,0), bottom-right=(16,16).
+Decimals required for precision: (7.5, 2.4) not (7, 2).
+Column 0=left edge → Column 16=right edge; Row 0=top → Row 16=bottom
 
 Approximate KDE Plasma landmarks at 1920×1080:
-  KDE taskbar (bottom panel)  ≈ y=7.7 to y=8.0
-  App launcher button         ≈ (0.15, 7.85)
-  Desktop body                ≈ (0.0, 0.0) to (8.0, 7.7)
-  Browser address bar         ≈ (4.0, 0.5) [when browser is focused]
-  Browser close button        ≈ (7.9, 0.15)
+  KDE taskbar (bottom panel)  ≈ y=15.3 to y=16.0
+  App launcher button         ≈ (0.3, 15.7)
+  Desktop body                ≈ (0.0, 0.0) to (16.0, 15.3)
+  Browser address bar         ≈ (8.0, 0.9) [when browser is focused]
+  Browser close button        ≈ (15.9, 0.3)
 
 OCR TEXT POSITIONS (read every screenshot):
-  "Firefox"  @ grid 0.40, 0.10   ← click x=0.40, y=0.10
-  "http://…" @ grid 4.00, 0.50
+  "File"     @ grid 0.80, 0.20   ← click x=0.80, y=0.20
+  "http://…" @ grid 8.00, 0.90
 ALWAYS use OCR coordinates for text elements — they are pixel-accurate.
 
-HOW TO OPEN A BROWSER:
-Option A: Alt+F2 → type "brave-browser" → Enter
-Option B: Click app launcher → search "Brave" → click result
-Option C: If a terminal is open: type "brave-browser &" → Enter
+HOW TO OPEN A WEBSITE (PREFERRED — use launch tool):
+  launch {{"command": "brave-browser https://www.youtube.com"}}
+  Then: wait {{"seconds": 4}} → screenshot → navigate with Ctrl+L
+
+HOW TO OPEN A BROWSER (if launch doesn't work):
+Option A: key {{"combo": "super"}} → type "brave-browser" → Enter
+Option B: Alt+F2 → type "brave-browser" → Enter
 
 HOW TO NAVIGATE A BROWSER:
 After opening: key {{"combo": "ctrl+l"}} → type URL → key {{"combo": "Return"}}
@@ -120,27 +123,29 @@ WHAT YOU CAN DO:
   (Brave is installed — do NOT use firefox or chromium.)
 • Run any GUI app: type its name in xterm, press Enter.
 
-COORDINATE SYSTEM — 8×8 GRID:
-top-left=(0,0), bottom-right=(8,8). Decimals required: (3.5, 1.2).
+COORDINATE SYSTEM — 16×16 GRID:
+top-left=(0,0), bottom-right=(16,16). Decimals required: (7.5, 2.4).
 
 Approximate landmarks at 1280×720:
-  xterm window body         ≈ (0.1, 0.1) to (7.9, 7.5)
-  xterm text/prompt area    ≈ (0.5, 4.0)
-  browser address bar       ≈ (4.0, 0.5)  [after browser opens]
-  browser close button      ≈ (7.85, 0.15)
+  xterm window body         ≈ (0.2, 0.2) to (15.8, 15.0)
+  xterm text/prompt area    ≈ (1.0, 8.0)
+  browser address bar       ≈ (8.0, 0.9)  [after browser opens]
+  browser close button      ≈ (15.7, 0.3)
 
 OCR TEXT POSITIONS:
   "File"     @ grid 0.40, 0.10   ← click x=0.40, y=0.10
 ALWAYS use OCR coordinates for text — pixel-accurate.
 
-HOW TO USE XTERM:
+HOW TO OPEN A WEBSITE (PREFERRED — use launch tool):
+  launch {{"command": "brave-browser https://www.youtube.com"}}
+  Then: wait {{"seconds": 4}} → screenshot → navigate with Ctrl+L
+
+HOW TO USE XTERM (fallback):
 1. Click inside xterm body to focus it
 2. Type command, press Enter
 3. Background apps: "brave-browser &" (not blocking)
-4. Screenshot to verify result
 
 HOW TO NAVIGATE A BROWSER:
-Launch: type "brave-browser &" in xterm → Enter → wait 3s → screenshot
 Navigate: key {{"combo": "ctrl+l"}} → type URL → key {{"combo": "Return"}}
 
 ═══════════════════════ TASK & BUDGET ═══════════════════════
