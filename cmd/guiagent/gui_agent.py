@@ -349,6 +349,7 @@ class GUIAgent:
         self.display = display
         self.event_cb = event_cb
         self.stop_event = stop_event
+        self._inhibit_cookie = None   # D-Bus screensaver inhibit cookie
 
         # Headless virtual display uses different resolution
         if display == ":99":
@@ -450,18 +451,6 @@ class GUIAgent:
             # Headless display: ensure kwin + xterm are running
             self._ensure_headless_apps()
 
-        # Prevent display sleep/lock during agent run
-        try:
-            subprocess.run(
-                ["xset", "s", "off"],
-                env=env, capture_output=True, timeout=3,
-            )
-            subprocess.run(
-                ["xset", "-dpms"],
-                env=env, capture_output=True, timeout=3,
-            )
-        except Exception:
-            pass
 
     def _setup_headless(self):
         """Start Xvfb :99 + kwin_x11 + xterm from scratch."""
@@ -509,9 +498,62 @@ class GUIAgent:
             time.sleep(0.8)
             print("  xterm ready")
 
+    def _inhibit_sleep(self):
+        """Disable screensaver + power management across all three layers:
+        X11 (xset), KDE/freedesktop D-Bus inhibit, and xdg-screensaver.
+        Stores D-Bus cookie in self._inhibit_cookie for cleanup.
+        """
+        env = {**os.environ, "DISPLAY": self.display}
+        # Layer 1: X11 screensaver + DPMS
+        for args in [["xset", "s", "off"], ["xset", "-dpms"]]:
+            try:
+                subprocess.run(args, env=env, capture_output=True, timeout=3)
+            except Exception:
+                pass
+        # Layer 2: KDE/freedesktop D-Bus — returns cookie for UnInhibit
+        try:
+            r = subprocess.run(
+                ["qdbus", "org.freedesktop.ScreenSaver", "/ScreenSaver",
+                 "Inhibit", "gui-agent", "Automation in progress"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                self._inhibit_cookie = int(r.stdout.strip())
+        except Exception:
+            pass
+
+    def _uninhibit_sleep(self):
+        """Release the D-Bus screensaver inhibit lock."""
+        if self._inhibit_cookie is not None:
+            try:
+                subprocess.run(
+                    ["qdbus", "org.freedesktop.ScreenSaver", "/ScreenSaver",
+                     "UnInhibit", str(self._inhibit_cookie)],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+            self._inhibit_cookie = None
+
+    def _heartbeat(self, stop_event: threading.Event):
+        """Layer 3: simulate user activity every 60s as belt-and-suspenders.
+        Uses xdg-screensaver reset which resets the idle timer without
+        moving the mouse or interfering with agent actions.
+        """
+        env = {**os.environ, "DISPLAY": self.display}
+        while not stop_event.wait(60):
+            try:
+                subprocess.run(
+                    ["xdg-screensaver", "reset"],
+                    env=env, capture_output=True, timeout=3,
+                )
+            except Exception:
+                pass
+
     def run(self, task: str, max_iterations: int = 30) -> dict:
         """Run the GUI agent on a task. Returns run_react result dict."""
         self.setup_display()
+        self._inhibit_sleep()
 
         # Fresh log for each job
         try:
@@ -548,6 +590,15 @@ class GUIAgent:
             )
             watcher.start()
 
+        # Heartbeat: resets idle timer every 60s so display never sleeps
+        stop_heartbeat = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat,
+            args=(stop_heartbeat,),
+            daemon=True,
+        )
+        heartbeat.start()
+
         try:
             result = self.agent.run_react(
                 task,
@@ -556,6 +607,8 @@ class GUIAgent:
             )
         finally:
             stop_watcher.set()
+            stop_heartbeat.set()
+            self._uninhibit_sleep()
 
         _gui_log({
             "type": "job_end",
