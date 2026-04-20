@@ -13,7 +13,7 @@ from gui_input import GUIInput
 
 
 GUI_TOOL_SCHEMAS = {
-    "launch":       '  launch        — {"command": str}  # run a shell command on the server (e.g. open a browser/URL)',
+    "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background (e.g. brave-browser https://url &)',
     "screenshot":   '  screenshot    — {}',
     "click":        '  click         — {"x": float, "y": float}',
     "double_click": '  double_click  — {"x": float, "y": float}',
@@ -37,7 +37,7 @@ class GUIToolRegistry(ToolRegistry):
     """
 
     GUI_TOOL_NAMES = {
-        "launch", "screenshot", "click", "double_click", "right_click",
+        "cmd", "screenshot", "click", "double_click", "right_click",
         "type", "key", "scroll", "drag", "wait", "finish",
     }
 
@@ -103,7 +103,7 @@ class GUIToolRegistry(ToolRegistry):
                 pass
 
         handlers = {
-            "launch":       self._handle_launch,
+            "cmd":          self._handle_cmd,
             "screenshot":   self._handle_screenshot,
             "click":        self._handle_click,
             "double_click": self._handle_double_click,
@@ -133,22 +133,31 @@ class GUIToolRegistry(ToolRegistry):
 
     # ── GUI tool handlers ────────────────────────────────────────────────────
 
-    def _handle_launch(self, args):
+    def _handle_cmd(self, args):
         try:
             command = str(args.get("command", "")).strip()
             if not command:
-                return ToolResult(False, "", "launch requires 'command'", {})
+                return ToolResult(False, "", "cmd requires 'command'", {})
             env = {**os.environ, "DISPLAY": self.input_ctrl.display}
             xauth = os.path.expanduser("~/.Xauthority")
             if os.path.exists(xauth):
                 env["XAUTHORITY"] = xauth
-            proc = subprocess.Popen(
+            result = subprocess.run(
                 command, shell=True, env=env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=60,
             )
-            return ToolResult(True, f"Launched: {command} (pid {proc.pid})", "", {"pid": proc.pid})
+            output = (result.stdout + result.stderr).strip()
+            success = result.returncode == 0
+            return ToolResult(
+                success,
+                output[:2000] if output else "(no output)",
+                "" if success else f"exit code {result.returncode}",
+                {"returncode": result.returncode},
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult(False, "", "Command timed out after 60s (append & to run in background)", {})
         except Exception as e:
-            return ToolResult(False, "", f"Launch failed: {e}", {})
+            return ToolResult(False, "", f"cmd failed: {e}", {})
 
     def _handle_screenshot(self, args):
         try:
