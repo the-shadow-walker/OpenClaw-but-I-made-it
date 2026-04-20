@@ -2318,10 +2318,16 @@ Return JSON only:
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )
-            # If a GUI screenshot tool set pending_image, inline it so the
-            # ReAct model sees the screen directly — no separate vision call needed.
-            _pending_img = getattr(self.tool_registry, "pending_image", None)
-            if _pending_img:
+            # If a GUI zoom tool set pending_images (list), inline both images so the
+            # model sees full-screen context + zoomed detail simultaneously.
+            # Otherwise fall back to single pending_image (screenshot tool).
+            _pending_imgs = getattr(self.tool_registry, "pending_images", None)
+            _pending_img  = getattr(self.tool_registry, "pending_image",  None)
+            if _pending_imgs:
+                react_history.append({"role": "user", "content": obs, "images": _pending_imgs})
+                self.tool_registry.pending_images = None
+                self.tool_registry.pending_image  = None
+            elif _pending_img:
                 react_history.append({"role": "user", "content": obs, "images": [_pending_img]})
                 self.tool_registry.pending_image = None
             else:

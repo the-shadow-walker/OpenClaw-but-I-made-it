@@ -140,6 +140,50 @@ class GUIScreen:
             lines.append(f'  "{e["text"]}"  @ grid {e["grid_x"]}, {e["grid_y"]}')
         return "\n".join(lines)
 
+    def draw_zoom_overlay(self, img, x_min, y_min, x_max, y_max):
+        """Draw a thick red rectangle + label on img showing the zoomed region.
+
+        Returns a copy of img with the overlay applied.
+        Used to give the model spatial context when a zoom is active.
+        """
+        img = img.copy()
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+
+        # Thick red rectangle border
+        border = max(3, int(min(w, h) / 200))
+        for i in range(border):
+            draw.rectangle(
+                [x_min - i, y_min - i, x_max + i, y_max + i],
+                outline=(255, 0, 0),
+            )
+
+        # Semi-transparent red fill (draw a thin overlay by drawing many small lines)
+        # Simple approach: just a bright corner marker and "ZOOMED" label
+        arm = max(12, int(min(w, h) / 60))
+        corners = [
+            (x_min, y_min), (x_max, y_min),
+            (x_min, y_max), (x_max, y_max),
+        ]
+        for cx, cy in corners:
+            # Horizontal arm
+            x0 = cx - arm if cx == x_max else cx
+            x1 = cx + arm if cx == x_min else cx
+            draw.line([(x0, cy), (x1, cy)], fill=(255, 255, 0), width=border + 1)
+            # Vertical arm
+            y0 = cy - arm if cy == y_max else cy
+            y1 = cy + arm if cy == y_min else cy
+            draw.line([(cx, y0), (cx, y1)], fill=(255, 255, 0), width=border + 1)
+
+        # "ZOOMED" label just above the box
+        label = "ZOOMED VIEW"
+        lx = max(2, x_min)
+        ly = max(0, y_min - 14)
+        draw.rectangle([lx - 2, ly - 2, lx + 90, ly + 12], fill=(200, 0, 0))
+        draw.text((lx, ly), label, fill=(255, 255, 255))
+
+        return img
+
     def to_base64(self, img):
         """Encode PIL Image as base64 PNG string (full resolution)."""
         buf = io.BytesIO()

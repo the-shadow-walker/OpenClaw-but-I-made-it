@@ -59,6 +59,9 @@ class GUIToolRegistry(ToolRegistry):
         # Set by _handle_screenshot; picked up by ollama_agent_core.run_react
         # to inline the image into the next ReAct model call (no separate vision call).
         self.pending_image = None
+        # Set by _handle_zoom with [full_with_red_box, zoomed_grid] — two images so
+        # the model sees both spatial context (full) and precision detail (zoomed).
+        self.pending_images = None
         # Set by _handle_zoom: (x_min_px, y_min_px, x_max_px, y_max_px) of the zoomed region.
         # While set, click/scroll coords are auto-translated from zoom-space to full-screen.
         # Cleared by _handle_screenshot.
@@ -227,27 +230,39 @@ class GUIToolRegistry(ToolRegistry):
             if x_max - x_min < 4 or y_max - y_min < 4:
                 return ToolResult(False, "", "zoom region too small — use larger w/h", {})
 
-            cropped = img.crop((x_min, y_min, x_max, y_max))
-            # Translate last-click pixel to crop-space if it falls within the region
-            zoom_cursor = None
-            lcp = self.input_ctrl._last_click_px
-            if lcp and x_min <= lcp[0] <= x_max and y_min <= lcp[1] <= y_max:
-                zoom_cursor = (lcp[0] - x_min, lcp[1] - y_min)
-            grid_img = self.screen.overlay_grid(cropped, cursor=zoom_cursor)  # 16×16 on cropped region
-
-            # Full-res to browser, downscaled to model
-            b64_full = self.screen.to_base64(grid_img)
-            if self.event_cb:
-                try:
-                    self.event_cb("screenshot", {"image": b64_full})
-                except Exception:
-                    pass
-            self.pending_image = self.screen.to_base64_model(grid_img, max_w=960)
-
-            # OCR with coords remapped to zoom 16×16 space
-            elements = self.screen.ocr_elements(cropped)
             zoom_w = x_max - x_min
             zoom_h = y_max - y_min
+
+            # ── Image 1: full screen with 16×16 grid + red box marking zoom region ──
+            cursor = self.input_ctrl._last_click_px
+            full_grid = self.screen.overlay_grid(img, cursor=cursor)
+            full_with_box = self.screen.draw_zoom_overlay(full_grid, x_min, y_min, x_max, y_max)
+
+            # ── Image 2: zoomed region with its own 16×16 grid ──
+            cropped = img.crop((x_min, y_min, x_max, y_max))
+            zoom_cursor = None
+            lcp = cursor
+            if lcp and x_min <= lcp[0] <= x_max and y_min <= lcp[1] <= y_max:
+                zoom_cursor = (lcp[0] - x_min, lcp[1] - y_min)
+            zoomed_grid = self.screen.overlay_grid(cropped, cursor=zoom_cursor)
+
+            # Send zoomed image to browser UI (for live display)
+            b64_browser = self.screen.to_base64(zoomed_grid)
+            if self.event_cb:
+                try:
+                    self.event_cb("screenshot", {"image": b64_browser})
+                except Exception:
+                    pass
+
+            # Both images downscaled for model — [full_with_box, zoomed_grid]
+            self.pending_images = [
+                self.screen.to_base64_model(full_with_box, max_w=960),
+                self.screen.to_base64_model(zoomed_grid, max_w=960),
+            ]
+            self.pending_image = None  # clear single-image slot
+
+            # OCR on cropped region, coords remapped to zoom 16×16 space
+            elements = self.screen.ocr_elements(cropped)
             for e in elements:
                 e["grid_x"] = round(e["cx"] / zoom_w * 16, 2)
                 e["grid_y"] = round(e["cy"] / zoom_h * 16, 2)
@@ -256,21 +271,24 @@ class GUIToolRegistry(ToolRegistry):
             self._zoom_region = (x_min, y_min, x_max, y_max)
 
             obs = (
-                f"[ZOOM {zoom_w}×{zoom_h}px — 16×16 sub-grid — centered at ({cx},{cy})]\n"
-                f"Full-screen region: pixels ({x_min},{y_min})→({x_max},{y_max})\n"
-                f"Clicks in this sub-grid auto-translate to full-screen.\n"
-                f"OCR text positions (sub-grid coords):\n{text_map}\n"
+                f"[ZOOM {zoom_w}×{zoom_h}px — centered at grid ({cx},{cy})]\n"
+                f"You are receiving TWO images:\n"
+                f"  IMAGE 1 — Full screen ({sw}×{sh}) with red box showing exactly where you zoomed.\n"
+                f"  IMAGE 2 — Zoomed view with a 16×16 sub-grid. Use these coords to click.\n"
+                f"Clicks in this sub-grid auto-translate to full-screen. Call screenshot to exit zoom.\n"
+                f"OCR text in zoomed view (sub-grid coords):\n{text_map}\n"
                 f"\n"
                 f"══ VERIFY BEFORE CLICKING ══\n"
-                f"Is the element you intended to click CLEARLY VISIBLE in this zoomed image?\n"
-                f"  YES → click it now using the sub-grid coords above.\n"
-                f"         For extra precision: zoom tighter first (smaller w/h).\n"
-                f"  NO  → call screenshot to return to full-screen, re-identify the target,\n"
-                f"         and zoom to a different area."
+                f"Look at IMAGE 1: is the red box around the CORRECT region of the screen?\n"
+                f"Look at IMAGE 2: is your target element CLEARLY VISIBLE?\n"
+                f"  BOTH YES → click using sub-grid coords from IMAGE 2\n"
+                f"             (zoom tighter if you need more precision: smaller w/h)\n"
+                f"  NO (wrong area) → call screenshot, re-identify the target, zoom elsewhere\n"
+                f"  NO (element not visible) → zoom a different area or zoom tighter"
             )
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — {len(elements)} OCR"})
+                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — {len(elements)} OCR — dual-image"})
                 except Exception:
                     pass
             return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(elements)})
@@ -279,6 +297,7 @@ class GUIToolRegistry(ToolRegistry):
 
     def _handle_screenshot(self, args):
         self._zoom_region = None   # always exit zoom mode on full screenshot
+        self.pending_images = None  # clear dual-image from any prior zoom
         try:
             img = self.screen.capture()
             cursor = self.input_ctrl._last_click_px  # (px, py) or None
