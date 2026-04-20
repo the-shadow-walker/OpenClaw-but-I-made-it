@@ -12,6 +12,7 @@ class GUIInput:
         self.display = display
         self.screen_w = screen_w
         self.screen_h = screen_h
+        self._last_click_px = None  # (px, py) of most recent click/double/right-click
 
     def _grid_to_px(self, gx, gy):
         """Convert 16×16 grid coordinates to pixel coordinates."""
@@ -56,18 +57,21 @@ class GUIInput:
         px, py = self._grid_to_px(gx, gy)
         self._xdo("mousemove", "--sync", str(px), str(py))
         self._xdo("click", "1")
+        self._last_click_px = (px, py)
         return f"Clicked at grid ({gx}, {gy}) → pixel ({px}, {py})"
 
     def double_click(self, gx, gy):
         px, py = self._grid_to_px(gx, gy)
         self._xdo("mousemove", "--sync", str(px), str(py))
         self._xdo("click", "--repeat", "2", "--delay", "100", "1")
+        self._last_click_px = (px, py)
         return f"Double-clicked at grid ({gx}, {gy}) → pixel ({px}, {py})"
 
     def right_click(self, gx, gy):
         px, py = self._grid_to_px(gx, gy)
         self._xdo("mousemove", "--sync", str(px), str(py))
         self._xdo("click", "3")
+        self._last_click_px = (px, py)
         return f"Right-clicked at grid ({gx}, {gy}) → pixel ({px}, {py})"
 
     def type_text(self, text):

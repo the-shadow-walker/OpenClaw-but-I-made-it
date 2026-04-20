@@ -42,8 +42,11 @@ class GUIScreen:
             raise RuntimeError(f"Screenshot failed: {r.stderr.decode()[:200]}")
         return Image.open(path).convert("RGB")
 
-    def overlay_grid(self, img, n=16):
-        """Draw labeled n×n grid on a copy of img. Returns new PIL Image."""
+    def overlay_grid(self, img, n=16, cursor=None):
+        """Draw labeled n×n grid (and optional cursor dot) on a copy of img.
+
+        cursor: (px, py) pixel coords of last click — draws a red dot + crosshair.
+        """
         img = img.copy()
         draw = ImageDraw.Draw(img)
         w, h = img.size
@@ -68,6 +71,22 @@ class GUIScreen:
         for i in range(n):
             y = int((i + 0.5) * cell_h)
             draw.text((2, y - 6), str(i), fill=line_color)
+
+        # Cursor: red filled circle + white outline + crosshair at last click
+        if cursor:
+            cx, cy = int(cursor[0]), int(cursor[1])
+            r = max(8, int(min(w, h) / 80))   # ~12px at 1920×1080
+            # White halo so dot is visible on any background
+            draw.ellipse([cx-r-2, cy-r-2, cx+r+2, cy+r+2],
+                         fill=(255, 255, 255))
+            draw.ellipse([cx-r, cy-r, cx+r, cy+r],
+                         fill=(255, 0, 0))
+            # Crosshair lines
+            arm = r * 3
+            draw.line([(cx - arm, cy), (cx + arm, cy)],
+                      fill=(255, 0, 0), width=2)
+            draw.line([(cx, cy - arm), (cx, cy + arm)],
+                      fill=(255, 0, 0), width=2)
 
         return img
 

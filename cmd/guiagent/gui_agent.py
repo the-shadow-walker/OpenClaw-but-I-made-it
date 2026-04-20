@@ -37,6 +37,21 @@ from gui_screen import GUIScreen
 from gui_input import GUIInput
 from gui_tools import GUIToolRegistry, GUI_TOOLS_TEXT
 
+_NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
+
+
+def _load_notes() -> str:
+    """Load persistent agent notes. Returns formatted text for prompt injection."""
+    try:
+        if os.path.exists(_NOTES_FILE):
+            with open(_NOTES_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                return content
+    except Exception:
+        pass
+    return "(empty — use note tool to save discoveries as you work)"
+
 
 # ── System prompts ─────────────────────────────────────────────────────────────
 
@@ -151,6 +166,10 @@ Budget: {max_iterations} iterations. Call finish() when {budget_warn} remain.
 ONE JSON object per response — NO prose, nothing else:
 {{"thought": "reasoning", "confidence": 85, "tool": "name", "args": {{...}}}}
 
+══════════════════ AGENT NOTES (persistent memory) ══════════════════
+These are your saved discoveries from past sessions. Trust them.
+{notes}
+
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
@@ -159,8 +178,9 @@ ONE JSON object per response — NO prose, nothing else:
 5.  Stuck on a button? Try Enter, Tab+Enter, or keyboard shortcut instead
 6.  Use OCR grid coords for text elements — never guess
 7.  NEVER repeat same tool+args 4× in a row
-8.  Task done → finish {{"summary": "what happened", "success": true}}
-9.  Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
+8.  Learned something useful (binary path, UI quirk, keyboard shortcut)? → note it immediately
+9.  Task done → finish {{"summary": "what happened", "success": true}}
+10. Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
 
 Start: can cmd accomplish this, or do I need the GUI?
 """
@@ -221,12 +241,17 @@ Budget: {max_iterations} iterations. Call finish() when {budget_warn} remain.
 ONE JSON object per response — NO prose:
 {{"thought": "reasoning", "confidence": 85, "tool": "name", "args": {{...}}}}
 
+══════════════════ AGENT NOTES (persistent memory) ══════════════════
+These are your saved discoveries from past sessions. Trust them.
+{notes}
+
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking   3. Screenshot to verify every GUI action
 4.  If click misses: recalculate from screenshot, never repeat same coords
 5.  Use OCR coords for text   6. Never repeat same tool+args 4× in a row
-7.  Done → finish {{"summary": "...", "success": true}}
-8.  Stuck → finish {{"summary": "...", "success": false}}   9. Do NOT close xterm
+7.  Learned something useful (binary path, UI quirk)? → note it immediately
+8.  Done → finish {{"summary": "...", "success": true}}
+9.  Stuck → finish {{"summary": "...", "success": false}}   10. Do NOT close xterm
 
 Start: cmd or GUI?
 """
@@ -444,12 +469,14 @@ class GUIAgent:
             pass
 
         budget_warn = max(5, max_iterations // 5)
+        notes = _load_notes()
         template = _KDE_SYSTEM_PROMPT if self.display == ":0" else _HEADLESS_SYSTEM_PROMPT
         system_prompt = template.format(
             task=task,
             available_tools=GUI_TOOLS_TEXT,
             max_iterations=max_iterations,
             budget_warn=budget_warn,
+            notes=notes,
         )
 
         self.agent.max_react_iterations = max_iterations

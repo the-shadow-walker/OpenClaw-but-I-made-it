@@ -24,6 +24,7 @@ GUI_TOOL_SCHEMAS = {
     "scroll":       '  scroll        — {"direction": "up"|"down", "x": float, "y": float}  # x,y: move mouse there first (required for browser scroll)',
     "drag":         '  drag          — {"x1": float, "y1": float, "x2": float, "y2": float}',
     "wait":         '  wait          — {"seconds": float}',
+    "note":         '  note          — {"text": str}  # save a discovery to persistent notes (binary paths, UI quirks, tips)',
     "finish":       '  finish        — {"summary": str, "success": bool}',
 }
 
@@ -39,8 +40,10 @@ class GUIToolRegistry(ToolRegistry):
 
     GUI_TOOL_NAMES = {
         "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
-        "type", "key", "scroll", "drag", "wait", "finish",
+        "type", "key", "scroll", "drag", "wait", "note", "finish",
     }
+
+    NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
 
     def __init__(self, screen: GUIScreen, input_ctrl: GUIInput,
                  event_cb=None, stop_event=None, **kwargs):
@@ -119,6 +122,7 @@ class GUIToolRegistry(ToolRegistry):
             "scroll":       self._handle_scroll,
             "drag":         self._handle_drag,
             "wait":         self._handle_wait,
+            "note":         self._handle_note,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
         result = handlers[tool](args)
@@ -208,7 +212,12 @@ class GUIToolRegistry(ToolRegistry):
                 return ToolResult(False, "", "zoom region too small — use larger w/h", {})
 
             cropped = img.crop((x_min, y_min, x_max, y_max))
-            grid_img = self.screen.overlay_grid(cropped)  # 16×16 on cropped region
+            # Translate last-click pixel to crop-space if it falls within the region
+            zoom_cursor = None
+            lcp = self.input_ctrl._last_click_px
+            if lcp and x_min <= lcp[0] <= x_max and y_min <= lcp[1] <= y_max:
+                zoom_cursor = (lcp[0] - x_min, lcp[1] - y_min)
+            grid_img = self.screen.overlay_grid(cropped, cursor=zoom_cursor)  # 16×16 on cropped region
 
             # Full-res to browser, downscaled to model
             b64_full = self.screen.to_base64(grid_img)
@@ -251,7 +260,8 @@ class GUIToolRegistry(ToolRegistry):
         self._zoom_region = None   # always exit zoom mode on full screenshot
         try:
             img = self.screen.capture()
-            grid_img = self.screen.overlay_grid(img)
+            cursor = self.input_ctrl._last_click_px  # (px, py) or None
+            grid_img = self.screen.overlay_grid(img, cursor=cursor)
 
             # Full-res base64 → browser UI only
             b64_full = self.screen.to_base64(grid_img)
@@ -269,8 +279,15 @@ class GUIToolRegistry(ToolRegistry):
             text_map = self.screen.build_text_map(elements)
             w, h = img.size
 
+            cursor_note = ""
+            if cursor:
+                gx = round(cursor[0] / w * 16, 2)
+                gy = round(cursor[1] / h * 16, 2)
+                cursor_note = f"Last click: pixel ({cursor[0]},{cursor[1]}) = grid ({gx},{gy}) — marked with red dot.\n"
+
             obs = (
-                f"[SCREENSHOT {w}×{h} — 8×8 grid overlaid, image attached]\n"
+                f"[SCREENSHOT {w}×{h} — 16×16 grid overlaid, image attached]\n"
+                f"{cursor_note}"
                 f"OCR text positions (use these coords for precise clicks):\n"
                 f"{text_map}\n"
                 f"Examine the image and decide your next action."
@@ -384,3 +401,18 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(True, f"Waited {seconds:.1f}s", "", {})
         except Exception as e:
             return ToolResult(False, "", f"Wait failed: {e}", {})
+
+    def _handle_note(self, args):
+        try:
+            text = str(args.get("text", "")).strip()
+            if not text:
+                return ToolResult(False, "", "note requires 'text'", {})
+            notes_dir = os.path.dirname(self.NOTES_FILE)
+            os.makedirs(notes_dir, exist_ok=True)
+            timestamp = time.strftime("%Y-%m-%d %H:%M")
+            entry = f"\n- [{timestamp}] {text}\n"
+            with open(self.NOTES_FILE, "a", encoding="utf-8") as f:
+                f.write(entry)
+            return ToolResult(True, f"Note saved: {text[:120]}", "", {})
+        except Exception as e:
+            return ToolResult(False, "", f"Note failed: {e}", {})
