@@ -157,8 +157,8 @@ def start():
 @app.route("/stop", methods=["POST"])
 def stop():
     _stop_requested.set()
-    _broadcast("log", {"text": "Stop requested — will finish current action", "level": "warn"})
-    return jsonify({"status": "stop_requested"})
+    _broadcast("log", {"text": "Stopping…", "level": "warn"})
+    return jsonify({"status": "stopping"})
 
 
 @app.route("/status")

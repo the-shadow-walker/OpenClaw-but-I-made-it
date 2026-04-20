@@ -394,6 +394,9 @@ class OllamaCommandAgent:
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
         self.current_job_id: Optional[str] = None  # set by server before run()
+        # Optional threading.Event — when set, call_ollama_react returns a stop sentinel
+        # immediately (streaming mode checks this between each token chunk).
+        self.stop_event = None
         # Pinned messages: always injected after system prompt regardless of history trimming
         # (e.g. ARCH.md contents, schema.sql, key model definitions)
         self.pinned_messages: List[Dict] = []
@@ -478,19 +481,31 @@ class OllamaCommandAgent:
 
         return assistant_message
 
+    # Sentinel returned by call_ollama_react when stop_event fires mid-inference.
+    _STOP_SENTINEL = "__STOP_REQUESTED__"
+
     def call_ollama_react(
         self,
         react_history: List[Dict],
         system_prompt: str,
         timeout: int = 180,
     ) -> str:
-        """Fast-model (14b) caller for the ReAct decision loop.
-        Only picks tools and writes short args — never generates file content.
-        Does NOT touch self.conversation_history.
+        """Fast-model caller for the ReAct decision loop.
+
+        When self.stop_event is set, uses streaming mode so the event is checked
+        between every token chunk — gives near-instant stop response instead of
+        waiting up to `timeout` seconds for a blocking read to finish.
+        Returns _STOP_SENTINEL ("__STOP_REQUESTED__") when stopped mid-inference.
         """
+        import http.client as _http
+
+        stop_event = self.stop_event  # may be None
+
+        # Short-circuit before hitting the network if already stopped
+        if stop_event and stop_event.is_set():
+            return self._STOP_SENTINEL
+
         messages = [{"role": "system", "content": system_prompt}]
-        # Inject pinned architectural facts (ARCH.md, schema, models) after system prompt
-        # so they're always visible regardless of history trimming.
         if self.pinned_messages:
             messages.extend(self.pinned_messages)
         messages.extend(react_history)
@@ -498,22 +513,64 @@ class OllamaCommandAgent:
         request_data = {
             "model": self.fast_model,
             "messages": messages,
-            "stream": False,
             "keep_alive": -1,
             "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
 
-        try:
-            import http.client as _http
-            body = json.dumps(request_data).encode()
-            conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
-            conn.request("POST", "/api/chat", body=body,
-                         headers={"Content-Type": "application/json"})
-            resp = conn.getresponse()
-            return json.loads(resp.read())["message"]["content"]
-        except Exception as e:
-            print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
-            return ""
+        if stop_event is not None:
+            # ── Streaming mode: check stop_event between every token chunk ──────
+            request_data["stream"] = True
+            try:
+                body = json.dumps(request_data).encode()
+                conn = _http.HTTPConnection("localhost", 11434, timeout=30)
+                conn.request("POST", "/api/chat", body=body,
+                             headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                parts: List[str] = []
+                try:
+                    for raw_line in resp:
+                        if stop_event.is_set():
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            return self._STOP_SENTINEL
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line.decode("utf-8"))
+                            delta = chunk.get("message", {}).get("content", "")
+                            if delta:
+                                parts.append(delta)
+                            if chunk.get("done"):
+                                break
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            pass
+                except Exception:
+                    if stop_event.is_set():
+                        return self._STOP_SENTINEL
+                    raise
+                return "".join(parts)
+            except Exception as e:
+                if stop_event and stop_event.is_set():
+                    return self._STOP_SENTINEL
+                print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
+                return ""
+
+        else:
+            # ── Non-streaming mode (original behaviour, no stop_event) ──────────
+            request_data["stream"] = False
+            try:
+                body = json.dumps(request_data).encode()
+                conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
+                conn.request("POST", "/api/chat", body=body,
+                             headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                return json.loads(resp.read())["message"]["content"]
+            except Exception as e:
+                print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
+                return ""
 
     def _reset_keep_alive(self, keep_alive: str = "10m"):
         """Send a no-op request to reset the model's keep_alive expiry timer.
@@ -1862,6 +1919,7 @@ Return JSON only:
         self.react_trace = []
         finish_summary = ""
         final_confidence = 50
+        _stop_early = False  # set True when stop_event fires; skips verification
         # Tracks consecutive failures per file path to break permission-denied loops
         _path_fail_counts: Dict[str, int] = {}
         # How many times we've challenged a premature finish (challenge fires once only)
@@ -1917,6 +1975,12 @@ Return JSON only:
 
             # Call LLM
             raw = self.call_ollama_react(react_history, system_prompt)
+
+            # Stop button pressed mid-inference → exit immediately
+            if raw == self._STOP_SENTINEL:
+                finish_summary = "Stopped by user request."
+                _stop_early = True
+                break
 
             if not raw:
                 react_history.append({
@@ -2289,6 +2353,20 @@ Return JSON only:
             finish_summary = f"Max iterations ({max_iter}) reached without finishing"
             print(f"⚠️  {finish_summary}")
 
+        # Fast exit when user hit Stop — skip verification entirely
+        if _stop_early:
+            iterations_used = len(self.react_trace)
+            self._reset_keep_alive("5m")
+            return {
+                "success": False,
+                "summary": finish_summary,
+                "finish_summary": finish_summary,
+                "confidence": 0,
+                "verification_notes": "Stopped by user.",
+                "iterations_used": iterations_used,
+                "trace": self.react_trace,
+            }
+
         # Verify completion via a separate LLM call
         print("\n🔬 Verifying completion...")
         verification = self._verify_react_completion(
@@ -2311,6 +2389,7 @@ Return JSON only:
 
         result_dict = {
             "success": verification.get("verified", False),
+            "summary": finish_summary,   # alias so callers can use result.get("summary")
             "confidence": verification.get("confidence", final_confidence),
             "verification_notes": verification.get("notes", ""),
             "finish_summary": finish_summary,

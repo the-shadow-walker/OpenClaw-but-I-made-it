@@ -325,6 +325,7 @@ class GUIAgent:
         self.screen_h = screen_h
 
         self.agent = OllamaCommandAgent(model=self.MODEL, fast_model=self.MODEL)
+        self.agent.stop_event = stop_event  # enables streaming + mid-inference stop
         self.screen = GUIScreen(display, screen_w, screen_h)
         self.input_ctrl = GUIInput(display, screen_w, screen_h)
 
