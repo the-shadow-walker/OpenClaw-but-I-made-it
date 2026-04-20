@@ -72,8 +72,9 @@ Init: systemd
 ══════════════════ TOOL STRATEGY ══════════════════
 cmd FIRST — run shell commands whenever possible. GUI tools are a last resort.
 
-  Open a website:    cmd {{"command": "brave-browser 'https://url' &"}}
-  Open terminal:     cmd {{"command": "konsole &"}}
+  Open a website:    cmd {{"command": "/usr/bin/brave 'https://url' >/dev/null 2>&1 &"}}
+  Dismiss a popup:   key {{"combo": "Escape"}}  ← always try Escape first
+  Open terminal:     cmd {{"command": "konsole >/dev/null 2>&1 &"}}
   Check if running:  cmd {{"command": "pgrep -x brave"}}
   Focus a window:    cmd {{"command": "xdotool search --class Brave windowactivate"}}
   Clip to clipboard: cmd {{"command": "echo 'text' | xclip -selection clipboard"}}
@@ -132,21 +133,19 @@ File manager / terminal:
 NEVER click directly from a full-screen view. Every click requires zoom first.
 
 REQUIRED FLOW:
-  1. screenshot → identify the rough region where the target lives
+  1. screenshot → identify the region where the target lives
   2. zoom {{"x": <cx>, "y": <cy>, "w": 2, "h": 2}}   ← full-screen 0-16 coords
-       You receive ONE image with two labeled panels:
-         LEFT  — full screen with a red box showing exactly where you zoomed
-         RIGHT — zoomed view with its own 16×16 sub-grid
-       Verify: LEFT box over correct region? RIGHT panel shows the target?
-         • YES to both → proceed to step 3 or click directly
-         • NO (wrong area) → screenshot, re-identify, try different coords
-  3. zoom {{"x": <rx>, "y": <ry>, "w": 0.5, "h": 0.5}}  ← RIGHT panel 0-16 coords
-       Second zoom uses RIGHT panel coords (auto-translated to full-screen).
-       Repeat verify: LEFT box correct? RIGHT panel shows target clearly?
-         • YES → CROSSHAIR CHECK → click
-         • NO → zoom tighter or screenshot to reset
-  4. CROSSHAIR CHECK (see below) → verify x and y independently
-  5. click / double_click / right_click → sub-grid coords from the RIGHT panel
+       ONE image, two labeled panels:
+         LEFT  — full screen with red box (verify box is over the right area)
+         RIGHT — zoomed view with 16×16 sub-grid (verify target is visible here)
+       • Both correct → CROSSHAIR CHECK → click using RIGHT panel coords
+       • Wrong area → screenshot, identify correct region, zoom there instead
+  3. CROSSHAIR CHECK → verify x then y independently (see section below)
+  4. click / double_click / right_click → RIGHT panel sub-grid coords (auto-translate)
+
+  ONE zoom per click — do NOT call zoom again while already zoomed.
+  If you need a different area: screenshot first, then zoom again.
+  After click: screenshot to verify. Miss → back to step 1.
 
   After click: screenshot → verify result. If missed → start over from step 1.
   After 3 failed clicks: switch strategy (keyboard shortcut, Tab+Enter, cmd).
@@ -250,15 +249,12 @@ Browser (Brave):
 NEVER click directly from a full-screen view. Every click requires zoom first.
 
 REQUIRED FLOW:
-  1. screenshot → identify rough region
+  1. screenshot → identify region
   2. zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}  ← full-screen coords
-       ONE image, two panels: LEFT=full screen+red box, RIGHT=zoomed sub-grid
-       Verify LEFT box correct + RIGHT shows target?
-       YES → step 3 or click    NO → screenshot and re-identify
-  3. zoom {{"x": rx, "y": ry, "w": 0.5, "h": 0.5}}  ← RIGHT panel coords (auto-translate)
-       Verify again: YES → crosshair check → click    NO → zoom tighter/elsewhere
-  4. click sub-grid coords from RIGHT panel (auto-translate to full-screen)
-  5. screenshot → verify. Miss → back to step 1.
+       LEFT=full screen+red box (verify location), RIGHT=zoomed sub-grid (verify target)
+       ONE zoom per click — do NOT re-zoom while zoomed (screenshot first to reset)
+  3. crosshair check → click RIGHT panel sub-grid coords (auto-translate)
+  4. screenshot → verify. Miss → back to step 1.
   Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════

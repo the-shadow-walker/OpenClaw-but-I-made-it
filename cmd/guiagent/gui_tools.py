@@ -206,19 +206,32 @@ class GUIToolRegistry(ToolRegistry):
 
     def _handle_zoom(self, args):
         try:
+            # Block re-zooming while already in zoom mode — sub-zooms produce
+            # tiny unreadable crops. One zoom level only: screenshot → zoom → click.
+            if self._zoom_region is not None:
+                return ToolResult(
+                    False, "",
+                    (
+                        "ALREADY ZOOMED: you are in a zoom view. "
+                        "Do not zoom again — either click your target now, "
+                        "or call screenshot to return to full-screen and zoom elsewhere."
+                    ),
+                    {"already_zoomed": True},
+                )
+
             cx = float(args.get("x", 8.0))
             cy = float(args.get("y", 8.0))
-            w  = float(args.get("w", 1.0))
-            h  = float(args.get("h", 1.0))
+            w  = float(args.get("w", 2.0))   # default 2 cells wide
+            h  = float(args.get("h", 2.0))   # default 2 cells tall
 
             if not (0 <= cx <= 16 and 0 <= cy <= 16):
                 return ToolResult(False, "", "zoom center out of range (0-16)", {})
 
-            # ── Coordinate translation ─────────────────────────────────────────
-            # If already zoomed, the caller is using coords in the CURRENT zoom-space
-            # (0-16 of the cropped region), same as click/scroll do.
-            # Translate to full-screen before computing crop boundaries.
-            cx_fs, cy_fs = self._apply_zoom(cx, cy)
+            # Enforce minimum zoom size so the crop is always readable
+            w = max(w, 1.5)
+            h = max(h, 1.5)
+
+            cx_fs, cy_fs = cx, cy  # always full-screen coords (no sub-zoom)
 
             img = self.screen.capture()
             sw, sh = img.size
