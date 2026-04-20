@@ -13,14 +13,15 @@ from gui_input import GUIInput
 
 
 GUI_TOOL_SCHEMAS = {
-    "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background (e.g. brave-browser https://url &)',
-    "screenshot":   '  screenshot    — {}',
+    "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background',
+    "screenshot":   '  screenshot    — {}  # full-screen; also exits zoom mode',
+    "zoom":         '  zoom          — {"x": float, "y": float, "w": float, "h": float}  # w/h in grid cells (default 1×1); zoomed 16×16 sub-grid; clicks auto-translate',
     "click":        '  click         — {"x": float, "y": float}',
     "double_click": '  double_click  — {"x": float, "y": float}',
     "right_click":  '  right_click   — {"x": float, "y": float}',
     "type":         '  type          — {"text": str}',
     "key":          '  key           — {"combo": str}',
-    "scroll":       '  scroll        — {"direction": "up"|"down"}',
+    "scroll":       '  scroll        — {"direction": "up"|"down", "x": float, "y": float}  # x,y: move mouse there first (required for browser scroll)',
     "drag":         '  drag          — {"x1": float, "y1": float, "x2": float, "y2": float}',
     "wait":         '  wait          — {"seconds": float}',
     "finish":       '  finish        — {"summary": str, "success": bool}',
@@ -37,7 +38,7 @@ class GUIToolRegistry(ToolRegistry):
     """
 
     GUI_TOOL_NAMES = {
-        "cmd", "screenshot", "click", "double_click", "right_click",
+        "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
         "type", "key", "scroll", "drag", "wait", "finish",
     }
 
@@ -55,6 +56,10 @@ class GUIToolRegistry(ToolRegistry):
         # Set by _handle_screenshot; picked up by ollama_agent_core.run_react
         # to inline the image into the next ReAct model call (no separate vision call).
         self.pending_image = None
+        # Set by _handle_zoom: (x_min_px, y_min_px, x_max_px, y_max_px) of the zoomed region.
+        # While set, click/scroll coords are auto-translated from zoom-space to full-screen.
+        # Cleared by _handle_screenshot.
+        self._zoom_region = None
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -105,6 +110,7 @@ class GUIToolRegistry(ToolRegistry):
         handlers = {
             "cmd":          self._handle_cmd,
             "screenshot":   self._handle_screenshot,
+            "zoom":         self._handle_zoom,
             "click":        self._handle_click,
             "double_click": self._handle_double_click,
             "right_click":  self._handle_right_click,
@@ -159,7 +165,90 @@ class GUIToolRegistry(ToolRegistry):
         except Exception as e:
             return ToolResult(False, "", f"cmd failed: {e}", {})
 
+    # ── Zoom helpers ─────────────────────────────────────────────────────────────
+
+    def _apply_zoom(self, gx, gy):
+        """Translate zoom-space 16×16 coords to full-screen 16×16 coords.
+        Returns (gx, gy) unchanged if not in zoom mode."""
+        if self._zoom_region is None:
+            return gx, gy
+        x_min, y_min, x_max, y_max = self._zoom_region
+        # zoom coords [0,16] → pixel within cropped region
+        px = x_min + (gx / 16.0) * (x_max - x_min)
+        py = y_min + (gy / 16.0) * (y_max - y_min)
+        # pixel → full-screen 16×16 grid coords
+        sw = self.input_ctrl.screen_w
+        sh = self.input_ctrl.screen_h
+        return round(px / sw * 16, 3), round(py / sh * 16, 3)
+
+    def _handle_zoom(self, args):
+        try:
+            cx = float(args.get("x", 8.0))  # center in full-screen 16×16
+            cy = float(args.get("y", 8.0))
+            w  = float(args.get("w", 1.0))  # width  in grid cells (default 1 cell)
+            h  = float(args.get("h", 1.0))  # height in grid cells (default 1 cell)
+
+            if not (0 <= cx <= 16 and 0 <= cy <= 16):
+                return ToolResult(False, "", "zoom center out of range (0-16)", {})
+
+            img = self.screen.capture()
+            sw, sh = img.size
+            cell_w = sw / 16.0
+            cell_h = sh / 16.0
+
+            # Compute crop boundaries
+            cx_px = cx / 16.0 * sw
+            cy_px = cy / 16.0 * sh
+            x_min = max(0, int(cx_px - (w / 2.0) * cell_w))
+            y_min = max(0, int(cy_px - (h / 2.0) * cell_h))
+            x_max = min(sw, int(cx_px + (w / 2.0) * cell_w))
+            y_max = min(sh, int(cy_px + (h / 2.0) * cell_h))
+
+            if x_max - x_min < 4 or y_max - y_min < 4:
+                return ToolResult(False, "", "zoom region too small — use larger w/h", {})
+
+            cropped = img.crop((x_min, y_min, x_max, y_max))
+            grid_img = self.screen.overlay_grid(cropped)  # 16×16 on cropped region
+
+            # Full-res to browser, downscaled to model
+            b64_full = self.screen.to_base64(grid_img)
+            if self.event_cb:
+                try:
+                    self.event_cb("screenshot", {"image": b64_full})
+                except Exception:
+                    pass
+            self.pending_image = self.screen.to_base64_model(grid_img, max_w=960)
+
+            # OCR with coords remapped to zoom 16×16 space
+            elements = self.screen.ocr_elements(cropped)
+            zoom_w = x_max - x_min
+            zoom_h = y_max - y_min
+            for e in elements:
+                e["grid_x"] = round(e["cx"] / zoom_w * 16, 2)
+                e["grid_y"] = round(e["cy"] / zoom_h * 16, 2)
+            text_map = self.screen.build_text_map(elements)
+
+            self._zoom_region = (x_min, y_min, x_max, y_max)
+
+            obs = (
+                f"[ZOOM {zoom_w}×{zoom_h}px — 16×16 sub-grid — centered at ({cx},{cy})]\n"
+                f"Full-screen region: pixels ({x_min},{y_min})→({x_max},{y_max})\n"
+                f"Clicks in this sub-grid auto-translate to full-screen.\n"
+                f"Call screenshot to return to full-screen view.\n"
+                f"OCR text positions (sub-grid coords):\n{text_map}\n"
+                f"Examine the zoomed image and act precisely."
+            )
+            if self.event_cb:
+                try:
+                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — {len(elements)} OCR"})
+                except Exception:
+                    pass
+            return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(elements)})
+        except Exception as e:
+            return ToolResult(False, "", f"Zoom failed: {e}", {})
+
     def _handle_screenshot(self, args):
+        self._zoom_region = None   # always exit zoom mode on full screenshot
         try:
             img = self.screen.capture()
             grid_img = self.screen.overlay_grid(img)
@@ -208,6 +297,7 @@ class GUIToolRegistry(ToolRegistry):
             y = float(args.get("y", 0))
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._apply_zoom(x, y)
             msg = self.input_ctrl.click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -219,6 +309,7 @@ class GUIToolRegistry(ToolRegistry):
             y = float(args.get("y", 0))
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._apply_zoom(x, y)
             msg = self.input_ctrl.double_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -230,6 +321,7 @@ class GUIToolRegistry(ToolRegistry):
             y = float(args.get("y", 0))
             if not (0 <= x <= 16 and 0 <= y <= 16):
                 return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._apply_zoom(x, y)
             msg = self.input_ctrl.right_click(x, y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
@@ -260,7 +352,12 @@ class GUIToolRegistry(ToolRegistry):
             direction = str(args.get("direction", "down")).lower()
             if direction not in ("up", "down"):
                 return ToolResult(False, "", "scroll direction must be 'up' or 'down'", {})
-            msg = self.input_ctrl.scroll(direction)
+            x = args.get("x")
+            y = args.get("y")
+            if x is not None and y is not None:
+                x, y = float(x), float(y)
+                x, y = self._apply_zoom(x, y)
+            msg = self.input_ctrl.scroll(direction, x=x, y=y)
             return ToolResult(True, msg, "", {})
         except Exception as e:
             return ToolResult(False, "", f"Scroll failed: {e}", {})

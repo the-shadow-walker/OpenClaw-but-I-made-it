@@ -122,6 +122,16 @@ When you must use the mouse:
 5. If missed: try ±0.5 offset in each direction, one at a time
 6. After 3 failed clicks on the same element: switch strategy (shortcut, cmd, different element)
 
+ZOOM for precision (small buttons, dense UI, dialog checkboxes):
+  zoom {{"x": 8.0, "y": 12.0}}          # zoom into 1×1 cell at (8,12)
+  zoom {{"x": 8.0, "y": 12.0, "w": 2, "h": 2}}  # zoom 2×2 cell region
+  After zoom: a 16×16 sub-grid covers that region. Clicks auto-translate to full-screen.
+  Call screenshot to return to full-screen view.
+
+SCROLLING (always provide x,y so mouse is over the right window):
+  scroll {{"direction": "down", "x": 8.0, "y": 8.0}}  # scroll center of screen
+  scroll {{"direction": "up",   "x": 8.0, "y": 5.0}}  # scroll browser content area
+
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)
 Decimals required — use 7.5 not 7
@@ -192,6 +202,8 @@ Browser (Brave):
 1. screenshot → locate target → calculate bounding box center in 16×16 coords
 2. click center → screenshot to verify → if missed try ±0.5 offset
 3. After 3 failures: switch to shortcut or cmd
+4. For precision: zoom {{"x": cx, "y": cy}} → 16×16 sub-grid → clicks auto-translate
+5. Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7

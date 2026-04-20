@@ -82,11 +82,18 @@ class GUIInput:
         self._xdo("key", "--clearmodifiers", combo)
         return f"Key: {combo}"
 
-    def scroll(self, direction, clicks=5):
+    def scroll(self, direction, x=None, y=None, clicks=5):
+        """Scroll up/down. If x,y given, move mouse there first (required for browser)."""
+        if x is not None and y is not None:
+            px, py = self._grid_to_px(x, y)
+            self._xdo("mousemove", "--sync", str(px), str(py))
+            time.sleep(0.05)
         btn = "4" if direction == "up" else "5"
         for _ in range(clicks):
             self._xdo("click", btn)
-        return f"Scrolled {direction} ({clicks} clicks)"
+            time.sleep(0.04)
+        pos = f" at ({x},{y})" if x is not None else ""
+        return f"Scrolled {direction}{pos} ({clicks} clicks)"
 
     def drag(self, gx1, gy1, gx2, gy2):
         px1, py1 = self._grid_to_px(gx1, gy1)
