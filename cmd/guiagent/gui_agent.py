@@ -159,28 +159,38 @@ top-left=(0,0)   bottom-right=(16,16)
 Decimals required — use 7.5 not 7
 Columns 0=left edge → 16=right edge
 Rows    0=top edge  → 16=bottom edge
-DOM elements (labeled "exact coords") give the most reliable positions — use those first.
-OCR text positions are also pixel-accurate — use them when DOM has no match.
-NEVER invent coordinates without taking a screenshot first.
 
-══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
-Before every click, verify x and y independently using this 2-pass method:
+HOW TO GET CLICK COORDINATES — follow this priority order every single time:
+
+  STEP 1 — Check DOM list (labeled "exact coords, click these"):
+    If your target element is listed → YOU MUST USE THAT EXACT NUMBER. Copy it
+    directly. Do not adjust it. Do not re-estimate from the image. Just use it.
+
+  STEP 2 — Check OCR list (labeled "all visible text"):
+    If the target's text appears in OCR but not DOM → copy that coord directly.
+    OCR coords are pixel-accurate. Do not estimate from the image.
+
+  STEP 3 — Crosshair estimate (ONLY if target is absent from BOTH DOM and OCR):
+    This applies to icons, purely graphical elements, unlabeled buttons, or
+    anything where neither list has a matching entry. In that case use the
+    crosshair method below on the zoomed image to estimate the center.
+
+══════════════════ CROSSHAIR METHOD (step 3 only — image-based fallback) ══════════════════
+Use this ONLY when your target element does NOT appear in the DOM or OCR lists.
 
   X PASS — find the exact column:
-    Pick a candidate x value. Imagine a vertical line running top-to-bottom
-    at that x. Ask: does that line pass through the HORIZONTAL CENTER of the
-    target element? If it hits the left or right edge instead of the middle,
-    adjust x until the vertical line bisects the element cleanly.
+    Pick a candidate x. Imagine a vertical line top-to-bottom at that x.
+    Does it pass through the HORIZONTAL CENTER of the target? Adjust until it does.
 
   Y PASS — find the exact row:
-    Pick a candidate y value. Imagine a horizontal line running left-to-right
-    at that y. Ask: does that line pass through the VERTICAL CENTER of the
-    target element? If it clips the top or bottom edge instead of the middle,
-    adjust y until the horizontal line bisects the element cleanly.
+    Pick a candidate y. Imagine a horizontal line left-to-right at that y.
+    Does it pass through the VERTICAL CENTER of the target? Adjust until it does.
 
-  COMMIT: Only use (x, y) once BOTH passes confirm the intersection lands
-          squarely in the center of the element — not on its border or nearby.
+  COMMIT: only click once both lines intersect squarely on the element center.
           If uncertain after 2 passes, zoom tighter and repeat.
+
+  If you tried the DOM/OCR coord and it missed → that coord may be stale.
+  Take a fresh screenshot (DOM re-queries live), then try again.
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
@@ -260,19 +270,21 @@ REQUIRED FLOW:
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
-DOM elements (labeled "exact coords") are most reliable — use those first.
-OCR positions are also pixel-accurate — use them when DOM has no match.
-NEVER invent coordinates without a screenshot first.
 
-══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
-Before every click, verify x and y independently:
+HOW TO GET CLICK COORDINATES — follow this priority order every single time:
 
-  X PASS: imagine a vertical line at your candidate x — does it pass through
-          the HORIZONTAL CENTER of the target? Adjust until it does.
-  Y PASS: imagine a horizontal line at your candidate y — does it pass through
-          the VERTICAL CENTER of the target? Adjust until it does.
-  COMMIT: only click once both lines intersect squarely on the element center.
+  STEP 1 — DOM list ("exact coords, click these"): target listed? COPY that number exactly.
+  STEP 2 — OCR list ("all visible text"): text in OCR? Copy that coord directly.
+  STEP 3 — Crosshair (ONLY if absent from BOTH lists): icons, graphics, unlabeled elements.
+
+NEVER estimate from the image when DOM or OCR has an entry for your target.
+
+══════════════════ CROSSHAIR METHOD (step 3 only — image-based fallback) ══════════════════
+  X PASS: vertical line at x — does it bisect the target's horizontal center?
+  Y PASS: horizontal line at y — does it bisect the target's vertical center?
+  COMMIT: click only once both lines intersect squarely on the element center.
           If uncertain, zoom tighter and repeat.
+  If a DOM/OCR coord misses → take fresh screenshot (DOM re-queries live page).
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
