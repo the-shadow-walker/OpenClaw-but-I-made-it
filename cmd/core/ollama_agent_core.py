@@ -2008,6 +2008,18 @@ Return JSON only:
             if not parsed or not isinstance(parsed, dict):
                 _consecutive_json_failures += 1
                 print(f"⚠️  Failed to parse JSON ({_consecutive_json_failures} consecutive)")
+                # Log raw response to file so we can diagnose what the model actually output
+                try:
+                    import threading as _threading
+                    _fail_entry = json.dumps({
+                        "iter": iteration,
+                        "consecutive": _consecutive_json_failures,
+                        "raw": raw[:800],
+                    }) + "\n"
+                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
+                        _f.write(_fail_entry)
+                except Exception:
+                    pass
                 if _consecutive_json_failures >= 5:
                     print(f"🆘 JSON cascade — calling heavy model to rescue...")
                     ctx = self._build_context_summary(react_history[-8:])
