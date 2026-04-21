@@ -10,6 +10,7 @@ import time
 from react_tools import ToolRegistry, ToolResult
 from gui_screen import GUIScreen
 from gui_input import GUIInput
+from gui_dom import DOMExtractor
 
 
 GUI_TOOL_SCHEMAS = {
@@ -74,6 +75,13 @@ class GUIToolRegistry(ToolRegistry):
         # OCR elements from the last full screenshot, as raw pixel coords.
         # Reused by _handle_zoom so we never OCR tiny crops (unreliable at <240px).
         self._last_ocr_elements = []   # [{text, cx_px, cy_px}]
+        # DOM elements from the last CDP query, as raw pixel coords.
+        # Reused by _handle_zoom to filter into zoom-space.
+        self._last_dom_elements = []   # [{tag, text, x_px, y_px, grid_x, grid_y}]
+        self._dom = DOMExtractor(
+            screen_w=self.input_ctrl.screen_w,
+            screen_h=self.input_ctrl.screen_h,
+        )
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -300,22 +308,41 @@ class GUIToolRegistry(ToolRegistry):
             self.pending_image  = self.screen.to_base64_model(panel, max_w=1280)
             self.pending_images = None   # not used for zoom anymore
 
-            # ── Reuse full-screenshot OCR — filter to zoom region ─────────────
-            # Never OCR the tiny crop — at 240×135px tesseract returns garbage.
-            # Instead filter the stored full-image elements (pixel coords) to
-            # those that fall inside the zoom box, then translate to zoom-space.
-            zoom_elements = []
+            # ── Reuse stored OCR + DOM — filter both to zoom region ──────────
+            # Never run tesseract on the tiny crop — chars are 4-6px at <300px.
+            zoom_ocr = []
             for e in self._last_ocr_elements:
                 cx, cy = e["cx_px"], e["cy_px"]
                 if x_min <= cx <= x_max and y_min <= cy <= y_max:
-                    zoom_elements.append({
+                    zoom_ocr.append({
                         "text":   e["text"],
                         "cx":     cx - x_min,
                         "cy":     cy - y_min,
                         "grid_x": round((cx - x_min) / zoom_w * 16, 2),
                         "grid_y": round((cy - y_min) / zoom_h * 16, 2),
                     })
-            text_map = self.screen.build_text_map(zoom_elements)
+            text_map = self.screen.build_text_map(zoom_ocr)
+
+            zoom_dom = []
+            for e in self._last_dom_elements:
+                cx, cy = e["x_px"], e["y_px"]
+                if x_min <= cx <= x_max and y_min <= cy <= y_max:
+                    zoom_dom.append({
+                        "tag":    e["tag"],
+                        "text":   e["text"],
+                        "x_px":   cx - x_min,
+                        "y_px":   cy - y_min,
+                        "grid_x": round((cx - x_min) / zoom_w * 16, 2),
+                        "grid_y": round((cy - y_min) / zoom_h * 16, 2),
+                    })
+            dom_zoom_map = self._dom.build_element_map(zoom_dom)
+
+            dom_zoom_section = ""
+            if dom_zoom_map:
+                dom_zoom_section = (
+                    f"Interactive elements in zoom (RIGHT panel coords, click these):\n"
+                    f"{dom_zoom_map}\n"
+                )
 
             # Update zoom region AFTER all calculations
             self._zoom_region = (x_min, y_min, x_max, y_max)
@@ -327,7 +354,8 @@ class GUIToolRegistry(ToolRegistry):
                 f"                 RIGHT panel: zoomed view with 16×16 sub-grid (click here).\n"
                 f"Sub-grid coords (0-16) auto-translate to full-screen for clicks.\n"
                 f"Call screenshot to return to full-screen view.\n"
-                f"OCR in zoomed view (RIGHT panel coords):\n{text_map}\n"
+                f"{dom_zoom_section}"
+                f"OCR text in zoomed view:\n{text_map}\n"
                 f"\n"
                 f"══ VERIFY BEFORE CLICKING ══\n"
                 f"LEFT panel: is the red box over the CORRECT screen region?\n"
@@ -337,10 +365,16 @@ class GUIToolRegistry(ToolRegistry):
             )
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — panel — {len(zoom_elements)} OCR"})
+                    self.event_cb("vision", {
+                        "text": f"Zoom {zoom_w}×{zoom_h}px — {len(zoom_dom)} DOM + {len(zoom_ocr)} OCR"
+                    })
                 except Exception:
                     pass
-            return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(zoom_elements)})
+            return ToolResult(True, obs, "", {
+                "zoom": True,
+                "ocr_count": len(zoom_ocr),
+                "dom_count": len(zoom_dom),
+            })
         except Exception as e:
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 
@@ -380,21 +414,40 @@ class GUIToolRegistry(ToolRegistry):
                 gy = round(cursor[1] / h * 16, 2)
                 cursor_note = f"Last click: pixel ({cursor[0]},{cursor[1]}) = grid ({gx},{gy}) — marked with red dot.\n"
 
+            # DOM element extraction via CDP (auto, silent fallback if no browser)
+            dom_elements = self._dom.extract()
+            self._last_dom_elements = dom_elements
+            dom_map = self._dom.build_element_map(dom_elements)
+
+            dom_section = ""
+            if dom_map:
+                dom_section = (
+                    f"Interactive elements from page DOM (exact coords, click these):\n"
+                    f"{dom_map}\n"
+                )
+
             obs = (
                 f"[SCREENSHOT {w}×{h} — 16×16 grid overlaid, image attached]\n"
                 f"{cursor_note}"
-                f"OCR text positions (use these coords for precise clicks):\n"
+                f"{dom_section}"
+                f"OCR text (all visible text, less precise):\n"
                 f"{text_map}\n"
                 f"Examine the image and decide your next action."
             )
 
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": f"{w}×{h} — {len(elements)} OCR elements"})
+                    self.event_cb("vision", {
+                        "text": f"{w}×{h} — {len(dom_elements)} DOM + {len(elements)} OCR"
+                    })
                 except Exception:
                     pass
 
-            return ToolResult(True, obs, "", {"screenshot": True, "ocr_count": len(elements)})
+            return ToolResult(True, obs, "", {
+                "screenshot": True,
+                "ocr_count": len(elements),
+                "dom_count": len(dom_elements),
+            })
         except Exception as e:
             if self.event_cb:
                 try:

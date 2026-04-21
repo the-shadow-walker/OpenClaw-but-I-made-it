@@ -72,7 +72,7 @@ Init: systemd
 ══════════════════ TOOL STRATEGY ══════════════════
 cmd FIRST — run shell commands whenever possible. GUI tools are a last resort.
 
-  Open a website:    cmd {{"command": "/usr/bin/brave 'https://url' >/dev/null 2>&1 &"}}
+  Open a website:    cmd {{"command": "/usr/bin/brave --start-maximized --no-restore-last-session --remote-debugging-port=9222 --remote-allow-origins=* 'https://url' >/dev/null 2>&1 &"}}
   Dismiss a popup:   key {{"combo": "Escape"}}  ← always try Escape first
   Open terminal:     cmd {{"command": "konsole >/dev/null 2>&1 &"}}
   Check if running:  cmd {{"command": "pgrep -x brave"}}
@@ -228,7 +228,7 @@ Init: systemd
 ══════════════════ TOOL STRATEGY ══════════════════
 cmd FIRST — run shell commands whenever possible.
 
-  Open a website:    cmd {{"command": "brave-browser 'https://url' &"}}
+  Open a website:    cmd {{"command": "/usr/bin/brave --start-maximized --no-restore-last-session --remote-debugging-port=9222 --remote-allow-origins=* 'https://url' >/dev/null 2>&1 &"}}
   Check if running:  cmd {{"command": "pgrep -x brave"}}
   Focus a window:    cmd {{"command": "xdotool search --class Brave windowactivate"}}
   Run anything:      cmd {{"command": "some-app &"}}
