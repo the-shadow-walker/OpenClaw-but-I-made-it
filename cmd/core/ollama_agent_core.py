@@ -2177,6 +2177,10 @@ Return JSON only:
                     if cmd_key not in _seen_commands:
                         _seen_commands.add(cmd_key)
                         _last_progress_iteration = iteration
+                elif tool_whitelist and tool not in ("screenshot", "wait", "zoom"):
+                    # In whitelist mode (e.g. GUI agent), any successful action
+                    # other than passive observation tools counts as forward progress.
+                    _last_progress_iteration = iteration
 
             # Pin architectural reads so they survive history trimming
             _ARCH_PATTERNS = ("ARCH.md", "schema.sql", "models.py", "schema.py",
@@ -2333,27 +2337,26 @@ Return JSON only:
             else:
                 react_history.append({"role": "user", "content": obs})
 
-            # Stagnation / forward progress enforcement
+            # Stagnation / forward progress enforcement — warn only, never hard-kill.
+            # First nudge at _progress_warn_at idle iterations; repeated every 15 after that.
             _idle = iteration - _last_progress_iteration
-            if _idle == _progress_warn_at:
-                print(f"⚠️  No forward progress for {_idle} iterations — injecting warning")
+            _nudge_every = 15
+            if _idle > 0 and _idle >= _progress_warn_at and (
+                _idle == _progress_warn_at
+                or (_idle - _progress_warn_at) % _nudge_every == 0
+            ):
+                level = (_idle - _progress_warn_at) // _nudge_every  # 0 = first warn, 1+ = escalating
+                tag   = "STAGNATION WARNING" if level == 0 else f"STAGNATION ESCALATION #{level}"
+                print(f"⚠️  No forward progress for {_idle} iterations — injecting nudge (level {level})")
                 react_history.append({"role": "user", "content": (
-                    f"[STAGNATION WARNING — {_idle} iterations without meaningful progress]\n\n"
-                    f"You have not created/modified a file or run a new successful command in {_idle} iterations.\n\n"
+                    f"[{tag} — {_idle} iterations without meaningful progress]\n\n"
+                    f"You have not made tangible forward progress in {_idle} iterations.\n\n"
                     f"REQUIRED: Diagnose the blocker:\n"
                     f"• What exactly is blocking you?\n"
                     f"• Try a fundamentally different approach\n"
-                    f"• If the task is unresolvable, call finish(success=false) now\n\n"
-                    f"You have {_progress_kill_at - _idle} iterations before this phase is force-aborted.\n\n"
+                    f"• If the task is genuinely unresolvable, call finish(success=false)\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )})
-            elif _idle >= _progress_kill_at:
-                finish_summary = (
-                    f"Phase aborted: {_idle} consecutive iterations with no forward progress. "
-                    f"Last meaningful action at iteration {_last_progress_iteration}."
-                )
-                print(f"💀 {finish_summary}")
-                break
 
         else:
             finish_summary = f"Max iterations ({max_iter}) reached without finishing"
