@@ -456,26 +456,7 @@ class GUIToolRegistry(ToolRegistry):
                     pass
             return ToolResult(False, "", f"Screenshot failed: {e}", {})
 
-    def _require_zoom(self, tool_name):
-        """Return a ToolResult error if not currently in zoom mode, else None."""
-        if self._zoom_region is None:
-            return ToolResult(
-                False, "",
-                (
-                    f"ZOOM REQUIRED before {tool_name}: you must zoom in to verify the target "
-                    "is visible before clicking.\n"
-                    "  1. zoom {\"x\": <cx>, \"y\": <cy>}  — first zoom to rough area\n"
-                    "  2. zoom {\"x\": <cx>, \"y\": <cy>, \"w\": 0.5, \"h\": 0.5}  — tighter zoom\n"
-                    f"  3. {tool_name} {{\"x\": ..., \"y\": ...}}  — only once target is confirmed visible"
-                ),
-                {"zoom_required": True},
-            )
-        return None
-
     def _handle_click(self, args):
-        err = self._require_zoom("click")
-        if err:
-            return err
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))
@@ -489,9 +470,6 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(False, "", f"Click failed: {e}", {})
 
     def _handle_double_click(self, args):
-        err = self._require_zoom("double_click")
-        if err:
-            return err
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))
@@ -505,9 +483,6 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(False, "", f"Double-click failed: {e}", {})
 
     def _handle_right_click(self, args):
-        err = self._require_zoom("right_click")
-        if err:
-            return err
         try:
             x = float(args.get("x", 0))
             y = float(args.get("y", 0))

@@ -129,26 +129,23 @@ File manager / terminal:
   Ctrl+H             show hidden files
   Ctrl+L             focus path / address bar
 
-══════════════════ CLICKING STRATEGY — MANDATORY ZOOM-FIRST ══════════════════
-NEVER click directly from a full-screen view. Every click requires zoom first.
+══════════════════ CLICKING STRATEGY ══════════════════
+RULE: click directly if you have a coord from DOM or OCR. Zoom only for crosshair estimates.
 
-REQUIRED FLOW:
-  1. screenshot → identify the region where the target lives
+FAST PATH — DOM or OCR coord available (covers 90%+ of cases):
+  1. screenshot → DOM list has "Login @ grid (7.68, 3.27)"
+  2. click {{"x": 7.68, "y": 3.27}}  ← done, no zoom needed
+  3. screenshot → verify it worked
+
+ZOOM PATH — target absent from DOM and OCR (icons, graphics, unlabeled elements):
+  1. screenshot → target not in DOM or OCR list
   2. zoom {{"x": <cx>, "y": <cy>, "w": 2, "h": 2}}   ← full-screen 0-16 coords
-       ONE image, two labeled panels:
-         LEFT  — full screen with red box (verify box is over the right area)
-         RIGHT — zoomed view with 16×16 sub-grid (verify target is visible here)
-       • Both correct → CROSSHAIR CHECK → click using RIGHT panel coords
-       • Wrong area → screenshot, identify correct region, zoom there instead
-  3. CROSSHAIR CHECK → verify x then y independently (see section below)
-  4. click / double_click / right_click → RIGHT panel sub-grid coords (auto-translate)
+       LEFT = full screen + red box (verify region), RIGHT = zoomed sub-grid (verify target)
+  3. CROSSHAIR CHECK → click RIGHT panel sub-grid coords (auto-translate)
+  4. screenshot → verify. Miss → back to step 1.
 
-  ONE zoom per click — do NOT call zoom again while already zoomed.
-  If you need a different area: screenshot first, then zoom again.
-  After click: screenshot to verify. Miss → back to step 1.
-
-  After click: screenshot → verify result. If missed → start over from step 1.
-  After 3 failed clicks: switch strategy (keyboard shortcut, Tab+Enter, cmd).
+  ONE zoom per click — do NOT re-zoom while already zoomed (screenshot to reset).
+  After 3 failed clicks on same target: switch to keyboard shortcut or Tab+Enter.
 
 SCROLLING (always provide x,y so mouse is over the right window):
   scroll {{"direction": "down", "x": 8.0, "y": 8.0}}  # scroll center of screen
@@ -210,9 +207,9 @@ These are your saved discoveries from past sessions. Trust them.
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
-3.  ZOOM before EVERY click — screenshot → zoom (×2) → verify → click. No exceptions.
+3.  DOM/OCR coord → click directly (no zoom needed). No DOM/OCR → zoom first.
 4.  After EVERY click: screenshot to verify it worked
-5.  If a click misses: screenshot → zoom fresh, NEVER reuse old coords
+5.  If a click misses: fresh screenshot (re-queries DOM), use updated coord
 6.  Stuck on a button? Try Enter, Tab+Enter, or keyboard shortcut instead
 7.  Use DOM coords first (exact), then OCR coords (also precise) — never guess from image alone
 8.  NEVER repeat same tool+args 4× in a row
@@ -256,17 +253,18 @@ Browser (Brave):
   Ctrl+T             new tab     Ctrl+W  close tab    Ctrl+R  refresh
   Ctrl+F             find        F11     fullscreen
 
-══════════════════ CLICKING STRATEGY — MANDATORY ZOOM-FIRST ══════════════════
-NEVER click directly from a full-screen view. Every click requires zoom first.
+══════════════════ CLICKING STRATEGY ══════════════════
+RULE: click directly if you have a coord from DOM or OCR. Zoom only for crosshair estimates.
 
-REQUIRED FLOW:
-  1. screenshot → identify region
-  2. zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}  ← full-screen coords
-       LEFT=full screen+red box (verify location), RIGHT=zoomed sub-grid (verify target)
-       ONE zoom per click — do NOT re-zoom while zoomed (screenshot first to reset)
-  3. crosshair check → click RIGHT panel sub-grid coords (auto-translate)
-  4. screenshot → verify. Miss → back to step 1.
-  Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
+FAST PATH — DOM or OCR coord available:
+  screenshot → find target in DOM/OCR list → click {{"x": gx, "y": gy}} → screenshot to verify
+
+ZOOM PATH — target absent from both DOM and OCR (icons, graphics, unlabeled):
+  screenshot → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
+  LEFT=full+red box, RIGHT=zoomed sub-grid → crosshair check → click → screenshot to verify
+  ONE zoom per click — screenshot to reset if you need to re-zoom.
+
+Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
@@ -303,8 +301,8 @@ These are your saved discoveries from past sessions. Trust them.
 
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking
-3.  ZOOM before EVERY click — screenshot → zoom (×2) → verify → click
-4.  After every click: screenshot to verify   5. Miss → start over with fresh zoom
+3.  DOM/OCR coord → click directly (no zoom). No match → zoom first (crosshair).
+4.  After every click: screenshot to verify   5. Miss → fresh screenshot, re-query DOM
 6.  Use DOM coords first (exact), then OCR (also precise) — never guess from image
 7. Never repeat same tool+args 4× in a row
 8.  Learned something useful? → note it
