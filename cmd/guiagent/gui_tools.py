@@ -349,19 +349,11 @@ class GUIToolRegistry(ToolRegistry):
             self._zooms_since_action += 1
 
             obs = (
-                f"[ZOOM {zoom_w}×{zoom_h}px — full-screen center ({cx_fs:.2f},{cy_fs:.2f})]\n"
-                f"One image sent — LEFT panel: full screen with red box (spatial context).\n"
-                f"                 RIGHT panel: zoomed view with 16×16 sub-grid (click here).\n"
-                f"Sub-grid coords (0-16) auto-translate to full-screen for clicks.\n"
-                f"Call screenshot to return to full-screen view.\n"
+                f"[ZOOM {zoom_w}×{zoom_h}px — center ({cx_fs:.2f},{cy_fs:.2f})]\n"
+                f"LEFT panel: full screen + red box. RIGHT panel: zoomed 16×16 sub-grid.\n"
+                f"Sub-grid coords auto-translate to full-screen when you click.\n"
                 f"{dom_zoom_section}"
                 f"OCR text in zoomed view:\n{text_map}\n"
-                f"\n"
-                f"══ VERIFY BEFORE CLICKING ══\n"
-                f"LEFT panel: is the red box over the CORRECT screen region?\n"
-                f"RIGHT panel: is your target element CLEARLY VISIBLE?\n"
-                f"  BOTH YES → crosshair-check coords → CLICK NOW (no more zooming)\n"
-                f"  Wrong area → screenshot, re-identify, zoom elsewhere"
             )
             if self.event_cb:
                 try:
