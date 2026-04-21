@@ -159,7 +159,8 @@ top-left=(0,0)   bottom-right=(16,16)
 Decimals required — use 7.5 not 7
 Columns 0=left edge → 16=right edge
 Rows    0=top edge  → 16=bottom edge
-OCR text positions in screenshot output are pixel-accurate — always prefer them.
+DOM elements (labeled "exact coords") give the most reliable positions — use those first.
+OCR text positions are also pixel-accurate — use them when DOM has no match.
 NEVER invent coordinates without taking a screenshot first.
 
 ══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
@@ -203,7 +204,7 @@ These are your saved discoveries from past sessions. Trust them.
 4.  After EVERY click: screenshot to verify it worked
 5.  If a click misses: screenshot → zoom fresh, NEVER reuse old coords
 6.  Stuck on a button? Try Enter, Tab+Enter, or keyboard shortcut instead
-7.  Use OCR sub-grid coords in zoomed view for text elements
+7.  Use DOM coords first (exact), then OCR coords (also precise) — never guess from image alone
 8.  NEVER repeat same tool+args 4× in a row
 9.  Learned something useful (binary path, UI quirk, keyboard shortcut)? → note it immediately
 10. Task done → finish {{"summary": "what happened", "success": true}}
@@ -259,7 +260,8 @@ REQUIRED FLOW:
 
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
-OCR positions from screenshot are pixel-accurate — use them.
+DOM elements (labeled "exact coords") are most reliable — use those first.
+OCR positions are also pixel-accurate — use them when DOM has no match.
 NEVER invent coordinates without a screenshot first.
 
 ══════════════════ CROSSHAIR COORDINATE CHECK ══════════════════
@@ -291,7 +293,8 @@ These are your saved discoveries from past sessions. Trust them.
 1.  cmd FIRST   2. Shortcuts before clicking
 3.  ZOOM before EVERY click — screenshot → zoom (×2) → verify → click
 4.  After every click: screenshot to verify   5. Miss → start over with fresh zoom
-6.  Use OCR sub-grid coords   7. Never repeat same tool+args 4× in a row
+6.  Use DOM coords first (exact), then OCR (also precise) — never guess from image
+7. Never repeat same tool+args 4× in a row
 8.  Learned something useful? → note it
 9.  Done → finish {{"summary": "...", "success": true}}
 10. Stuck → finish {{"summary": "...", "success": false}}   11. Do NOT close xterm
