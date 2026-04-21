@@ -11,9 +11,11 @@ from react_tools import ToolRegistry, ToolResult
 from gui_screen import GUIScreen
 from gui_input import GUIInput
 from gui_dom import DOMExtractor
+from gui_profiles import ProfileStore
 
 
 GUI_TOOL_SCHEMAS = {
+    "plan":         '  plan          — {"steps": ["1. do x", "2. do y", ...]}  # set/update task plan; shown on every screenshot',
     "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background',
     "screenshot":   '  screenshot    — {}  # full-screen; also exits zoom mode',
     "zoom":         '  zoom          — {"x": float, "y": float, "w": float, "h": float}  # w/h in grid cells (default 1×1); zoomed 16×16 sub-grid; clicks auto-translate',
@@ -25,7 +27,8 @@ GUI_TOOL_SCHEMAS = {
     "scroll":       '  scroll        — {"direction": "up"|"down", "x": float, "y": float}  # x,y: move mouse there first (required for browser scroll)',
     "drag":         '  drag          — {"x1": float, "y1": float, "x2": float, "y2": float}',
     "wait":         '  wait          — {"seconds": float}',
-    "note":         '  note          — {"text": str}  # save a discovery to persistent notes (binary paths, UI quirks, tips)',
+    "note":         '  note          — {"text": str}  # save a general discovery (binary paths, UI quirks, tips)',
+    "save_profile": '  save_profile  — {"name": str, "site": str, "task": str, "steps": str, "notes": str}  # document a repeatable task flow for future runs',
     "finish":       '  finish        — {"summary": str, "success": bool}',
 }
 
@@ -40,8 +43,8 @@ class GUIToolRegistry(ToolRegistry):
     """
 
     GUI_TOOL_NAMES = {
-        "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
-        "type", "key", "scroll", "drag", "wait", "note", "finish",
+        "plan", "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
+        "type", "key", "scroll", "drag", "wait", "note", "save_profile", "finish",
     }
 
     NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
@@ -82,6 +85,11 @@ class GUIToolRegistry(ToolRegistry):
             screen_w=self.input_ctrl.screen_w,
             screen_h=self.input_ctrl.screen_h,
         )
+        # Current task plan — list of step strings set by plan tool.
+        # Shown on every screenshot observation so the model never loses its roadmap.
+        self._current_plan: list = []
+        # Profile store for save_profile tool.
+        self._profile_store = ProfileStore()
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -157,6 +165,7 @@ class GUIToolRegistry(ToolRegistry):
                 pass
 
         handlers = {
+            "plan":         self._handle_plan,
             "cmd":          self._handle_cmd,
             "screenshot":   self._handle_screenshot,
             "zoom":         self._handle_zoom,
@@ -169,6 +178,7 @@ class GUIToolRegistry(ToolRegistry):
             "drag":         self._handle_drag,
             "wait":         self._handle_wait,
             "note":         self._handle_note,
+            "save_profile": self._handle_save_profile,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
         result = handlers[tool](args)
@@ -418,13 +428,18 @@ class GUIToolRegistry(ToolRegistry):
                     f"{dom_map}\n"
                 )
 
+            plan_section = ""
+            if self._current_plan:
+                plan_lines = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self._current_plan))
+                plan_section = f"PLAN:\n{plan_lines}\n"
+
             obs = (
                 f"[SCREENSHOT {w}×{h} — 16×16 grid overlaid, image attached]\n"
                 f"{cursor_note}"
+                f"{plan_section}"
                 f"{dom_section}"
                 f"OCR text (all visible text, less precise):\n"
                 f"{text_map}\n"
-                f"Examine the image and decide your next action."
             )
 
             if self.event_cb:
@@ -545,6 +560,21 @@ class GUIToolRegistry(ToolRegistry):
         except Exception as e:
             return ToolResult(False, "", f"Wait failed: {e}", {})
 
+    def _handle_plan(self, args):
+        """Store a task plan. Displayed on every subsequent screenshot observation."""
+        try:
+            steps = args.get("steps", [])
+            if isinstance(steps, str):
+                # Model sometimes passes a newline-separated string
+                steps = [s.strip() for s in steps.strip().splitlines() if s.strip()]
+            if not steps:
+                return ToolResult(False, "", "plan requires 'steps' as a non-empty list or string", {})
+            self._current_plan = [str(s) for s in steps]
+            formatted = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self._current_plan))
+            return ToolResult(True, f"Plan set ({len(self._current_plan)} steps):\n{formatted}", "", {})
+        except Exception as e:
+            return ToolResult(False, "", f"Plan failed: {e}", {})
+
     def _handle_note(self, args):
         try:
             text = str(args.get("text", "")).strip()
@@ -559,3 +589,18 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(True, f"Note saved: {text[:120]}", "", {})
         except Exception as e:
             return ToolResult(False, "", f"Note failed: {e}", {})
+
+    def _handle_save_profile(self, args):
+        """Save a reusable task profile for future runs."""
+        try:
+            name  = str(args.get("name",  "")).strip()
+            site  = str(args.get("site",  "")).strip()
+            task  = str(args.get("task",  "")).strip()
+            steps = str(args.get("steps", "")).strip()
+            notes = str(args.get("notes", "")).strip()
+            if not name or not steps:
+                return ToolResult(False, "", "save_profile requires 'name' and 'steps'", {})
+            saved = self._profile_store.save(name, site, task, steps, notes)
+            return ToolResult(True, f"Profile saved: {saved}", "", {"profile": saved})
+        except Exception as e:
+            return ToolResult(False, "", f"save_profile failed: {e}", {})

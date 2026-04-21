@@ -36,6 +36,7 @@ from ollama_agent_core import OllamaCommandAgent
 from gui_screen import GUIScreen
 from gui_input import GUIInput
 from gui_tools import GUIToolRegistry, GUI_TOOLS_TEXT
+from gui_profiles import ProfileStore
 
 _NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
 
@@ -153,6 +154,41 @@ SCROLLING (always provide x,y so mouse is over the right window):
   scroll {{"direction": "down", "x": 8.0, "y": 8.0}}  # scroll center of screen
   scroll {{"direction": "up",   "x": 8.0, "y": 5.0}}  # scroll browser content area
 
+══════════════════ EFFICIENCY — BATCH SEQUENTIAL ACTIONS ══════════════════
+screenshot is expensive — it costs an iteration AND model inference. Use it deliberately.
+
+  ✓ CORRECT — batch a form sequence, one screenshot at the end:
+      click username_field → type email → key Tab → type password → key Enter → screenshot
+
+  ✗ WRONG — screenshot between every step:
+      click field → screenshot → type email → screenshot → key Tab → screenshot ...
+
+Take a screenshot WHEN:
+  • You need current state (start of task, after navigation, after page load)
+  • An action has uncertain outcome (form submit, dialog appears/disappears)
+  • Something went wrong and you need to re-orient
+
+Skip the screenshot WHEN:
+  • Filling in a form field by field (type, Tab, type, Enter is one atomic sequence)
+  • Pressing a modifier key (Ctrl+L, then just type the URL — no screenshot needed)
+  • After wait — screenshot only if you actually need to verify something loaded
+
+══════════════════ PLANNING ══════════════════
+First iteration: call plan {{"steps": ["1. ...", "2. ...", ...]}} BEFORE any other action.
+Keep it short (5–8 steps). Update it with another plan call if something changes.
+The plan is shown on every screenshot so you always know where you are.
+
+Example for login + assignment:
+  plan {{"steps": [
+    "1. Launch Brave to site",
+    "2. Screenshot — verify loaded, get Login coord from DOM",
+    "3. Click Login, screenshot — find form fields",
+    "4. Click username, type, Tab, type password, Enter",
+    "5. Screenshot — verify logged in",
+    "6. Find and open first assignment",
+    "7. Read problem, solve it, submit"
+  ]}}
+
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)
 Decimals required — use 7.5 not 7
@@ -206,6 +242,10 @@ ONE JSON object per response — NO prose, nothing else:
 These are your saved discoveries from past sessions. Trust them.
 {notes}
 
+══════════════════ TASK PROFILES (matched to this task) ══════════════════
+Step-by-step playbooks from previous successful runs on similar tasks.
+{profiles}
+
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
@@ -216,7 +256,7 @@ These are your saved discoveries from past sessions. Trust them.
 7.  Use DOM coords first (exact), then OCR coords (also precise) — never guess from image
 8.  NEVER repeat same tool+args 4× in a row
 9.  Learned something useful? → note it immediately
-10. Task done → finish {{"summary": "what happened", "success": true}}
+10. Task done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
 11. Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
 
 Start: can cmd accomplish this, or do I need the GUI?
@@ -273,6 +313,41 @@ ZOOM PATH — target absent from BOTH DOM and OCR (icons, unlabeled graphics onl
 
 Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
+══════════════════ EFFICIENCY — BATCH SEQUENTIAL ACTIONS ══════════════════
+screenshot is expensive — costs an iteration AND model inference. Use deliberately.
+
+  ✓ CORRECT — batch a form sequence, one screenshot at the end:
+      click username_field → type email → key Tab → type password → key Enter → screenshot
+
+  ✗ WRONG — screenshot between every step:
+      click field → screenshot → type email → screenshot → key Tab → screenshot ...
+
+Take a screenshot WHEN:
+  • Need current state (start of task, after navigation, after page load)
+  • Uncertain outcome (form submit, dialog may appear)
+  • Something went wrong and you need to re-orient
+
+Skip the screenshot WHEN:
+  • Filling a form field by field (click, type, Tab, type, Enter → ONE atomic sequence)
+  • After a modifier key (Ctrl+L then type URL — no screenshot needed)
+  • After wait — only screenshot if you need to verify something loaded
+
+══════════════════ PLANNING ══════════════════
+First iteration: call plan {{"steps": ["1. ...", "2. ...", ...]}} BEFORE any other action.
+Keep it short (5–8 steps). Update it with another plan call if something changes.
+The plan is shown on every screenshot so you always know where you are.
+
+Example:
+  plan {{"steps": [
+    "1. Launch Brave to site",
+    "2. Screenshot — verify loaded, get Login coord from DOM",
+    "3. Click Login, screenshot — find form fields",
+    "4. Click username, type, Tab, type password, Enter",
+    "5. Screenshot — verify logged in",
+    "6. Complete the task",
+    "7. save_profile + finish"
+  ]}}
+
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
 
@@ -306,6 +381,10 @@ ONE JSON object per response — NO prose:
 These are your saved discoveries from past sessions. Trust them.
 {notes}
 
+══════════════════ TASK PROFILES (matched to this task) ══════════════════
+Step-by-step playbooks from previous successful runs on similar tasks.
+{profiles}
+
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking
 3.  ❌ DOM/OCR coord present → click DIRECTLY, NO ZOOM. Zoom only when coord is absent.
@@ -313,7 +392,7 @@ These are your saved discoveries from past sessions. Trust them.
 6.  ❌ NEVER press Escape inside a login or form modal — closes it and loses progress
 7.  DOM coords first (exact), then OCR (also precise) — never guess from image
 8.  Never repeat same tool+args 4× in a row   9. Learned something? → note it
-10. Done → finish {{"summary": "...", "success": true}}
+10. Done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
 11. Stuck → finish {{"summary": "...", "success": false}}   12. Do NOT close xterm
 
 Start: cmd or GUI?
@@ -605,6 +684,12 @@ class GUIAgent:
 
         budget_warn = max(5, max_iterations // 5)
         notes = _load_notes()
+
+        # Search for relevant task profiles — inject matched ones, skip the rest
+        _ps = ProfileStore()
+        matched = _ps.search(task, top_n=2)
+        profiles = _ps.format_for_prompt(matched)
+
         template = _KDE_SYSTEM_PROMPT if self.display == ":0" else _HEADLESS_SYSTEM_PROMPT
         system_prompt = template.format(
             task=task,
@@ -612,6 +697,7 @@ class GUIAgent:
             max_iterations=max_iterations,
             budget_warn=budget_warn,
             notes=notes,
+            profiles=profiles,
         )
 
         self.agent.max_react_iterations = max_iterations
