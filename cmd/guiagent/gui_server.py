@@ -540,7 +540,7 @@ HTML_UI = r"""<!DOCTYPE html>
       <textarea id="task-input" placeholder="Describe what the agent should do on the desktop…"></textarea>
       <div class="form-row">
         <label for="iter-input">Max iterations:</label>
-        <input type="number" id="iter-input" value="30" min="5" max="200">
+        <input type="number" id="iter-input" value="60" min="5" max="200">
         <button id="stop-btn" onclick="stopAgent()">Stop</button>
         <button id="start-btn" onclick="startAgent()">Start</button>
       </div>

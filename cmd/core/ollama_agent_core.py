@@ -1992,6 +1992,14 @@ Return JSON only:
                 })
                 continue
 
+            # Strip <think>…</think> blocks before history + parse.
+            # qwen3 reasoning models emit these; extract_json finds the first { inside
+            # them (which is not valid JSON), wastes an iteration on a parse failure.
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            if not raw:
+                react_history.append({"role": "user", "content": "ERROR: Response was only a <think> block. Produce a JSON tool call."})
+                continue
+
             react_history.append({"role": "assistant", "content": raw})
 
             # Parse JSON from response
