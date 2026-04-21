@@ -527,14 +527,28 @@ class OllamaCommandAgent:
                              headers={"Content-Type": "application/json"})
                 resp = conn.getresponse()
                 parts: List[str] = []
+                # Set 500ms socket read timeout so stop_event is checked every
+                # 500ms even during long prefill waits (time-to-first-token can
+                # be 30-45s). Without this the Stop button appears frozen.
+                import socket as _socket
                 try:
-                    for raw_line in resp:
+                    conn.sock.settimeout(0.5)
+                except Exception:
+                    pass
+                try:
+                    while True:
                         if stop_event.is_set():
                             try:
                                 conn.close()
                             except Exception:
                                 pass
                             return self._STOP_SENTINEL
+                        try:
+                            raw_line = resp.readline()
+                        except _socket.timeout:
+                            continue  # no data yet — check stop_event again
+                        if not raw_line:
+                            break
                         line = raw_line.strip()
                         if not line:
                             continue
@@ -547,10 +561,14 @@ class OllamaCommandAgent:
                                 break
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             pass
-                except Exception:
+                except Exception as _se:
                     if stop_event.is_set():
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
                         return self._STOP_SENTINEL
-                    raise
+                    raise _se
                 return "".join(parts)
             except Exception as e:
                 if stop_event and stop_event.is_set():

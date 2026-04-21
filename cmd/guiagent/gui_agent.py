@@ -37,6 +37,7 @@ from gui_screen import GUIScreen
 from gui_input import GUIInput
 from gui_tools import GUIToolRegistry, GUI_TOOLS_TEXT
 from gui_profiles import ProfileStore
+from gui_macros import MacroStore
 
 _NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
 
@@ -318,6 +319,12 @@ These are your saved discoveries from past sessions. Trust them.
 Step-by-step playbooks from previous successful runs on similar tasks.
 {profiles}
 
+══════════════════ MACROS — instant single-turn replay ══════════════════
+Cached action sequences from previous successful runs.
+Run an entire flow in ONE iteration: sequence {{"macro": "MACRO_NAME"}}
+If a macro covers your next step, USE IT — do not re-discover what is already known.
+{macros}
+
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
@@ -467,6 +474,12 @@ These are your saved discoveries from past sessions. Trust them.
 ══════════════════ TASK PROFILES (matched to this task) ══════════════════
 Step-by-step playbooks from previous successful runs on similar tasks.
 {profiles}
+
+══════════════════ MACROS — instant single-turn replay ══════════════════
+Cached action sequences from previous successful runs.
+Run an entire flow in ONE iteration: sequence {{"macro": "MACRO_NAME"}}
+If a macro covers your next step, USE IT — do not re-discover what is already known.
+{macros}
 
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking
@@ -848,6 +861,10 @@ class GUIAgent:
         matched = _ps.search(task, top_n=2)
         profiles = _ps.format_for_prompt(matched)
 
+        # Load all macros — always inject full catalog (small, fast)
+        _ms = MacroStore()
+        macros = _ms.format_for_prompt()
+
         template = _KDE_SYSTEM_PROMPT if self.display == ":0" else _HEADLESS_SYSTEM_PROMPT
         system_prompt = template.format(
             task=task,
@@ -856,6 +873,7 @@ class GUIAgent:
             budget_warn=budget_warn,
             notes=notes,
             profiles=profiles,
+            macros=macros,
             math_guide=_MATH_INPUT_GUIDE,
         )
 

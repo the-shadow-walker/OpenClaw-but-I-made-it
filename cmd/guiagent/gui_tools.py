@@ -12,6 +12,7 @@ from gui_screen import GUIScreen
 from gui_input import GUIInput
 from gui_dom import DOMExtractor
 from gui_profiles import ProfileStore
+from gui_macros import MacroStore
 
 
 GUI_TOOL_SCHEMAS = {
@@ -29,6 +30,8 @@ GUI_TOOL_SCHEMAS = {
     "wait":         '  wait          — {"seconds": float}',
     "note":         '  note          — {"text": str}  # save a general discovery (binary paths, UI quirks, tips)',
     "save_profile": '  save_profile  — {"name": str, "site": str, "task": str, "steps": str, "notes": str}  # document a repeatable task flow for future runs',
+    "sequence":     '  sequence      — {"steps": [{"tool":"click","args":{"x":3.1,"y":5.2}}, ...]} or {"macro": "NAME"}  # execute multiple tools in ONE turn',
+    "save_macro":   '  save_macro    — {"name": str, "description": str, "steps": [...]}  # cache an action sequence for instant replay next run',
     "finish":       '  finish        — {"summary": str, "success": bool}',
 }
 
@@ -44,7 +47,8 @@ class GUIToolRegistry(ToolRegistry):
 
     GUI_TOOL_NAMES = {
         "plan", "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
-        "type", "key", "scroll", "drag", "wait", "note", "save_profile", "finish",
+        "type", "key", "scroll", "drag", "wait", "note", "save_profile",
+        "sequence", "save_macro", "finish",
     }
 
     NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
@@ -90,6 +94,8 @@ class GUIToolRegistry(ToolRegistry):
         self._current_plan: list = []
         # Profile store for save_profile tool.
         self._profile_store = ProfileStore()
+        # Macro store for sequence / save_macro tools.
+        self._macro_store = MacroStore()
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -179,6 +185,8 @@ class GUIToolRegistry(ToolRegistry):
             "wait":         self._handle_wait,
             "note":         self._handle_note,
             "save_profile": self._handle_save_profile,
+            "sequence":     self._handle_sequence,
+            "save_macro":   self._handle_save_macro,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
         result = handlers[tool](args)
@@ -607,3 +615,99 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(True, f"Profile saved: {saved}", "", {"profile": saved})
         except Exception as e:
             return ToolResult(False, "", f"save_profile failed: {e}", {})
+
+    def _handle_sequence(self, args):
+        """Execute a list of tool calls in order — DuckyScript style, one agent turn.
+
+        Args:
+          steps  — inline list: [{"tool": "click", "args": {"x": 3.1, "y": 5.2}}, ...]
+          macro  — named macro: loads steps from MacroStore
+        Screenshots within the sequence update pending_image normally.
+        Stops on the first hard failure (non-screenshot, non-wait tool).
+        """
+        try:
+            # Load steps from macro name or inline list
+            macro_name = args.get("macro", "")
+            if macro_name:
+                macro = self._macro_store.load(macro_name)
+                if not macro:
+                    return ToolResult(False, "",
+                        f"Macro '{macro_name}' not found. Available: "
+                        f"{[m['name'] for m in self._macro_store.list_all()]}",
+                        {})
+                steps = macro.get("steps", [])
+                header = f"[MACRO: {macro['name']} — {macro.get('description', '')}]\n"
+            else:
+                steps = args.get("steps", [])
+                header = "[SEQUENCE]\n"
+
+            if not steps:
+                return ToolResult(False, "", "sequence requires 'steps' list or valid 'macro' name", {})
+
+            # Build handler map (same as dispatch but restricted — no recursion)
+            _handlers = {
+                "plan":         self._handle_plan,
+                "cmd":          self._handle_cmd,
+                "screenshot":   self._handle_screenshot,
+                "click":        self._handle_click,
+                "double_click": self._handle_double_click,
+                "right_click":  self._handle_right_click,
+                "type":         self._handle_type,
+                "key":          self._handle_key,
+                "scroll":       self._handle_scroll,
+                "drag":         self._handle_drag,
+                "wait":         self._handle_wait,
+                "note":         self._handle_note,
+                "zoom":         self._handle_zoom,
+            }
+
+            outputs = [header]
+            for i, step in enumerate(steps):
+                tool = step.get("tool", "")
+                step_args = step.get("args", {})
+
+                if tool in ("sequence", "save_macro", "save_profile", "finish"):
+                    outputs.append(f"  step {i+1}: SKIP — '{tool}' not allowed inside sequence")
+                    continue
+
+                handler = _handlers.get(tool)
+                if not handler:
+                    outputs.append(f"  step {i+1}: ERROR — unknown tool '{tool}'")
+                    continue
+
+                result = handler(step_args)
+                self._last_tool_called = tool
+
+                status = "OK  " if result.success else "FAIL"
+                detail = (result.output or result.error or "")[:300]
+                outputs.append(f"  step {i+1} [{tool}] {status}: {detail}")
+
+                # Stop on hard failure (not wait/screenshot which always "succeed")
+                if not result.success and tool not in ("wait", "screenshot", "note"):
+                    outputs.append(f"  [sequence stopped at step {i+1} due to failure]")
+                    break
+
+            return ToolResult(True, "\n".join(outputs), "", {
+                "sequence": True,
+                "steps_run": len(steps),
+            })
+        except Exception as e:
+            return ToolResult(False, "", f"sequence failed: {e}", {})
+
+    def _handle_save_macro(self, args):
+        """Save an action sequence as a named macro for future single-turn replay."""
+        try:
+            name        = str(args.get("name",        "")).strip()
+            description = str(args.get("description", "")).strip()
+            steps       = args.get("steps", [])
+            if not name:
+                return ToolResult(False, "", "save_macro requires 'name'", {})
+            if not steps or not isinstance(steps, list):
+                return ToolResult(False, "", "save_macro requires 'steps' as a list of tool calls", {})
+            saved = self._macro_store.save(name, description, steps)
+            return ToolResult(True,
+                f"Macro saved: {saved} ({len(steps)} steps)\n"
+                f"Next run: sequence {{\"macro\": \"{saved}\"}}",
+                "", {"macro": saved})
+        except Exception as e:
+            return ToolResult(False, "", f"save_macro failed: {e}", {})
