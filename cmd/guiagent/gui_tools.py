@@ -337,10 +337,10 @@ class GUIToolRegistry(ToolRegistry):
             )
             if self.event_cb:
                 try:
-                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — panel — {len(elements)} OCR"})
+                    self.event_cb("vision", {"text": f"Zoom {zoom_w}×{zoom_h}px — panel — {len(zoom_elements)} OCR"})
                 except Exception:
                     pass
-            return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(elements)})
+            return ToolResult(True, obs, "", {"zoom": True, "ocr_count": len(zoom_elements)})
         except Exception as e:
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 

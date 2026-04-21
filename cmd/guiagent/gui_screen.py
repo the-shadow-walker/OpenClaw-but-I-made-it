@@ -111,7 +111,10 @@ class GUIScreen:
                 conf = int(data["conf"][i])
             except (ValueError, TypeError):
                 continue
-            if conf < 30:
+            if conf < 15:
+                continue
+            # Skip single-character noise (toolbar icons, punctuation artifacts)
+            if len(text) < 2:
                 continue
 
             x = data["left"][i]
