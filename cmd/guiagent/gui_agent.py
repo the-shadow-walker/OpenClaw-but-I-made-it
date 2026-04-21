@@ -97,6 +97,15 @@ General:
   Tab / Shift+Tab    next / prev field
   Enter              confirm / activate
   Esc                cancel / close dialog
+  Space              activate focused button / checkbox / toggle
+  Delete             forward-delete character
+  Backspace          backward-delete character
+  Home / End         jump to line start / end
+  Ctrl+Home/End      jump to document start / end
+  Left/Right         move cursor one character
+  Ctrl+Left/Right    move cursor one word
+  Up/Down            move cursor one line / navigate menu / list
+  PageUp/PageDown    scroll one screen
 
 KDE window management:
   Alt+Tab            switch windows
@@ -131,6 +140,37 @@ File manager / terminal:
   Delete             move to trash
   Ctrl+H             show hidden files
   Ctrl+L             focus path / address bar
+
+Math input widgets (MathQuill — used by DeltaMath, Desmos, etc.):
+  Left / Right       move cursor through the expression
+  Up / Down          move into/out of exponents, fractions (numerator↔denominator)
+  Tab                move to next template slot (e.g. index → radicand in nth root)
+  Shift+Tab          move to previous template slot
+  Ctrl+A             select all content in the math field
+  Backspace          delete backwards (exits template slot when empty)
+  ^                  open exponent slot  — e.g. x^2 gives x²
+  /                  open fraction — numerator on left, Tab to denominator
+  Esc / Right        exit current template slot to the right
+
+  ── Nth root (cube root, 4th root, etc.) ──
+  1. Click the ⁿ√ button — cursor lands in the INDEX slot (small number)
+  2. Type the root index  (e.g. 3 for cube root, 4 for 4th root)
+  3. Press Tab or Right → cursor moves into the RADICAND slot
+  4. Type the radicand   (e.g. x, 2x+1, x^2)
+  5. Press Right         → cursor exits the root, back to main expression
+  6. Continue typing or click Submit/Check
+
+  ── Square root ──
+  Click √ button → cursor is already in the radicand → type content → Right to exit
+
+  ── Exponents / fractions ──
+  Type base → ^ → type exponent → Right to exit superscript
+  Click ÷ button → type numerator → Tab → type denominator → Right to exit
+
+  ── When text input is rejected / format error ──
+  The widget did NOT accept plain text. You must use buttons + keyboard:
+  • Clear the field: Ctrl+A then Backspace
+  • Re-enter using button clicks + arrow/Tab navigation (never paste Unicode math symbols)
 
 ══════════════════ CLICKING STRATEGY ══════════════════
 ❌ DO NOT ZOOM before clicking when DOM or OCR already gives you the coordinate.
@@ -291,12 +331,35 @@ SHORTCUTS SECOND. GUI MOUSE LAST.
 General:
   Ctrl+C/V/X         copy/paste/cut    Ctrl+Z  undo    Ctrl+A  select all
   Tab/Shift+Tab      next/prev field   Enter   confirm
+  Space              activate button/checkbox    Delete  forward-delete
+  Home/End           line start/end    Ctrl+Home/End  doc start/end
+  Left/Right         move cursor    Ctrl+Left/Right   one word
+  Up/Down            line / menu navigation
+  PageUp/PageDown    scroll one screen
   Esc  cancel — ⚠️ NEVER inside a login/form modal (Escape will close it!)
 
 Browser (Brave):
   Ctrl+L             focus URL bar (use this, not clicking)
   Ctrl+T             new tab     Ctrl+W  close tab    Ctrl+R  refresh
   Ctrl+F             find        F11     fullscreen
+
+Math input widgets (MathQuill — used by DeltaMath, Desmos, etc.):
+  Left/Right         move cursor through expression
+  Up/Down            enter/exit exponents, fractions (numerator↔denominator)
+  Tab/Shift+Tab      next/prev template slot (index → radicand, numerator → denominator)
+  Ctrl+A             select all    Backspace  delete / exit empty slot
+  ^                  exponent slot    /  fraction
+
+  ── Nth root workflow ──
+  1. Click ⁿ√ button → cursor in INDEX slot
+  2. Type index  (e.g. 3)
+  3. Tab → cursor in RADICAND slot
+  4. Type radicand  (e.g. x)
+  5. Right → exit root, continue expression
+  6. Submit/Check
+
+  ── Format error / rejected input ──
+  Do NOT type Unicode math symbols. Clear with Ctrl+A + Backspace, re-enter via buttons + keyboard.
 
 ══════════════════ CLICKING STRATEGY ══════════════════
 ❌ DO NOT ZOOM when DOM or OCR already gives you the coordinate. It wastes 2 iterations.
