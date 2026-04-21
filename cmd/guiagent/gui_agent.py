@@ -54,6 +54,67 @@ def _load_notes() -> str:
     return "(empty — use note tool to save discoveries as you work)"
 
 
+# ── Math/science input reference (raw string — backslashes are LaTeX commands) ───
+# Defined outside the format-string prompts so Python doesn't misinterpret \t \n etc.
+_MATH_INPUT_GUIDE = r"""Math & Science Input (MathQuill — DeltaMath, Khan Academy, Desmos, etc.)
+DO NOT type Unicode symbols (√ ∛ π θ ≤ etc.) — the widget will reject them.
+Use LaTeX commands or button clicks instead. Type the command then Space to render.
+
+── Navigation ──
+  Left/Right         move cursor    Up/Down  enter/exit super/fraction slots
+  Tab / Shift+Tab    next / prev template slot    Right  exit slot
+  Ctrl+A  select all    Backspace  delete / exit empty slot
+
+── Structures ──
+  x^2  exponent (type base ^ exponent Right)     x_1  subscript (type base _ subscript Right)
+  /    fraction (type numerator / denominator Right)     |x|  absolute value
+  \sqrt{x}  square root (type \sqrt then content)
+  nth root: click n-root button → type INDEX (3 for cube) → Tab → type RADICAND → Right
+
+── Greek letters (type + Space) ──
+  \alpha  \beta  \gamma  \delta  \epsilon  \zeta  \eta  \theta  \iota  \kappa
+  \lambda  \mu  \nu  \xi  \pi  \rho  \sigma  \tau  \phi  \chi  \psi  \omega
+  \Delta  \Theta  \Lambda  \Pi  \Sigma  \Omega  \Gamma  \Phi  \Psi
+
+── Operators & relations ──
+  \times  \div  \cdot  \pm  \mp  \le  \ge  \ne  \approx  \sim  \equiv  \cong
+  \to  \gets  \Rightarrow  \leftrightarrow  \infty  \degree  \circ
+  \angle  \perp  \parallel  \triangle  \overline{}  \vec{}
+
+── Physics ──
+  Scientific notation:  3.0\times10^8   (type \times then 10^8)
+  Units:                kg\cdot m/s^2   N\cdot m   J/kg
+  Vectors:              \vec{v}  or use vector button
+  Delta:                \Delta x  (change in x)
+  Common: \theta (angle)  \lambda (wavelength)  \mu (friction/micro-prefix)
+          \omega (angular vel)  \alpha (angular accel)  \rho (density)
+          \phi (flux/angle)  \eta (efficiency)  \tau (torque/period)  \sigma (stress)
+          \Delta (change)  \Sigma (sum)  \nabla (gradient)
+
+── Chemistry ──
+  Subscripts:   H_2O   CO_2   C_6H_{12}O_6   SO_4^{2-}
+  Charges:      Fe^{2+}   OH^-   Ca^{2+}   Cu^{2+}   NH_4^+
+  Reaction arrow: \to  or click button
+  Equilibrium:  click double-arrow button
+  States:       (s)  (l)  (g)  (aq)  — type normally in parentheses
+
+── Algebra / Geometry ──
+  Fractions:    type numerator / denominator (auto-fraction in MathQuill)
+  Absolute val: |expression|
+  Log/ln:       \log   \ln   \log_{b}x  (subscript b)
+  Trig:         \sin   \cos   \tan   \csc   \sec   \cot
+  Inverse trig: \sin^{-1}   \cos^{-1}   \tan^{-1}  (or use button)
+  Congruent:    \cong   Similar: \sim   Angle: \angle   Triangle: \triangle
+  Line segment: \overline{AB}   Ray: \vec{AB}
+  Limits:       \lim_{x\to 0}
+  Sum/integral: \sum   \int  (use buttons when available)
+
+── Recovery when input is rejected ──
+  1. Ctrl+A then Backspace — clear field completely
+  2. Screenshot to confirm blank
+  3. Re-enter via LaTeX commands or button clicks — never paste Unicode symbols
+  4. Screenshot after complex entry to verify it rendered correctly before submitting"""
+
 # ── System prompts ─────────────────────────────────────────────────────────────
 
 # Real KDE desktop (:0) — full Plasma environment
@@ -141,36 +202,7 @@ File manager / terminal:
   Ctrl+H             show hidden files
   Ctrl+L             focus path / address bar
 
-Math input widgets (MathQuill — used by DeltaMath, Desmos, etc.):
-  Left / Right       move cursor through the expression
-  Up / Down          move into/out of exponents, fractions (numerator↔denominator)
-  Tab                move to next template slot (e.g. index → radicand in nth root)
-  Shift+Tab          move to previous template slot
-  Ctrl+A             select all content in the math field
-  Backspace          delete backwards (exits template slot when empty)
-  ^                  open exponent slot  — e.g. x^2 gives x²
-  /                  open fraction — numerator on left, Tab to denominator
-  Esc / Right        exit current template slot to the right
-
-  ── Nth root (cube root, 4th root, etc.) ──
-  1. Click the ⁿ√ button — cursor lands in the INDEX slot (small number)
-  2. Type the root index  (e.g. 3 for cube root, 4 for 4th root)
-  3. Press Tab or Right → cursor moves into the RADICAND slot
-  4. Type the radicand   (e.g. x, 2x+1, x^2)
-  5. Press Right         → cursor exits the root, back to main expression
-  6. Continue typing or click Submit/Check
-
-  ── Square root ──
-  Click √ button → cursor is already in the radicand → type content → Right to exit
-
-  ── Exponents / fractions ──
-  Type base → ^ → type exponent → Right to exit superscript
-  Click ÷ button → type numerator → Tab → type denominator → Right to exit
-
-  ── When text input is rejected / format error ──
-  The widget did NOT accept plain text. You must use buttons + keyboard:
-  • Clear the field: Ctrl+A then Backspace
-  • Re-enter using button clicks + arrow/Tab navigation (never paste Unicode math symbols)
+{math_guide}
 
 ══════════════════ CLICKING STRATEGY ══════════════════
 ❌ DO NOT ZOOM before clicking when DOM or OCR already gives you the coordinate.
@@ -343,23 +375,7 @@ Browser (Brave):
   Ctrl+T             new tab     Ctrl+W  close tab    Ctrl+R  refresh
   Ctrl+F             find        F11     fullscreen
 
-Math input widgets (MathQuill — used by DeltaMath, Desmos, etc.):
-  Left/Right         move cursor through expression
-  Up/Down            enter/exit exponents, fractions (numerator↔denominator)
-  Tab/Shift+Tab      next/prev template slot (index → radicand, numerator → denominator)
-  Ctrl+A             select all    Backspace  delete / exit empty slot
-  ^                  exponent slot    /  fraction
-
-  ── Nth root workflow ──
-  1. Click ⁿ√ button → cursor in INDEX slot
-  2. Type index  (e.g. 3)
-  3. Tab → cursor in RADICAND slot
-  4. Type radicand  (e.g. x)
-  5. Right → exit root, continue expression
-  6. Submit/Check
-
-  ── Format error / rejected input ──
-  Do NOT type Unicode math symbols. Clear with Ctrl+A + Backspace, re-enter via buttons + keyboard.
+{math_guide}
 
 ══════════════════ CLICKING STRATEGY ══════════════════
 ❌ DO NOT ZOOM when DOM or OCR already gives you the coordinate. It wastes 2 iterations.
@@ -833,6 +849,7 @@ class GUIAgent:
             budget_warn=budget_warn,
             notes=notes,
             profiles=profiles,
+            math_guide=_MATH_INPUT_GUIDE,
         )
 
         self.agent.max_react_iterations = max_iterations
