@@ -597,42 +597,114 @@ class GUIAgent:
             time.sleep(0.8)
             print("  xterm ready")
 
-    def _inhibit_sleep(self):
-        """Disable screensaver + power management across all three layers:
-        X11 (xset), KDE/freedesktop D-Bus inhibit, and xdg-screensaver.
-        Stores D-Bus cookie in self._inhibit_cookie for cleanup.
+    def _get_session_env(self) -> dict:
+        """Build env dict with DBUS_SESSION_BUS_ADDRESS from the running KDE session.
+
+        The gui-agent systemd service doesn't inherit the user's D-Bus session bus,
+        so qdbus calls fail silently. We find the address by reading /proc/<pid>/environ
+        of a known KDE session process owned by the current user.
         """
         env = {**os.environ, "DISPLAY": self.display}
-        # Layer 1: X11 screensaver + DPMS
-        for args in [["xset", "s", "off"], ["xset", "-dpms"]]:
+        xauth = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(xauth):
+            env["XAUTHORITY"] = xauth
+
+        if env.get("DBUS_SESSION_BUS_ADDRESS"):
+            return env  # already set (interactive session)
+
+        user = os.environ.get("USER", "Grindlewalt")
+        for proc_name in ("plasmashell", "kwin_x11", "kded6", "kded5"):
             try:
-                subprocess.run(args, env=env, capture_output=True, timeout=3)
+                r = subprocess.run(
+                    ["pgrep", "-x", "-u", user, proc_name],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if r.returncode != 0:
+                    continue
+                pid = r.stdout.strip().split()[0]
+                with open(f"/proc/{pid}/environ", "rb") as f:
+                    raw = f.read()
+                for item in raw.split(b"\x00"):
+                    if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                        env["DBUS_SESSION_BUS_ADDRESS"] = item[25:].decode()
+                        print(f"  D-Bus session found via {proc_name} (pid {pid})")
+                        return env
+            except Exception:
+                continue
+        print("  ⚠️  D-Bus session bus not found — qdbus inhibit will be skipped")
+        return env
+
+    def _inhibit_sleep(self):
+        """Disable screensaver + power management across four layers.
+
+        Layer 1 — X11: set all DPMS timeouts to 0 and disable screensaver blank.
+        Layer 2 — KDE config: write kscreenlockerrc Autolock=false for the session.
+        Layer 3 — D-Bus: org.freedesktop.ScreenSaver.Inhibit (requires session bus).
+        Layer 4 — Heartbeat: mouse wiggle every 45s (belt-and-suspenders, see _heartbeat).
+        """
+        env = self._get_session_env()
+
+        # Layer 1: X11 — nuke all screensaver + DPMS timeouts
+        for cmd in [
+            ["xset", "s", "off"],           # disable X11 screensaver
+            ["xset", "s", "0", "0"],        # blank/expose timeouts to 0
+            ["xset", "-dpms"],              # disable DPMS
+            ["xset", "dpms", "0", "0", "0"],# standby/suspend/off all to 0
+        ]:
+            try:
+                subprocess.run(cmd, env=env, capture_output=True, timeout=3)
             except Exception:
                 pass
-        # Layer 2: KDE/freedesktop D-Bus — returns cookie for UnInhibit
+
+        # Layer 2: KDE screen lock config — disable auto-lock for current session
         try:
-            r = subprocess.run(
-                ["qdbus", "org.freedesktop.ScreenSaver", "/ScreenSaver",
-                 "Inhibit", "gui-agent", "Automation in progress"],
-                capture_output=True, text=True, timeout=5,
+            subprocess.run(
+                ["kwriteconfig5", "--file", "kscreenlockerrc",
+                 "--group", "Daemon", "--key", "Autolock", "false"],
+                env=env, capture_output=True, timeout=5,
             )
-            if r.returncode == 0 and r.stdout.strip().isdigit():
-                self._inhibit_cookie = int(r.stdout.strip())
         except Exception:
             pass
 
+        # Layer 3: freedesktop ScreenSaver inhibit via D-Bus
+        if env.get("DBUS_SESSION_BUS_ADDRESS"):
+            try:
+                r = subprocess.run(
+                    ["qdbus", "org.freedesktop.ScreenSaver", "/ScreenSaver",
+                     "Inhibit", "gui-agent", "Automation in progress"],
+                    env=env, capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode == 0 and r.stdout.strip().isdigit():
+                    self._inhibit_cookie = int(r.stdout.strip())
+                    print(f"  Screen inhibit cookie: {self._inhibit_cookie}")
+            except Exception:
+                pass
+
     def _uninhibit_sleep(self):
-        """Release the D-Bus screensaver inhibit lock."""
+        """Release D-Bus screensaver inhibit and restore KDE auto-lock."""
+        env = self._get_session_env()
+
+        # Release D-Bus inhibit
         if self._inhibit_cookie is not None:
             try:
                 subprocess.run(
                     ["qdbus", "org.freedesktop.ScreenSaver", "/ScreenSaver",
                      "UnInhibit", str(self._inhibit_cookie)],
-                    capture_output=True, timeout=5,
+                    env=env, capture_output=True, timeout=5,
                 )
             except Exception:
                 pass
             self._inhibit_cookie = None
+
+        # Restore KDE auto-lock
+        try:
+            subprocess.run(
+                ["kwriteconfig5", "--file", "kscreenlockerrc",
+                 "--group", "Daemon", "--key", "Autolock", "true"],
+                env=env, capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
 
     def _heartbeat(self, stop_event: threading.Event):
         """Layer 3: simulate user activity every 45s as belt-and-suspenders.
