@@ -418,8 +418,11 @@ class GUIToolRegistry(ToolRegistry):
 
             # DOM element extraction via CDP (auto, silent fallback if no browser)
             dom_elements = self._dom.extract()
-            self._last_dom_elements = dom_elements
-            dom_map = self._dom.build_element_map(dom_elements)
+            self._last_dom_elements = dom_elements  # store all for zoom reuse
+            # Cap at 60 elements for observation — prevents 4000-char truncation on
+            # complex pages (assignment lists etc.). Elements are ordered top-to-bottom
+            # so the most visible/relevant ones come first.
+            dom_map = self._dom.build_element_map(dom_elements[:60])
 
             dom_section = ""
             if dom_map:

@@ -1983,6 +1983,12 @@ Return JSON only:
                 break
 
             if not raw:
+                print(f"⚠️  Empty response at iter {iteration}")
+                try:
+                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
+                        _f.write(json.dumps({"iter": iteration, "reason": "empty_response"}) + "\n")
+                except Exception:
+                    pass
                 react_history.append({
                     "role": "user",
                     "content": (
@@ -1997,6 +2003,12 @@ Return JSON only:
             # them (which is not valid JSON), wastes an iteration on a parse failure.
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
             if not raw:
+                print(f"⚠️  Think-only response at iter {iteration}")
+                try:
+                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
+                        _f.write(json.dumps({"iter": iteration, "reason": "think_only"}) + "\n")
+                except Exception:
+                    pass
                 react_history.append({"role": "user", "content": "ERROR: Response was only a <think> block. Produce a JSON tool call."})
                 continue
 
@@ -2066,6 +2078,12 @@ Return JSON only:
             print(f"🎯 Tool: {tool}  |  Confidence: {confidence}%")
 
             if not tool:
+                print(f"⚠️  No tool field at iter {iteration} — parsed keys: {list(parsed.keys())}")
+                try:
+                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
+                        _f.write(json.dumps({"iter": iteration, "reason": "no_tool", "parsed": str(parsed)[:400]}) + "\n")
+                except Exception:
+                    pass
                 react_history.append({
                     "role": "user",
                     "content": "ERROR: Missing 'tool' field. You MUST specify a tool name.",
@@ -2338,7 +2356,7 @@ Return JSON only:
                     f"OBSERVATION [iteration {iteration}] — ✅ SUCCESS\n"
                     f"Tool: {tool}\n"
                     f"Args: {json.dumps(args)}\n"
-                    f"Output:\n{result.output[:4000]}\n"
+                    f"Output:\n{result.output[:6000]}\n"
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )

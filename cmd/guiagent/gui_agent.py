@@ -322,7 +322,7 @@ Step-by-step playbooks from previous successful runs on similar tasks.
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
 3.  ❌ DOM/OCR coord present → click DIRECTLY, NO ZOOM. Zoom only when coord is absent.
-4.  After EVERY click: screenshot to verify it worked
+4.  Screenshot only when needed: after navigation/page-load/submit. During form fill: batch (click→type→Tab→type→click) ONE screenshot at the end.
 5.  Miss → fresh screenshot (re-queries DOM live), use updated coord
 6.  ❌ NEVER press Escape inside a login or form modal — it will close/dismiss it
 7.  Use DOM coords first (exact), then OCR coords (also precise) — never guess from image
@@ -330,6 +330,10 @@ Step-by-step playbooks from previous successful runs on similar tasks.
 9.  Learned something useful? → note it immediately
 10. Task done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
 11. Irreversibly stuck → finish {{"summary": "what failed and why", "success": false}}
+12. ❌ NEVER type Unicode math symbols (∛ √ ² π θ Σ ≤ ≥ ∞ etc.) — MathQuill REJECTS them silently
+    Use: LaTeX commands (\\sqrt, \\theta, \\pi, \\le) + Space to render, or toolbar buttons
+13. MathQuill nth root: click ⁿ√ button → type INDEX (3=cube, 4=fourth) → Tab → type RADICAND → Right to exit
+14. MathQuill exponent: type BASE → ^ → type EXPONENT → Right    fraction: type NUM → / → DENOM → Right
 
 Start: can cmd accomplish this, or do I need the GUI?
 """
@@ -467,12 +471,15 @@ Step-by-step playbooks from previous successful runs on similar tasks.
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking
 3.  ❌ DOM/OCR coord present → click DIRECTLY, NO ZOOM. Zoom only when coord is absent.
-4.  After every click: screenshot to verify   5. Miss → fresh screenshot, re-query DOM
-6.  ❌ NEVER press Escape inside a login or form modal — closes it and loses progress
+4.  Screenshot only after navigation/page-load/submit. During form fill: batch without screenshots.
+5.  Miss → fresh screenshot, re-query DOM   6. ❌ NEVER press Escape inside login/form modal
 7.  DOM coords first (exact), then OCR (also precise) — never guess from image
 8.  Never repeat same tool+args 4× in a row   9. Learned something? → note it
 10. Done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
 11. Stuck → finish {{"summary": "...", "success": false}}   12. Do NOT close xterm
+13. ❌ NEVER type Unicode math (∛ √ ² π θ etc.) — MathQuill REJECTS them silently
+    Use LaTeX commands (\\sqrt, \\theta, \\pi) + Space, or toolbar buttons
+14. MathQuill nth root: click ⁿ√ button → type INDEX (3=cube) → Tab → type RADICAND → Right
 
 Start: cmd or GUI?
 """
