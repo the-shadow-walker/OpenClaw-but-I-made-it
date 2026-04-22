@@ -143,6 +143,90 @@ class GUIScreen:
             lines.append(f'  "{e["text"]}"  @ grid {e["grid_x"]}, {e["grid_y"]}')
         return "\n".join(lines)
 
+    def render_markers(self, img, registry, n_grid=16):
+        """Draw colored bordered rectangles + ID label boxes on a copy of img.
+
+        Color by source:
+          DOM    → Blue   (0, 120, 255)
+          AT-SPI → Green  (0, 200, 80)
+          CV     → Orange (255, 140, 0)
+
+        For each element:
+          1. Draw 2px colored border around its bounding box
+          2. Draw label box "[ID]" at top-left corner of bounding box
+             - Label box: filled with source color, white text
+             - Collision nudge: if label box overlaps any previously placed label,
+               shift label down by (box_h + 2px), up to 5 times
+
+        The 16×16 grid overlay is drawn on top (via overlay_grid()).
+        """
+        if not _PIL_OK:
+            return img
+
+        SOURCE_COLORS = {
+            "dom":   (0, 120, 255),
+            "atspi": (0, 200, 80),
+            "cv":    (255, 140, 0),
+        }
+        DEFAULT_COLOR = (180, 180, 180)
+
+        img = img.copy()
+        draw = ImageDraw.Draw(img)
+
+        placed_labels = []  # list of (x1, y1, x2, y2) for collision detection
+
+        def rects_overlap(r1, r2):
+            return not (r1[2] <= r2[0] or r1[0] >= r2[2] or
+                        r1[3] <= r2[1] or r1[1] >= r2[3])
+
+        for el in registry.elements:
+            color = SOURCE_COLORS.get(el.source, DEFAULT_COLOR)
+            cx, cy = el.x_px, el.y_px
+            hw, hh = max(el.w_px / 2, 4), max(el.h_px / 2, 4)
+
+            bx1 = int(cx - hw)
+            by1 = int(cy - hh)
+            bx2 = int(cx + hw)
+            by2 = int(cy + hh)
+
+            # Clip to image bounds
+            iw, ih = img.size
+            bx1, by1 = max(0, bx1), max(0, by1)
+            bx2, by2 = min(iw - 1, bx2), min(ih - 1, by2)
+
+            # Draw 2px colored border
+            for offset in range(2):
+                draw.rectangle(
+                    [bx1 - offset, by1 - offset, bx2 + offset, by2 + offset],
+                    outline=color,
+                )
+
+            # Label: "[ID]" box at top-left of bounding box
+            label = f"[{el.id}]"
+            # Approximate label size (7px per char wide, 12px tall)
+            label_w = len(label) * 7 + 4
+            label_h = 14
+
+            lx = bx1
+            ly = by1 - label_h - 1  # just above the box by default
+
+            # Collision nudge: shift down if overlapping a previously placed label
+            for _ in range(6):
+                label_rect = (lx, ly, lx + label_w, ly + label_h)
+                if not any(rects_overlap(label_rect, p) for p in placed_labels):
+                    break
+                ly += label_h + 2
+
+            # Clamp to image
+            ly = max(0, ly)
+            lx = min(lx, iw - label_w - 1)
+
+            draw.rectangle([lx, ly, lx + label_w, ly + label_h], fill=color)
+            draw.text((lx + 2, ly + 1), label, fill=(255, 255, 255))
+            placed_labels.append((lx, ly, lx + label_w, ly + label_h))
+
+        return img
+
     def draw_zoom_overlay(self, img, x_min, y_min, x_max, y_max):
         """Draw a thick red rectangle + label on img showing the zoomed region.
 

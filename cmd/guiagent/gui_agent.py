@@ -205,18 +205,22 @@ File manager / terminal:
 
 {math_guide}
 
-══════════════════ CLICKING STRATEGY ══════════════════
-❌ DO NOT ZOOM before clicking when DOM or OCR already gives you the coordinate.
-   Zooming when you already have coords wastes 2 iterations per click — this is FORBIDDEN.
-   The DOM list says "exact coords, click these" — take it literally, click immediately.
+══════════════════ CLICKING — ID FIRST ══════════════════
+Every screenshot has numbered markers on it. The element list shows each ID and its coords.
 
-FAST PATH — DOM or OCR coord available (covers 90%+ of cases):
-  screenshot → DOM: "button Login @ grid (7.68, 3.27)" → click {{"x": 7.68, "y": 3.27}} → done
-  screenshot → DOM: "input Username @ grid (8.0, 7.1)" → click {{"x": 8.0, "y": 7.1}} → done
-  No zoom. No crosshair check. Just copy the number and click.
+PREFERRED: click {{"id": 5}}              ← exact, never misses
+FALLBACK:  click {{"x": 7.68, "y": 3.27}} ← only if id is not listed
 
-ZOOM PATH — target absent from BOTH DOM and OCR (icons, unlabeled graphics only):
-  screenshot → not in DOM or OCR → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
+Priority:
+  1. ID from element list  [Blue]=DOM  [Green]=AT-SPI  [Orange]=CV
+  2. OCR coordinate (if element not in list but text is visible)
+  3. Crosshair estimate (ONLY for unlabeled graphics not in any list)
+
+If an ID click misses or element was removed: call rescan {{}} to refresh IDs, then retry.
+❌ Never zoom just to find coordinates when IDs are already shown on the image.
+
+ZOOM PATH — only for purely graphical/icon elements absent from all lists:
+  screenshot → not in element list or OCR → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
   LEFT=full+red box, RIGHT=zoomed sub-grid → crosshair check → click → verify
   ONE zoom per click — screenshot to reset before re-zooming.
 
@@ -268,23 +272,22 @@ Decimals required — use 7.5 not 7
 Columns 0=left edge → 16=right edge
 Rows    0=top edge  → 16=bottom edge
 
-HOW TO GET CLICK COORDINATES — follow this priority order every single time:
+HOW TO CLICK — follow this priority order every single time:
 
-  STEP 1 — Check DOM list (labeled "exact coords, click these"):
-    If your target element is listed → YOU MUST USE THAT EXACT NUMBER. Copy it
-    directly. Do not adjust it. Do not re-estimate from the image. Just use it.
+  STEP 1 — Element list (labeled "Elements (click by ID)"):
+    If your target is listed → click {{"id": N}} DIRECTLY. No zoom, no coord estimation.
+    The image shows numbered markers on each element. IDs are always current.
 
-  STEP 2 — Check OCR list (labeled "all visible text"):
-    If the target's text appears in OCR but not DOM → copy that coord directly.
+  STEP 2 — OCR list (labeled "OCR text fallback"):
+    If the target's text appears in OCR but not the element list → use that coord.
     OCR coords are pixel-accurate. Do not estimate from the image.
 
-  STEP 3 — Crosshair estimate (ONLY if target is absent from BOTH DOM and OCR):
-    This applies to icons, purely graphical elements, unlabeled buttons, or
-    anything where neither list has a matching entry. In that case use the
-    crosshair method below on the zoomed image to estimate the center.
+  STEP 3 — Crosshair estimate (ONLY if target is absent from BOTH lists):
+    Applies to unlabeled icons, purely graphical elements, or unknown UI areas.
+    Zoom in first, then use the crosshair method below.
 
 ══════════════════ CROSSHAIR METHOD (step 3 only — image-based fallback) ══════════════════
-Use this ONLY when your target element does NOT appear in the DOM or OCR lists.
+Use ONLY when your target does NOT appear in the element list or OCR list.
 
   X PASS — find the exact column:
     Pick a candidate x. Imagine a vertical line top-to-bottom at that x.
@@ -297,8 +300,8 @@ Use this ONLY when your target element does NOT appear in the DOM or OCR lists.
   COMMIT: only click once both lines intersect squarely on the element center.
           If uncertain after 2 passes, zoom tighter and repeat.
 
-  If you tried the DOM/OCR coord and it missed → that coord may be stale.
-  Take a fresh screenshot (DOM re-queries live), then try again.
+  If an ID click misses → call rescan {{}} to refresh IDs and retry.
+  If a coord misses → take a fresh screenshot (element list re-queries live), then retry.
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
@@ -328,11 +331,12 @@ If a macro covers your next step, USE IT — do not re-discover what is already 
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST — try terminal commands before any GUI action
 2.  Shortcuts before clicking — Ctrl+L beats clicking the address bar
-3.  ❌ DOM/OCR coord present → click DIRECTLY, NO ZOOM. Zoom only when coord is absent.
+3.  ❌ Element in list → click {{"id": N}} DIRECTLY. No zoom, no coordinate estimation.
+    Zoom ONLY for unmarked icons or pure graphical elements absent from all lists.
 4.  Screenshot only when needed: after navigation/page-load/submit. During form fill: batch (click→type→Tab→type→click) ONE screenshot at the end.
-5.  Miss → fresh screenshot (re-queries DOM live), use updated coord
+5.  ID click miss → rescan {{}} to refresh IDs; coord miss → fresh screenshot
 6.  ❌ NEVER press Escape inside a login or form modal — it will close/dismiss it
-7.  Use DOM coords first (exact), then OCR coords (also precise) — never guess from image
+7.  Use ID from element list first; OCR coord second; crosshair estimate last resort
 8.  NEVER repeat same tool+args 4× in a row
 9.  Learned something useful? → note it immediately
 10. Task done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
@@ -388,15 +392,21 @@ Browser (Brave):
 
 {math_guide}
 
-══════════════════ CLICKING STRATEGY ══════════════════
-❌ DO NOT ZOOM when DOM or OCR already gives you the coordinate. It wastes 2 iterations.
-   DOM says "exact coords, click these" — copy the number and click immediately.
+══════════════════ CLICKING — ID FIRST ══════════════════
+Every screenshot has numbered markers on it. The element list shows each ID and its coords.
 
-FAST PATH — DOM or OCR coord available (90%+ of cases):
-  screenshot → DOM: "input Username @ grid (8.0, 7.1)" → click {{"x": 8.0, "y": 7.1}} → done
-  No zoom. Just copy the number.
+PREFERRED: click {{"id": 5}}              ← exact, never misses
+FALLBACK:  click {{"x": 7.68, "y": 3.27}} ← only if id is not listed
 
-ZOOM PATH — target absent from BOTH DOM and OCR (icons, unlabeled graphics only):
+Priority:
+  1. ID from element list  [Blue]=DOM  [Green]=AT-SPI  [Orange]=CV
+  2. OCR coordinate (if element not in list but text is visible)
+  3. Crosshair estimate (ONLY for unlabeled graphics not in any list)
+
+If an ID click misses or element was removed: call rescan {{}} to refresh IDs, then retry.
+❌ Never zoom just to find coordinates when IDs are already shown on the image.
+
+ZOOM PATH — only for purely graphical/icon elements absent from all lists:
   screenshot → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
   LEFT=full+red box, RIGHT=zoomed sub-grid → crosshair check → click → screenshot to verify
   ONE zoom per click — screenshot to reset if you need to re-zoom.
@@ -441,20 +451,21 @@ Example:
 ══════════════════ COORDINATE SYSTEM — 16×16 GRID ══════════════════
 top-left=(0,0)   bottom-right=(16,16)   Decimals required: 7.5 not 7
 
-HOW TO GET CLICK COORDINATES — follow this priority order every single time:
+HOW TO CLICK — follow this priority order every single time:
 
-  STEP 1 — DOM list ("exact coords, click these"): target listed? COPY that number exactly.
-  STEP 2 — OCR list ("all visible text"): text in OCR? Copy that coord directly.
+  STEP 1 — Element list ("Elements (click by ID)"): target listed? click {{"id": N}} DIRECTLY.
+  STEP 2 — OCR list ("OCR text fallback"): text in OCR? Copy that coord directly.
   STEP 3 — Crosshair (ONLY if absent from BOTH lists): icons, graphics, unlabeled elements.
 
-NEVER estimate from the image when DOM or OCR has an entry for your target.
+NEVER estimate from the image when the element list has an entry for your target.
 
 ══════════════════ CROSSHAIR METHOD (step 3 only — image-based fallback) ══════════════════
   X PASS: vertical line at x — does it bisect the target's horizontal center?
   Y PASS: horizontal line at y — does it bisect the target's vertical center?
   COMMIT: click only once both lines intersect squarely on the element center.
           If uncertain, zoom tighter and repeat.
-  If a DOM/OCR coord misses → take fresh screenshot (DOM re-queries live page).
+  If an ID click misses → call rescan {{}} to refresh IDs and retry.
+  If a coord misses → take fresh screenshot (element list re-queries live page).
 
 ══════════════════ TASK & BUDGET ══════════════════
 TASK: {task}
@@ -483,10 +494,11 @@ If a macro covers your next step, USE IT — do not re-discover what is already 
 
 ══════════════════ RULES ══════════════════
 1.  cmd FIRST   2. Shortcuts before clicking
-3.  ❌ DOM/OCR coord present → click DIRECTLY, NO ZOOM. Zoom only when coord is absent.
+3.  ❌ Element in list → click {{"id": N}} DIRECTLY. No zoom, no coord estimation.
+    Zoom ONLY for unmarked icons or pure graphical elements absent from all lists.
 4.  Screenshot only after navigation/page-load/submit. During form fill: batch without screenshots.
-5.  Miss → fresh screenshot, re-query DOM   6. ❌ NEVER press Escape inside login/form modal
-7.  DOM coords first (exact), then OCR (also precise) — never guess from image
+5.  ID click miss → rescan {{}}; coord miss → fresh screenshot   6. ❌ NEVER press Escape inside login/form modal
+7.  ID from element list first; OCR coord second; crosshair last resort
 8.  Never repeat same tool+args 4× in a row   9. Learned something? → note it
 10. Done → save_profile to document the flow, then finish {{"summary": "...", "success": true}}
 11. Stuck → finish {{"summary": "...", "success": false}}   12. Do NOT close xterm

@@ -13,6 +13,21 @@ from gui_input import GUIInput
 from gui_dom import DOMExtractor
 from gui_profiles import ProfileStore
 from gui_macros import MacroStore
+from gui_elements import ElementRegistry
+
+try:
+    from gui_atspi import ATSPIExtractor
+    _ATSPI_OK = True
+except (ImportError, Exception):
+    _ATSPI_OK = False
+    ATSPIExtractor = None
+
+try:
+    from gui_cv import CVExtractor
+    _CV_OK = True
+except (ImportError, Exception):
+    _CV_OK = False
+    CVExtractor = None
 
 
 GUI_TOOL_SCHEMAS = {
@@ -20,9 +35,10 @@ GUI_TOOL_SCHEMAS = {
     "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background',
     "screenshot":   '  screenshot    — {}  # full-screen; also exits zoom mode',
     "zoom":         '  zoom          — {"x": float, "y": float, "w": float, "h": float}  # w/h in grid cells (default 1×1); zoomed 16×16 sub-grid; clicks auto-translate',
-    "click":        '  click         — {"x": float, "y": float}',
-    "double_click": '  double_click  — {"x": float, "y": float}',
-    "right_click":  '  right_click   — {"x": float, "y": float}',
+    "click":        '  click         — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
+    "double_click": '  double_click  — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
+    "right_click":  '  right_click   — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
+    "rescan":       '  rescan        — {}  # re-discover all elements from last screenshot; assigns fresh IDs',
     "type":         '  type          — {"text": str}',
     "key":          '  key           — {"combo": str}',
     "scroll":       '  scroll        — {"direction": "up"|"down", "x": float, "y": float}  # x,y: move mouse there first (required for browser scroll)',
@@ -48,7 +64,7 @@ class GUIToolRegistry(ToolRegistry):
     GUI_TOOL_NAMES = {
         "plan", "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
         "type", "key", "scroll", "drag", "wait", "note", "save_profile",
-        "sequence", "save_macro", "finish",
+        "sequence", "save_macro", "rescan", "finish",
     }
 
     NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
@@ -96,6 +112,14 @@ class GUIToolRegistry(ToolRegistry):
         self._profile_store = ProfileStore()
         # Macro store for sequence / save_macro tools.
         self._macro_store = MacroStore()
+        # Set-of-Marks: element registry, optional AT-SPI + CV sources, last raw image.
+        self._registry = ElementRegistry(
+            screen_w=self.input_ctrl.screen_w,
+            screen_h=self.input_ctrl.screen_h,
+        )
+        self._atspi = ATSPIExtractor() if _ATSPI_OK else None
+        self._cv    = CVExtractor()    if _CV_OK    else None
+        self._last_raw_img = None  # raw PIL image (no grid overlay); used by rescan
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -187,6 +211,7 @@ class GUIToolRegistry(ToolRegistry):
             "save_profile": self._handle_save_profile,
             "sequence":     self._handle_sequence,
             "save_macro":   self._handle_save_macro,
+            "rescan":       self._handle_rescan,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
         }
         result = handlers[tool](args)
@@ -388,14 +413,72 @@ class GUIToolRegistry(ToolRegistry):
         except Exception as e:
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 
+    def _build_registry(self, raw_img):
+        """Merge AT-SPI + DOM + CV candidates into a fresh ElementRegistry."""
+        sw, sh = raw_img.size
+        reg = ElementRegistry(screen_w=sw, screen_h=sh)
+
+        # CV gap-filler first (lowest priority — overwritten by DOM/AT-SPI on dup)
+        cv_candidates = []
+        if self._cv is not None:
+            try:
+                cv_candidates = self._cv.extract(raw_img, existing_elements=[])
+            except Exception:
+                cv_candidates = []
+
+        # DOM elements (medium priority)
+        dom_elements = self._dom.extract()
+        self._last_dom_elements = dom_elements
+
+        dom_candidates = []
+        for e in dom_elements:
+            dom_candidates.append({
+                "tag":   e.get("tag", "element"),
+                "text":  e.get("text", ""),
+                "x_px":  float(e.get("x_px", 0)),
+                "y_px":  float(e.get("y_px", 0)),
+                "w_px":  float(e.get("w_px", e.get("width", 0))),
+                "h_px":  float(e.get("h_px", e.get("height", 0))),
+                "source": "dom",
+            })
+
+        # AT-SPI (highest priority)
+        atspi_candidates = []
+        if self._atspi is not None:
+            try:
+                raw_atspi = self._atspi.extract()
+                for e in raw_atspi:
+                    atspi_candidates.append({**e, "source": "atspi"})
+            except Exception:
+                atspi_candidates = []
+
+        # Merge: cv first (lowest), then dom, then atspi (highest overwrites on dup)
+        all_candidates = (
+            [{**e, "source": "cv"}  for e in cv_candidates] +
+            dom_candidates +
+            atspi_candidates
+        )
+        reg.merge_elements(all_candidates)
+        return reg, dom_elements
+
     def _handle_screenshot(self, args):
         self._zoom_region = None        # always exit zoom mode on full screenshot
         self.pending_images = None      # clear dual-image from any prior zoom
         self._zooms_since_action = 0    # reset zoom counter on full screenshot
         try:
             img = self.screen.capture()
+            self._last_raw_img = img    # store raw image for rescan
+
             cursor = self.input_ctrl._last_click_px  # (px, py) or None
-            grid_img = self.screen.overlay_grid(img, cursor=cursor)
+            w, h = img.size
+
+            # ── Build element registry (AT-SPI + DOM + CV) ────────────────────
+            self._registry, dom_elements = self._build_registry(img)
+
+            # ── Render Set-of-Marks markers onto a copy of the image ──────────
+            marked_img = self.screen.render_markers(img, self._registry)
+            # Then draw grid + cursor on top of the markers
+            grid_img = self.screen.overlay_grid(marked_img, cursor=cursor)
 
             # Full-res base64 → browser UI only
             b64_full = self.screen.to_base64(grid_img)
@@ -406,12 +489,10 @@ class GUIToolRegistry(ToolRegistry):
                     pass
 
             # Downscaled base64 → inlined into next ReAct model call
-            # 960px wide instead of 1920 — ~6× smaller, much faster inference
             self.pending_image = self.screen.to_base64_model(grid_img, max_w=960)
 
+            # OCR (for fallback text map — reuse for zoom)
             elements = self.screen.ocr_elements(img)
-            w, h = img.size
-            # Store with raw pixel coords so zoom can reuse without re-OCR'ing tiny crops
             self._last_ocr_elements = [
                 {"text": e["text"], "cx_px": e["cx"], "cy_px": e["cy"]}
                 for e in elements
@@ -424,39 +505,35 @@ class GUIToolRegistry(ToolRegistry):
                 gy = round(cursor[1] / h * 16, 2)
                 cursor_note = f"Last click: pixel ({cursor[0]},{cursor[1]}) = grid ({gx},{gy}) — marked with red dot.\n"
 
-            # DOM element extraction via CDP (auto, silent fallback if no browser)
-            dom_elements = self._dom.extract()
-            self._last_dom_elements = dom_elements  # store all for zoom reuse
-            # Cap at 60 elements for observation — prevents 4000-char truncation on
-            # complex pages (assignment lists etc.). Elements are ordered top-to-bottom
-            # so the most visible/relevant ones come first.
-            dom_map = self._dom.build_element_map(dom_elements[:60])
-
-            dom_section = ""
-            if dom_map:
-                dom_section = (
-                    f"Interactive elements from page DOM (exact coords, click these):\n"
-                    f"{dom_map}\n"
-                )
-
             plan_section = ""
             if self._current_plan:
                 plan_lines = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self._current_plan))
                 plan_section = f"PLAN:\n{plan_lines}\n"
 
+            # Element list — use registry (all sources merged, deduped, ID-assigned)
+            element_list = self._registry.format_for_prompt()
+            n_atspi = sum(1 for e in self._registry.elements if e.source == "atspi")
+            n_dom   = sum(1 for e in self._registry.elements if e.source == "dom")
+            n_cv    = sum(1 for e in self._registry.elements if e.source == "cv")
+
             obs = (
-                f"[SCREENSHOT {w}×{h} — 16×16 grid overlaid, image attached]\n"
+                f"[SCREENSHOT {w}×{h} — markers overlaid, image attached]\n"
                 f"{cursor_note}"
                 f"{plan_section}"
-                f"{dom_section}"
-                f"OCR text (all visible text, less precise):\n"
+                f"Elements (click by ID — prefer ID over coordinates):\n"
+                f"  Color legend: [Blue]=DOM  [Green]=AT-SPI  [Orange]=CV\n"
+                f"{element_list}\n"
+                f"OCR text (fallback — less precise):\n"
                 f"{text_map}\n"
             )
 
             if self.event_cb:
                 try:
                     self.event_cb("vision", {
-                        "text": f"{w}×{h} — {len(dom_elements)} DOM + {len(elements)} OCR"
+                        "text": (
+                            f"{w}×{h} — {n_dom} DOM + {n_atspi} AT-SPI + "
+                            f"{n_cv} CV = {len(self._registry.elements)} total"
+                        )
                     })
                 except Exception:
                     pass
@@ -465,6 +542,7 @@ class GUIToolRegistry(ToolRegistry):
                 "screenshot": True,
                 "ocr_count": len(elements),
                 "dom_count": len(dom_elements),
+                "element_count": len(self._registry.elements),
             })
         except Exception as e:
             if self.event_cb:
@@ -474,44 +552,83 @@ class GUIToolRegistry(ToolRegistry):
                     pass
             return ToolResult(False, "", f"Screenshot failed: {e}", {})
 
+    def _resolve_click_coords(self, args, action_name="click"):
+        """Resolve click coordinates from either {'id': N} or {'x': f, 'y': f}.
+
+        Returns (x, y) as 16×16 grid floats, or raises ValueError with a message.
+        """
+        eid = args.get("id")
+        if eid is not None:
+            el = self._registry.get_by_id(int(eid))
+            if el is None:
+                raise ValueError(
+                    f"ID {eid} not found in current element list — "
+                    "call rescan {{}} or screenshot first to refresh IDs"
+                )
+            return el.grid_x, el.grid_y
+        # Fall back to explicit x/y coords
+        x = float(args.get("x", 0))
+        y = float(args.get("y", 0))
+        if not (0 <= x <= 16 and 0 <= y <= 16):
+            raise ValueError(f"Coords out of range: x={x}, y={y} (must be 0–16)")
+        return x, y
+
     def _handle_click(self, args):
         try:
-            x = float(args.get("x", 0))
-            y = float(args.get("y", 0))
-            if not (0 <= x <= 16 and 0 <= y <= 16):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._resolve_click_coords(args, "click")
             x, y = self._apply_zoom(x, y)
             self._zooms_since_action = 0
             msg = self.input_ctrl.click(x, y)
             return ToolResult(True, msg, "", {})
+        except ValueError as e:
+            return ToolResult(False, "", str(e), {})
         except Exception as e:
             return ToolResult(False, "", f"Click failed: {e}", {})
 
     def _handle_double_click(self, args):
         try:
-            x = float(args.get("x", 0))
-            y = float(args.get("y", 0))
-            if not (0 <= x <= 16 and 0 <= y <= 16):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._resolve_click_coords(args, "double_click")
             x, y = self._apply_zoom(x, y)
             self._zooms_since_action = 0
             msg = self.input_ctrl.double_click(x, y)
             return ToolResult(True, msg, "", {})
+        except ValueError as e:
+            return ToolResult(False, "", str(e), {})
         except Exception as e:
             return ToolResult(False, "", f"Double-click failed: {e}", {})
 
     def _handle_right_click(self, args):
         try:
-            x = float(args.get("x", 0))
-            y = float(args.get("y", 0))
-            if not (0 <= x <= 16 and 0 <= y <= 16):
-                return ToolResult(False, "", f"Coords out of range: x={x}, y={y} (must be 0–16)", {})
+            x, y = self._resolve_click_coords(args, "right_click")
             x, y = self._apply_zoom(x, y)
             self._zooms_since_action = 0
             msg = self.input_ctrl.right_click(x, y)
             return ToolResult(True, msg, "", {})
+        except ValueError as e:
+            return ToolResult(False, "", str(e), {})
         except Exception as e:
             return ToolResult(False, "", f"Right-click failed: {e}", {})
+
+    def _handle_rescan(self, args):
+        """Re-discover all elements from the last raw screenshot without recapturing."""
+        if self._last_raw_img is None:
+            return ToolResult(
+                False, "",
+                "No screenshot yet — call screenshot {} first, then rescan",
+                {},
+            )
+        try:
+            self._registry, _ = self._build_registry(self._last_raw_img)
+            element_list = self._registry.format_for_prompt()
+            n = len(self._registry.elements)
+            return ToolResult(
+                True,
+                f"Rescan complete — {n} elements found (IDs reassigned):\n{element_list}",
+                "",
+                {"rescan": True, "element_count": n},
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"Rescan failed: {e}", {})
 
     def _handle_type(self, args):
         try:
@@ -659,6 +776,7 @@ class GUIToolRegistry(ToolRegistry):
                 "wait":         self._handle_wait,
                 "note":         self._handle_note,
                 "zoom":         self._handle_zoom,
+                "rescan":       self._handle_rescan,
             }
 
             outputs = [header]
