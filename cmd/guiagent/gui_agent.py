@@ -10,6 +10,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -926,6 +927,23 @@ class GUIAgent:
         self.setup_display()
         self._inhibit_sleep()
 
+        # ── Create timestamped run archive directory ───────────────────────────
+        slug = re.sub(r"[^a-z0-9]+", "_", task.lower())[:40].strip("_")
+        ts   = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.expanduser(f"~/.agent_bin/runs/{ts}_{slug}")
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "task.json"), "w", encoding="utf-8") as f:
+                json.dump({"task": task, "ts": ts, "display": self.display,
+                           "budget": max_iterations}, f, indent=2)
+        except Exception:
+            run_dir = None  # archive disabled if dir creation fails
+
+        # Point tool registry at the run dir so screenshots are saved there
+        tr = self.agent.tool_registry
+        tr._run_dir = run_dir
+        tr._screenshot_counter = 0
+
         # Fresh log for each job
         try:
             with _log_lock:
@@ -1000,6 +1018,39 @@ class GUIAgent:
             "summary": result.get("summary", ""),
             "iterations": len(self.agent.react_trace),
         })
+
+        # ── Finalize run archive ───────────────────────────────────────────────
+        if run_dir and os.path.isdir(run_dir):
+            try:
+                # summary.json
+                with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
+                    json.dump({
+                        "task":       task,
+                        "success":    result.get("success", False),
+                        "summary":    result.get("summary", ""),
+                        "iterations": len(self.agent.react_trace),
+                        "screenshots": self.agent.tool_registry._screenshot_counter,
+                        "ts_end":     time.strftime("%Y%m%d_%H%M%S"),
+                    }, f, indent=2)
+                # trace.jsonl — agent thoughts + tool calls (strip large base64 blobs)
+                with open(os.path.join(run_dir, "trace.jsonl"), "w", encoding="utf-8") as f:
+                    for entry in self.agent.react_trace:
+                        safe = {k: v for k, v in entry.items()
+                                if not (isinstance(v, str) and len(v) > 800)}
+                        f.write(json.dumps(safe, default=str) + "\n")
+                # debug.jsonl — copy main debug log into the archive
+                if os.path.exists(GUI_DEBUG_LOG):
+                    shutil.copy2(GUI_DEBUG_LOG, os.path.join(run_dir, "debug.jsonl"))
+                # latest symlink — points to most recent run dir
+                latest_link = os.path.expanduser("~/.agent_bin/runs/latest")
+                try:
+                    os.unlink(latest_link)
+                except FileNotFoundError:
+                    pass
+                os.symlink(run_dir, latest_link)
+                print(f"  Run archive: {run_dir}")
+            except Exception as _e:
+                print(f"  ⚠️  Archive finalize failed: {_e}")
 
         if self.event_cb:
             try:

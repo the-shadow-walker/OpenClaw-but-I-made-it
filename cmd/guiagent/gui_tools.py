@@ -120,6 +120,9 @@ class GUIToolRegistry(ToolRegistry):
         self._atspi = ATSPIExtractor() if _ATSPI_OK else None
         self._cv    = CVExtractor()    if _CV_OK    else None
         self._last_raw_img = None  # raw PIL image (no grid overlay); used by rescan
+        # Run archive: set by gui_agent.run() before each task
+        self._run_dir: str = None
+        self._screenshot_counter: int = 0
 
     # ── dispatch (full override) ─────────────────────────────────────────────
 
@@ -553,6 +556,18 @@ class GUIToolRegistry(ToolRegistry):
                 f"OCR text (fallback — less precise):\n"
                 f"{text_map}\n"
             )
+
+            # ── Save screenshot + observation to run archive ──────────────────
+            if self._run_dir:
+                try:
+                    self._screenshot_counter += 1
+                    n = self._screenshot_counter
+                    grid_img.save(os.path.join(self._run_dir, f"{n:04d}_screenshot.png"))
+                    with open(os.path.join(self._run_dir, f"{n:04d}_observation.txt"),
+                              "w", encoding="utf-8") as _f:
+                        _f.write(obs)
+                except Exception:
+                    pass
 
             if self.event_cb:
                 try:
