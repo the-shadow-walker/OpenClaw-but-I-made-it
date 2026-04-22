@@ -1,11 +1,13 @@
 """
 gui_cv.py — OpenCV contour-based gap-filler for Set-of-Marks element detection.
 
-Finds rectangular clickable-looking regions (buttons, input fields, cards)
-in the screenshot image when neither AT-SPI nor DOM can see them.
+Uses a "subtraction mask" approach: existing AT-SPI + DOM element bounding boxes
+are blanked out first, so edge detection only runs on the uncovered regions of
+the screen. This prevents the CV layer from re-finding elements we already know
+about and keeps false-positive rates low.
 
-Conservative by design: high solidity requirement (0.85) means only clean
-rectangular UI elements make it through, not random image noise.
+Conservative heuristics: solidity > 0.8, aspect ratio 0.5–2.0 (button-shaped),
+area 400–5000px². Only clean rectangular UI elements make it through.
 
 Graceful fallback: if opencv-python is not installed, extract() returns [].
 """
@@ -21,85 +23,121 @@ except ImportError:
 
 
 class CVExtractor:
-    """Gap-filler: find clickable rectangular regions via edge detection."""
+    """Gap-filler: find clickable rectangular regions in uncovered screen areas."""
 
-    # Contour filter parameters
-    MIN_AREA   = 400      # px² — ignore tiny noise
-    MAX_AREA   = 60_000   # px² — ignore whole-screen regions
-    MIN_SOLIDITY    = 0.85   # contour area / convex-hull area (high = clean rectangle)
-    MIN_ASPECT = 0.2      # w/h — reject very tall slivers
-    MAX_ASPECT = 8.0      # w/h — reject very wide banners
+    MIN_AREA   = 400     # px² — ignore tiny noise (bounding-box area)
+    MAX_AREA   = 20_000  # px² — up to ~141×141px; covers typical KDE buttons
+    MIN_ASPECT = 0.5     # w/h — reject very tall slivers
+    MAX_ASPECT = 2.0     # w/h — reject very wide banners
 
     def extract(self, img, existing_elements: list = None) -> list:
         """
-        Find rectangular UI regions not already covered by DOM/AT-SPI.
+        Find rectangular UI regions not already covered by AT-SPI or DOM.
 
         Args:
-            img: PIL.Image (RGB) — the raw screenshot (not grid-overlaid)
-            existing_elements: list of UIElement or dicts with x_px,y_px,w_px,h_px
-                               used to reject contours whose center is already covered.
+            img: PIL.Image (RGB) — the raw screenshot (no grid overlay)
+            existing_elements: list of UIElement or dicts with x_px,y_px,w_px,h_px.
+                               Their bounding boxes are masked out before edge detection
+                               so CV never re-discovers what we already know.
 
         Returns list of dicts: [{tag, text, x_px, y_px, w_px, h_px}]
-        Returns [] silently if cv2 not installed.
+        Returns [] silently if cv2 is not installed.
         """
         if not _CV_OK:
             return []
-
         try:
             return self._run(img, existing_elements or [])
         except Exception:
             return []
 
     def _run(self, img, existing_elements):
-        # PIL → numpy BGR
-        import numpy as np  # local import so outer-scope np=None doesn't break module load
-        rgb = np.array(img)
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        import numpy as np  # local so outer-scope np=None doesn't break module load
 
-        # Scharr edge detection (better than Canny for low-contrast UI elements)
-        scharr_x = cv2.Scharr(gray, cv2.CV_32F, 1, 0)
-        scharr_y = cv2.Scharr(gray, cv2.CV_32F, 0, 1)
-        magnitude = cv2.magnitude(scharr_x, scharr_y)
-        edge = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-        # Threshold + morphological close to connect nearby edges
-        _, thresh = cv2.threshold(edge, 30, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-        # Find contours
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+        # PIL → numpy grayscale
+        rgb  = np.array(img)
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         img_h, img_w = gray.shape
+
+        # ── Subtraction mask ───────────────────────────────────────────────────
+        # Paint black over known-element bounding boxes; keep everything else white.
+        # CV edge detection then only fires in uncovered screen regions.
+        mask = np.ones((img_h, img_w), dtype=np.uint8) * 255
+
+        PAD = 6  # px — expand mask slightly to capture gradient bleed at element edges
+        for el in existing_elements:
+            if hasattr(el, "x_px"):
+                ex, ey, ew, eh = el.x_px, el.y_px, el.w_px, el.h_px
+            else:
+                ex = float(el.get("x_px", 0))
+                ey = float(el.get("y_px", 0))
+                ew = float(el.get("w_px", 0))
+                eh = float(el.get("h_px", 0))
+            if ew <= 0 or eh <= 0:
+                continue
+            x1 = max(0, int(ex - ew / 2) - PAD)
+            y1 = max(0, int(ey - eh / 2) - PAD)
+            x2 = min(img_w - 1, int(ex + ew / 2) + PAD)
+            y2 = min(img_h - 1, int(ey + eh / 2) + PAD)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 0, -1)
+
+        # ── Scharr edge detection on the FULL gray image ─────────────────────
+        # IMPORTANT: run Scharr on the unmasked gray first.
+        # Applying the mask before Scharr zeroes out the mask boundary,
+        # creating huge artificial gradients (200→0) that dominate normalization
+        # and swamp the real UI element edges we care about.
+        scharr_x  = cv2.Scharr(gray, cv2.CV_32F, 1, 0)
+        scharr_y  = cv2.Scharr(gray, cv2.CV_32F, 0, 1)
+        magnitude = cv2.magnitude(scharr_x, scharr_y)
+        edge      = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # Apply subtraction mask to the EDGE image — zero out edge pixels
+        # that fall within known-element bounding boxes.
+        edge = cv2.bitwise_and(edge, edge, mask=mask)
+
+        _, thresh = cv2.threshold(edge, 30, 255, cv2.THRESH_BINARY)
+
+        # Dilate to thicken edge lines so nearby parallel edges merge.
+        # MORPH_CLOSE on a ring-shaped border doesn't fill the interior, but
+        # dilating the edge pixels makes them thick enough for approxPolyDP to
+        # find clean rectangular corners.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilated = cv2.dilate(thresh, kernel, iterations=2)
+
+        # ── Find and filter contours ───────────────────────────────────────────
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         results = []
+        seen_boxes = []  # deduplicate near-identical bounding boxes
 
         for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < self.MIN_AREA or area > self.MAX_AREA:
+            # Approximate contour to a polygon.
+            # A rectangular UI element (border or filled) approximates to 4–8 vertices.
+            peri   = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+            if len(approx) < 4 or len(approx) > 10:
                 continue
 
-            # Solidity check — hull area vs contour area
-            hull = cv2.convexHull(cnt)
-            hull_area = cv2.contourArea(hull)
-            if hull_area <= 0:
-                continue
-            solidity = area / hull_area
-            if solidity < self.MIN_SOLIDITY:
-                continue
-
-            # Bounding box
             x, y, w, h = cv2.boundingRect(cnt)
+
+            # Use bounding-box area (not contour ring area) for size checks
+            bbox_area = w * h
+            if bbox_area < self.MIN_AREA or bbox_area > self.MAX_AREA:
+                continue
+
+            # Minimum edge dimension — avoids thin lines matching as "buttons"
+            if w < 20 or h < 20:
+                continue
+
             aspect = w / h if h > 0 else 0
             if aspect < self.MIN_ASPECT or aspect > self.MAX_ASPECT:
                 continue
 
-            cx = x + w / 2
-            cy = y + h / 2
-
-            # Skip if center already covered by an existing element
-            if self._is_covered(cx, cy, existing_elements):
+            # Dedup: skip if very close to an already-accepted box
+            cx, cy = x + w / 2, y + h / 2
+            if any(abs(cx - sx) < 20 and abs(cy - sy) < 20
+                   for sx, sy in seen_boxes):
                 continue
+            seen_boxes.append((cx, cy))
 
             results.append({
                 "tag":  "cv:rect",
@@ -112,56 +150,36 @@ class CVExtractor:
 
         return results
 
-    @staticmethod
-    def _is_covered(cx, cy, existing_elements) -> bool:
-        """Return True if (cx, cy) falls inside any existing element's bounding box."""
-        for el in existing_elements:
-            # Support both UIElement dataclass and plain dicts
-            if hasattr(el, "x_px"):
-                ex, ey, ew, eh = el.x_px, el.y_px, el.w_px, el.h_px
-            else:
-                ex = float(el.get("x_px", 0))
-                ey = float(el.get("y_px", 0))
-                ew = float(el.get("w_px", 0))
-                eh = float(el.get("h_px", 0))
-            half_w = max(ew / 2, 5)
-            half_h = max(eh / 2, 5)
-            if abs(cx - ex) <= half_w and abs(cy - ey) <= half_h:
-                return True
-        return False
-
 
 # ── Standalone test ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys, os
     if not _CV_OK:
-        print("OpenCV not available.")
-        print("Install with: pip install opencv-python")
+        print("OpenCV not available — pip install opencv-python")
         sys.exit(0)
 
-    # Try to load a test image if provided, otherwise create a synthetic one
     if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
         from PIL import Image
         img = Image.open(sys.argv[1]).convert("RGB")
         print(f"Testing on {sys.argv[1]} ({img.size})")
+        existing = []
     else:
-        # Synthetic test: white image with two gray rectangles
-        try:
-            from PIL import Image, ImageDraw
-            img = Image.new("RGB", (800, 600), (240, 240, 240))
-            draw = ImageDraw.Draw(img)
-            # Button 1
-            draw.rectangle([100, 200, 300, 240], outline=(100, 100, 100), width=2)
-            # Button 2
-            draw.rectangle([100, 260, 500, 310], outline=(100, 100, 100), width=2)
-            print("Testing on synthetic 800×600 image with 2 rectangles")
-        except ImportError:
-            print("Pillow not installed — cannot create test image")
-            sys.exit(1)
+        from PIL import Image, ImageDraw
+        # Light gray background — buttons will be white/darker to create edge contrast
+        img = Image.new("RGB", (800, 600), (200, 200, 200))
+        draw = ImageDraw.Draw(img)
+        # Two "unknown" filled buttons (aspect ~1.5–1.7, area ~3500–5000px²)
+        # Filled = solid edge contrast on all 4 sides → high solidity contours
+        draw.rectangle([100, 200, 170, 270], fill=(255, 255, 255), outline=(80, 80, 80), width=2)  # 70×70
+        draw.rectangle([250, 200, 370, 270], fill=(255, 255, 255), outline=(80, 80, 80), width=2)  # 120×70
+        # One pre-known by DOM — should be masked out and NOT returned
+        draw.rectangle([100, 350, 200, 430], fill=(255, 255, 255), outline=(80, 80, 80), width=2)  # 100×80
+        existing = [{"x_px": 150, "y_px": 390, "w_px": 100, "h_px": 80}]
+        print("Synthetic test: 3 filled rectangles, 1 pre-masked as 'known'")
 
     extractor = CVExtractor()
-    elements = extractor.extract(img)
-    print(f"Found {len(elements)} CV elements:")
-    for e in elements:
+    results = extractor.extract(img, existing_elements=existing)
+    print(f"Found {len(results)} CV elements (expected 2 for synthetic test):")
+    for e in results:
         print(f"  {e['tag']} @ ({e['x_px']:.0f}, {e['y_px']:.0f})  {e['w_px']:.0f}×{e['h_px']:.0f}px")

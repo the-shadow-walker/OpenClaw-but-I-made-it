@@ -414,51 +414,59 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 
     def _build_registry(self, raw_img):
-        """Merge AT-SPI + DOM + CV candidates into a fresh ElementRegistry."""
+        """Merge AT-SPI + DOM + CV candidates into a fresh ElementRegistry.
+
+        Order of operations:
+          1. AT-SPI — desktop accessibility tree (highest priority)
+          2. DOM    — Chrome DevTools Protocol (browser elements)
+          3. CV     — OpenCV gap-filler, with AT-SPI+DOM bboxes masked out
+        """
         sw, sh = raw_img.size
         reg = ElementRegistry(screen_w=sw, screen_h=sh)
 
-        # CV gap-filler first (lowest priority — overwritten by DOM/AT-SPI on dup)
-        cv_candidates = []
-        if self._cv is not None:
-            try:
-                cv_candidates = self._cv.extract(raw_img, existing_elements=[])
-            except Exception:
-                cv_candidates = []
-
-        # DOM elements (medium priority)
-        dom_elements = self._dom.extract()
-        self._last_dom_elements = dom_elements
-
-        dom_candidates = []
-        for e in dom_elements:
-            dom_candidates.append({
-                "tag":   e.get("tag", "element"),
-                "text":  e.get("text", ""),
-                "x_px":  float(e.get("x_px", 0)),
-                "y_px":  float(e.get("y_px", 0)),
-                "w_px":  float(e.get("w_px", e.get("width", 0))),
-                "h_px":  float(e.get("h_px", e.get("height", 0))),
-                "source": "dom",
-            })
-
-        # AT-SPI (highest priority)
+        # Step 1: AT-SPI (highest priority)
         atspi_candidates = []
         if self._atspi is not None:
             try:
-                raw_atspi = self._atspi.extract()
-                for e in raw_atspi:
+                for e in self._atspi.extract():
                     atspi_candidates.append({**e, "source": "atspi"})
             except Exception:
                 atspi_candidates = []
 
-        # Merge: cv first (lowest), then dom, then atspi (highest overwrites on dup)
-        all_candidates = (
-            [{**e, "source": "cv"}  for e in cv_candidates] +
-            dom_candidates +
-            atspi_candidates
+        # Step 2: DOM elements
+        dom_elements = self._dom.extract()
+        self._last_dom_elements = dom_elements
+        dom_candidates = []
+        for e in dom_elements:
+            dom_candidates.append({
+                "tag":    e.get("tag", "element"),
+                "text":   e.get("text", ""),
+                "x_px":   float(e.get("x_px", 0)),
+                "y_px":   float(e.get("y_px", 0)),
+                "w_px":   float(e.get("w_px", e.get("width", 0))),
+                "h_px":   float(e.get("h_px", e.get("height", 0))),
+                "source": "dom",
+            })
+
+        # Step 3: CV gap-filler — pass combined AT-SPI+DOM list as the mask
+        # so CV only looks at screen areas not already covered by known elements.
+        cv_candidates = []
+        if self._cv is not None:
+            try:
+                combined_known = atspi_candidates + dom_candidates
+                for e in self._cv.extract(raw_img, existing_elements=combined_known):
+                    cv_candidates.append({**e, "source": "cv"})
+            except Exception:
+                cv_candidates = []
+
+        # Debug log — per-source counts
+        print(
+            f"  [SoM] Found {len(atspi_candidates)} AT-SPI, "
+            f"{len(dom_candidates)} DOM, {len(cv_candidates)} CV"
         )
-        reg.merge_elements(all_candidates)
+
+        # Merge: cv first (lowest priority), dom, atspi last (highest wins on dup)
+        reg.merge_elements(cv_candidates + dom_candidates + atspi_candidates)
         return reg, dom_elements
 
     def _handle_screenshot(self, args):

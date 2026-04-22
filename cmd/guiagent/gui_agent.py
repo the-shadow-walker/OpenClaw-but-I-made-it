@@ -618,12 +618,67 @@ class GUIAgent:
                 return True
         return False
 
+    def _ensure_atspi(self):
+        """Check that the AT-SPI bus launcher is running; start it if not.
+
+        QT_ACCESSIBILITY=1 must be set before Qt apps launch for them to publish
+        their accessibility trees. We set it process-wide here so all subsequent
+        subprocess.Popen / subprocess.run calls inherit it automatically.
+        """
+        # Set QT_ACCESSIBILITY globally so every Qt app we launch exposes its tree
+        os.environ["QT_ACCESSIBILITY"] = "1"
+
+        # Check if at-spi-bus-launcher is running
+        r = subprocess.run(
+            ["pgrep", "-x", "at-spi-bus-launcher"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            print(f"  AT-SPI bus launcher running (pid {r.stdout.strip()})")
+            return
+
+        # Try to start it
+        print("  ⚠️  at-spi-bus-launcher not running — attempting to start...")
+        try:
+            env = {**os.environ, "DISPLAY": self.display}
+            xauth = os.path.expanduser("~/.Xauthority")
+            if os.path.exists(xauth):
+                env["XAUTHORITY"] = xauth
+            subprocess.Popen(
+                ["at-spi-bus-launcher", "--launch-immediately"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.8)
+            # Verify it started
+            r2 = subprocess.run(["pgrep", "-x", "at-spi-bus-launcher"],
+                                 capture_output=True, text=True)
+            if r2.returncode == 0:
+                print("  AT-SPI bus launcher started OK")
+            else:
+                print(
+                    "  ⚠️  AT-SPI bus launcher failed to start — "
+                    "AT-SPI elements will be unavailable. "
+                    "Install: sudo pacman -S at-spi2-core"
+                )
+        except FileNotFoundError:
+            print(
+                "  ⚠️  at-spi-bus-launcher not found — "
+                "install at-spi2-core: sudo pacman -S at-spi2-core"
+            )
+        except Exception as e:
+            print(f"  ⚠️  AT-SPI launcher error: {e}")
+
     def setup_display(self):
         """Ensure the target display is accessible.
 
         For :0 (real KDE desktop): verify access, refresh xauth if needed.
         For :99 (headless): start Xvfb + kwin_x11 + xterm if not running.
         """
+        # Ensure AT-SPI accessibility bus is live and QT_ACCESSIBILITY=1 is set
+        self._ensure_atspi()
+
         env = {**os.environ, "DISPLAY": self.display}
 
         # Check if display is already accessible
