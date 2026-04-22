@@ -30,7 +30,8 @@ class CVExtractor:
     MIN_ASPECT = 0.5     # w/h — reject very tall slivers
     MAX_ASPECT = 2.0     # w/h — reject very wide banners
 
-    def extract(self, img, existing_elements: list = None) -> list:
+    def extract(self, img, existing_elements: list = None,
+               relaxed: bool = False) -> list:
         """
         Find rectangular UI regions not already covered by AT-SPI or DOM.
 
@@ -39,6 +40,8 @@ class CVExtractor:
             existing_elements: list of UIElement or dicts with x_px,y_px,w_px,h_px.
                                Their bounding boxes are masked out before edge detection
                                so CV never re-discovers what we already know.
+            relaxed: if True, lower MIN_AREA to 80px² and raise MAX_ASPECT to 4.0
+                     to catch tiny elements like close/minimise buttons on toolbars.
 
         Returns list of dicts: [{tag, text, x_px, y_px, w_px, h_px}]
         Returns [] silently if cv2 is not installed.
@@ -46,11 +49,15 @@ class CVExtractor:
         if not _CV_OK:
             return []
         try:
-            return self._run(img, existing_elements or [])
+            return self._run(img, existing_elements or [], relaxed=relaxed)
         except Exception:
             return []
 
-    def _run(self, img, existing_elements):
+    def _run(self, img, existing_elements, relaxed=False):
+        min_area   = 80      if relaxed else self.MIN_AREA
+        max_area   = self.MAX_AREA
+        max_aspect = 4.0     if relaxed else self.MAX_ASPECT
+        min_aspect = 0.25    if relaxed else self.MIN_ASPECT
         import numpy as np  # local so outer-scope np=None doesn't break module load
 
         # PIL → numpy grayscale
@@ -121,15 +128,15 @@ class CVExtractor:
 
             # Use bounding-box area (not contour ring area) for size checks
             bbox_area = w * h
-            if bbox_area < self.MIN_AREA or bbox_area > self.MAX_AREA:
+            if bbox_area < min_area or bbox_area > max_area:
                 continue
 
             # Minimum edge dimension — avoids thin lines matching as "buttons"
-            if w < 20 or h < 20:
+            if w < (10 if relaxed else 20) or h < (10 if relaxed else 20):
                 continue
 
             aspect = w / h if h > 0 else 0
-            if aspect < self.MIN_ASPECT or aspect > self.MAX_ASPECT:
+            if aspect < min_aspect or aspect > max_aspect:
                 continue
 
             # Dedup: skip if very close to an already-accepted box

@@ -34,11 +34,11 @@ GUI_TOOL_SCHEMAS = {
     "plan":         '  plan          — {"steps": ["1. do x", "2. do y", ...]}  # set/update task plan; shown on every screenshot',
     "cmd":          '  cmd           — {"command": str}  # run shell command, returns output; append & for background',
     "screenshot":   '  screenshot    — {}  # full-screen; also exits zoom mode',
-    "zoom":         '  zoom          — {"x": float, "y": float, "w": float, "h": float}  # w/h in grid cells (default 1×1); zoomed 16×16 sub-grid; clicks auto-translate',
+    "zoom":         '  zoom          — {"id": int} or {"x": float, "y": float, "w": float, "h": float}  # id centers zoom on that element; w/h in grid cells (default 2×2)',
     "click":        '  click         — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
     "double_click": '  double_click  — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
     "right_click":  '  right_click   — {"id": int} or {"x": float, "y": float}  # prefer id when listed',
-    "rescan":       '  rescan        — {}  # re-discover all elements from last screenshot; assigns fresh IDs',
+    "rescan":       '  rescan        — {} or {"hint": "tiny X button"}  # re-discover elements; hint triggers relaxed CV (finds smaller elements)',
     "type":         '  type          — {"text": str}',
     "key":          '  key           — {"combo": str}',
     "scroll":       '  scroll        — {"direction": "up"|"down", "x": float, "y": float}  # x,y: move mouse there first (required for browser scroll)',
@@ -290,8 +290,22 @@ class GUIToolRegistry(ToolRegistry):
                     {"already_zoomed": True},
                 )
 
-            cx = float(args.get("x", 8.0))
-            cy = float(args.get("y", 8.0))
+            # Support zoom {"id": N} — automatically center on that element
+            eid = args.get("id")
+            if eid is not None:
+                el = self._registry.get_by_id(int(eid))
+                if el is None:
+                    return ToolResult(
+                        False, "",
+                        f"ID {eid} not found — call screenshot or rescan to refresh IDs",
+                        {},
+                    )
+                cx = el.grid_x
+                cy = el.grid_y
+            else:
+                cx = float(args.get("x", 8.0))
+                cy = float(args.get("y", 8.0))
+
             w  = float(args.get("w", 2.0))   # default 2 cells wide
             h  = float(args.get("h", 2.0))   # default 2 cells tall
 
@@ -413,13 +427,16 @@ class GUIToolRegistry(ToolRegistry):
         except Exception as e:
             return ToolResult(False, "", f"Zoom failed: {e}", {})
 
-    def _build_registry(self, raw_img):
+    def _build_registry(self, raw_img, relaxed_cv: bool = False):
         """Merge AT-SPI + DOM + CV candidates into a fresh ElementRegistry.
 
         Order of operations:
           1. AT-SPI — desktop accessibility tree (highest priority)
           2. DOM    — Chrome DevTools Protocol (browser elements)
           3. CV     — OpenCV gap-filler, with AT-SPI+DOM bboxes masked out
+
+        relaxed_cv: pass relaxed=True to CVExtractor (lower area/aspect thresholds)
+                    used by rescan when the model hints at small/unusual elements.
         """
         sw, sh = raw_img.size
         reg = ElementRegistry(screen_w=sw, screen_h=sh)
@@ -454,14 +471,16 @@ class GUIToolRegistry(ToolRegistry):
         if self._cv is not None:
             try:
                 combined_known = atspi_candidates + dom_candidates
-                for e in self._cv.extract(raw_img, existing_elements=combined_known):
+                for e in self._cv.extract(raw_img, existing_elements=combined_known,
+                                          relaxed=relaxed_cv):
                     cv_candidates.append({**e, "source": "cv"})
             except Exception:
                 cv_candidates = []
 
         # Debug log — per-source counts
+        mode = " [relaxed]" if relaxed_cv else ""
         print(
-            f"  [SoM] Found {len(atspi_candidates)} AT-SPI, "
+            f"  [SoM{mode}] Found {len(atspi_candidates)} AT-SPI, "
             f"{len(dom_candidates)} DOM, {len(cv_candidates)} CV"
         )
 
@@ -618,7 +637,12 @@ class GUIToolRegistry(ToolRegistry):
             return ToolResult(False, "", f"Right-click failed: {e}", {})
 
     def _handle_rescan(self, args):
-        """Re-discover all elements from the last raw screenshot without recapturing."""
+        """Re-discover elements from the last raw screenshot without recapturing.
+
+        Optional args:
+          hint (str) — description of what to look for (e.g. "tiny X button")
+                       triggers relaxed CV thresholds (smaller min area, wider aspect)
+        """
         if self._last_raw_img is None:
             return ToolResult(
                 False, "",
@@ -626,14 +650,25 @@ class GUIToolRegistry(ToolRegistry):
                 {},
             )
         try:
-            self._registry, _ = self._build_registry(self._last_raw_img)
+            hint = str(args.get("hint", "")).strip()
+            relaxed = bool(hint)  # use relaxed CV thresholds when a hint is given
+
+            self._registry, _ = self._build_registry(
+                self._last_raw_img, relaxed_cv=relaxed
+            )
             element_list = self._registry.format_for_prompt()
             n = len(self._registry.elements)
+
+            hint_note = f" (relaxed CV thresholds — hint: '{hint}')" if hint else ""
             return ToolResult(
                 True,
-                f"Rescan complete — {n} elements found (IDs reassigned):\n{element_list}",
+                (
+                    f"Rescan complete{hint_note} — {n} elements found, IDs reassigned.\n"
+                    f"Refer to the updated IDs below:\n"
+                    f"{element_list}"
+                ),
                 "",
-                {"rescan": True, "element_count": n},
+                {"rescan": True, "element_count": n, "relaxed": relaxed},
             )
         except Exception as e:
             return ToolResult(False, "", f"Rescan failed: {e}", {})

@@ -205,24 +205,35 @@ File manager / terminal:
 
 {math_guide}
 
-══════════════════ CLICKING — ID FIRST ══════════════════
-Every screenshot has numbered markers on it. The element list shows each ID and its coords.
+══════════════════ CLICKING — YOU ARE AN ID-FIRST AGENT ══════════════════
+Every screenshot has numbered markers drawn directly on each interactive element.
+To click anything, use its ID number. The OS/browser tells us exactly where each
+element is — there is no guessing, no coordinate math required.
 
-PREFERRED: click {{"id": 5}}              ← exact, never misses
-FALLBACK:  click {{"x": 7.68, "y": 3.27}} ← only if id is not listed
+  click {{"id": 14}}   ← ALWAYS do this when an ID is shown. 100% reliable.
 
-Priority:
-  1. ID from element list  [Blue]=DOM  [Green]=AT-SPI  [Orange]=CV
-  2. OCR coordinate (if element not in list but text is visible)
-  3. Crosshair estimate (ONLY for unlabeled graphics not in any list)
+COLOR LEGEND (trust level):
+  [Blue]   DOM    — Perfect browser data. Pixel-accurate. Trust completely.
+  [Green]  AT-SPI — Perfect desktop data. Pixel-accurate. Trust completely.
+  [Orange] CV     — Visually inferred. Usually correct, but double-check if it misses.
 
-If an ID click misses or element was removed: call rescan {{}} to refresh IDs, then retry.
-❌ Never zoom just to find coordinates when IDs are already shown on the image.
+THE HIERARCHY — follow this order every single time:
+  Priority 1 — Numbered ID (exact, sourced from OS/browser metadata)
+               click {{"id": N}}  ← no math, no estimation
+  Priority 2 — OCR coordinate (element visible in OCR but not in ID list)
+               click {{"x": f, "y": f}}  ← pixel-accurate from OCR
+  Priority 3 — Grid crosshair (LAST RESORT — only for icons with no text and no ID)
+               zoom to the area first, then use the X/Y pass method below
 
-ZOOM PATH — only for purely graphical/icon elements absent from all lists:
-  screenshot → not in element list or OCR → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
-  LEFT=full+red box, RIGHT=zoomed sub-grid → crosshair check → click → verify
-  ONE zoom per click — screenshot to reset before re-zooming.
+STALE IDs — if a click seems to miss or the UI changed:
+  • Call rescan {{}} to refresh IDs from the current screen state (no new screenshot needed)
+  • Call screenshot {{}} if the page/dialog may have changed (re-queries DOM + AT-SPI live)
+  • A [Blue] or [Green] ID click should never miss — if it does, the element moved; rescan
+
+ZOOM — for unlabeled graphical elements only:
+  zoom {{"id": N}}  ← centers on element N's position automatically
+  zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}  ← manual center in grid coords
+  One zoom per click. Call screenshot to reset before re-zooming.
 
   ⚠️  MODAL FORMS (login dialogs, popups): NEVER press Escape inside them.
       Escape closes the modal and loses all your progress.
@@ -392,24 +403,31 @@ Browser (Brave):
 
 {math_guide}
 
-══════════════════ CLICKING — ID FIRST ══════════════════
-Every screenshot has numbered markers on it. The element list shows each ID and its coords.
+══════════════════ CLICKING — YOU ARE AN ID-FIRST AGENT ══════════════════
+Every screenshot has numbered markers drawn directly on each interactive element.
+To click anything, use its ID number. No guessing, no coordinate math.
 
-PREFERRED: click {{"id": 5}}              ← exact, never misses
-FALLBACK:  click {{"x": 7.68, "y": 3.27}} ← only if id is not listed
+  click {{"id": 14}}   ← ALWAYS do this when an ID is shown. 100% reliable.
 
-Priority:
-  1. ID from element list  [Blue]=DOM  [Green]=AT-SPI  [Orange]=CV
-  2. OCR coordinate (if element not in list but text is visible)
-  3. Crosshair estimate (ONLY for unlabeled graphics not in any list)
+COLOR LEGEND (trust level):
+  [Blue]   DOM    — Perfect browser data. Pixel-accurate. Trust completely.
+  [Green]  AT-SPI — Perfect desktop data. Pixel-accurate. Trust completely.
+  [Orange] CV     — Visually inferred. Usually correct, but double-check if it misses.
 
-If an ID click misses or element was removed: call rescan {{}} to refresh IDs, then retry.
-❌ Never zoom just to find coordinates when IDs are already shown on the image.
+THE HIERARCHY:
+  Priority 1 — ID → click {{"id": N}}
+  Priority 2 — OCR coord → click {{"x": f, "y": f}}
+  Priority 3 — Crosshair estimate (last resort, zoom first)
 
-ZOOM PATH — only for purely graphical/icon elements absent from all lists:
-  screenshot → zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}
-  LEFT=full+red box, RIGHT=zoomed sub-grid → crosshair check → click → screenshot to verify
-  ONE zoom per click — screenshot to reset if you need to re-zoom.
+STALE IDs — if a click misses or the UI changed:
+  rescan {{}}  → refresh IDs without new screenshot (fast)
+  rescan {{"hint": "tiny X"}}  → relaxed CV thresholds to find smaller elements
+  screenshot {{}}  → full refresh when page/dialog may have changed
+
+ZOOM:
+  zoom {{"id": N}}  ← auto-centers on element N
+  zoom {{"x": cx, "y": cy, "w": 2, "h": 2}}  ← manual
+  One zoom per click. Call screenshot to reset.
 
 Scroll: always include x,y → scroll {{"direction":"down","x":8.0,"y":8.0}}
 
