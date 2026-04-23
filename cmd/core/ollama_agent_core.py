@@ -2,7 +2,7 @@
 # =============================================================================
 # ollama_agent_core.py  —  v3.0
 # Features in this build:
-#   - Single model: qwen3.6:35b-Grindlewalt (ReAct loop + code gen)
+#   - Dual-model: qwen2.5-coder:14b (ReAct loop) + qwen3-coder:30b (code gen)
 #   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
 #   - react timeout: 180s; one-shot calls use their own per-call timeout
 #   - Chain mode CLI: --budget/-b, --yes/-y  (TaskDecomposer multi-phase)
@@ -93,11 +93,11 @@ GENERAL RULES:
     before deciding your next action. The diagnosis identifies the root cause — follow it.
 17. To start a server (uvicorn, gunicorn, node, nginx): ALWAYS background it with
     stdin explicitly closed to prevent subprocess pipe hangs:
-      nohup uvicorn main:app --host 0.0.0.0 --port 8000 </dev/null >/tmp/server.log 2>&1 &
+      nohup uvicorn main:app --host 127.0.0.1 --port 8000 </dev/null >/tmp/server.log 2>&1 &
     CRITICAL: include </dev/null BEFORE the output redirect, or the command will hang.
     NEVER use --reload (it spawns child processes that hold pipes open and cause timeouts).
     After backgrounding, confirm with a separate execute_command: sleep 2 && curl -sf http://localhost:8000/
-    If curl fails, read the log: use read_file on /tmp/server.log
+    If curl fails, read the log: cat /tmp/server.log | tail -20
 17b. Prefer manage_server over nohup for persistent servers — it tracks the PID and
      lets you stop/restart cleanly. Always redirect logs in the command:
      {{"action":"start","name":"backend","command":"uvicorn main:app --port 8000 >/tmp/backend.log 2>&1"}}
@@ -151,17 +151,6 @@ GENERAL RULES:
     ❌ python -m fastapi init, django-admin startproject, flask new, express init
     ✅ Create project structure manually using create_file for each file needed.
     If a package error says "install X to use Y command", create the files manually instead.
-32. ALWAYS bind servers to host 0.0.0.0 (not 127.0.0.1) unless the task explicitly
-    requires local-only access. 0.0.0.0 makes the server reachable from other machines
-    on the network. 127.0.0.1 silently blocks all LAN/external connections.
-33. ALWAYS create __init__.py in every Python directory you create. Without it, Python
-    cannot import modules from that directory. When you create app/, app/routes/, app/models/
-    etc., immediately create app/__init__.py, app/routes/__init__.py, app/models/__init__.py.
-    Missing __init__.py is the #1 cause of ModuleNotFoundError in from-scratch projects.
-34. To read a file (source code, logs, configs): ALWAYS use the read_file tool.
-    NEVER use execute_command with `cat`, `head`, `tail`, or `less` to read file content.
-    read_file returns the FULL content directly to you — cat via execute_command is limited
-    to 4000 chars of output. Use execute_command only for running programs, not reading files.
 
 CODE / FILE GENERATION RULES:
 10. For create_file: ALWAYS set "content": "" and write a detailed "description"
@@ -195,11 +184,12 @@ TOOL_SCHEMAS: dict = {
     "web_search":       '  web_search       — {{"query": str}}',
     "read_file":        '  read_file        — {{"path": str, "offset": int (opt, default 0), "limit": int (opt, default 200 lines)}}',
     "memory_lookup":    '  memory_lookup    — {{"query": str}}',
-    "finish":           '  finish           — {{"summary": str, "success": bool, "files_created": [str]}}\n'
-                       '    # files_created: absolute paths of EVERY file you wrote this session.\n'
-                       '    # finish() is REJECTED if any listed file is absent from disk.\n'
-                       '    # Always list all created files — omitting them causes rejection.',
+    "finish":           '  finish           — {{"summary": str, "success": bool}}',
     "manage_server":    '  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}',
+    "gui_task":         '  gui_task         — {{"task": str, "max_iterations": int (opt, default 20)}} — run a GUI automation task via the GUI agent',
+    "save_context":     '  save_context     — {{"label": str}} — snapshot current session context to disk before heavy operations',
+    "publish_context":  '  publish_context  — {{"key": str, "value": str, "ttl_hours": int (opt, default 24)}} — write a cross-agent fact to shared context board',
+    "read_context":     '  read_context     — {{"key": str}} — read a specific key from the shared cross-agent context board',
 }
 _ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
 
@@ -365,18 +355,20 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 32768       # ReAct loop context window (matches qwen3.6:35b-Grindlewalt Modelfile)
-    HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
+    NUM_CTX = 32768       # fast model — full ReAct loop context window
+    HEAVY_NUM_CTX = 8192  # heavy model (30b) — one-shot only, short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
+    SESSIONS_DIR = os.path.expanduser("~/.agent_bin/sessions")
 
     def __init__(
         self,
-        model: str = "qwen3.6:35b-Grindlewalt",
-        fast_model: str = "qwen3.6:35b-Grindlewalt",
+        model: str = "qwen3-coder:30b",
+        fast_model: str = "qwen2.5-coder:14b",
         searxng_url: str = "http://10.0.0.58:8080",
     ):
-        # single model for everything — ReAct loop + code/file generation
+        # heavy model — only called for actual code/file generation
         self.model = model
+        # fast model — drives the ReAct decision loop
         self.fast_model = fast_model
         self.search_agent = FlexibleSearchAgent(searxng_url)
         self.safety_validator = CommandSafetyValidator()
@@ -392,21 +384,160 @@ class OllamaCommandAgent:
             self.safety_validator,
             self.search_agent,
             self.memory,
-            explain_cb=None,  # disabled: 20s/call × every command = massive GPU waste on single-model setup
+            explain_cb=self.explain_command_detailed,
         )
+        # Wire save_context callback so the save_context tool can call us back
+        self.tool_registry._save_context_cb = self.save_context
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
         self.current_job_id: Optional[str] = None  # set by server before run()
-        # Optional threading.Event — when set, call_ollama_react returns a stop sentinel
-        # immediately (streaming mode checks this between each token chunk).
-        self.stop_event = None
         # Pinned messages: always injected after system prompt regardless of history trimming
         # (e.g. ARCH.md contents, schema.sql, key model definitions)
         self.pinned_messages: List[Dict] = []
-        # Maps slot_key → index in pinned_messages for in-place updates (_update_pinned)
-        self._pinned_slot_keys: Dict[str, int] = {}
-        # Running list of files created/patched this session — survives compaction via pin
+        # Track files created during current run (for file manifest pin + finish guard)
         self._files_created: List[str] = []
+        # Slot keys for _update_pinned — maps key → index in pinned_messages
+        self._pinned_slot_keys: Dict[str, int] = {}
+        # Current instruction (for session save)
+        self._current_instruction: str = ""
+
+    # ------------------------------------------------------ pinned slots --
+
+    def _update_pinned(self, key: str, msg: dict) -> None:
+        """Upsert a named pinned slot. Creates a new slot or updates in-place."""
+        if key in self._pinned_slot_keys:
+            idx = self._pinned_slot_keys[key]
+            if idx < len(self.pinned_messages):
+                self.pinned_messages[idx] = msg
+                return
+        # New slot
+        self._pinned_slot_keys[key] = len(self.pinned_messages)
+        self.pinned_messages.append(msg)
+
+    def _refresh_file_manifest_pin(self) -> None:
+        """Update the '📁 FILES CREATED' pinned slot with current _files_created list."""
+        if not self._files_created:
+            return
+        lines = ["📁 FILES CREATED this run:"]
+        for f in self._files_created:
+            lines.append(f"  • {f}")
+        self._update_pinned("file_manifest", {
+            "role": "user",
+            "content": "\n".join(lines),
+        })
+
+    # ------------------------------------------------- session save/restore --
+
+    def save_context(self, label: str = "") -> str:
+        """Serialize current pinned_messages to disk. Returns the session path."""
+        os.makedirs(self.SESSIONS_DIR, exist_ok=True)
+        ts = int(time.time())
+        slug = label.replace(" ", "_")[:30] if label else "session"
+        path = os.path.join(self.SESSIONS_DIR, f"{ts}_{slug}.json")
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "label": label,
+            "pinned_messages": self.pinned_messages,
+            "pinned_slot_keys": self._pinned_slot_keys,
+            "files_created": self._files_created,
+            "instruction": self._current_instruction,
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"📦 Context saved → {path}")
+        except Exception as e:
+            print(f"⚠️  Context save failed: {e}")
+        return path
+
+    def restore_context(self, path: str) -> None:
+        """Restore pinned state from a saved session file."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            self.pinned_messages = data.get("pinned_messages", [])
+            self._pinned_slot_keys = data.get("pinned_slot_keys", {})
+            self._files_created = data.get("files_created", [])
+            print(f"📦 Context restored from {path}")
+        except Exception as e:
+            print(f"⚠️  Context restore failed: {e}")
+
+    # --------------------------------------------------- auto-compressor --
+
+    @staticmethod
+    def _estimate_tokens(messages: List[Dict]) -> int:
+        """Rough token estimate: 4 chars ≈ 1 token."""
+        total = sum(len(m.get("content", "")) for m in messages)
+        return total // 4
+
+    def _compress_react_history(
+        self, react_history: List[Dict], system_prompt: str, instruction: str
+    ) -> List[Dict]:
+        """Compress react_history to ~5k tokens via LLM summarization.
+        Keeps initial message + LLM summary + last 1 message.
+        """
+        print(f"  🗜️  Compressing history ({len(react_history)} messages) → summary...")
+        initial = react_history[:1]
+        tail = react_history[-1:] if react_history else []
+        middle = react_history[1:-1] if len(react_history) > 2 else []
+
+        # Build context for compressor
+        history_text = "\n---\n".join(
+            f"[{m['role']}]: {m['content'][:800]}" for m in middle
+        )
+
+        # File manifest from pinned slot (so compressor can emit FILES_CREATED line)
+        files_line = ""
+        if self._files_created:
+            files_line = f"FILES_CREATED: {', '.join(self._files_created)}"
+
+        compress_prompt = (
+            f"Summarize this agent work session. TARGET: output ≤3500 characters. "
+            f"Be ruthlessly concise. Bullet lists only. No prose.\n\n"
+            f"TASK: {instruction[:200]}\n\n"
+            f"SESSION HISTORY:\n{history_text[:6000]}\n\n"
+            f"Output this EXACT format:\n"
+            f"## TASK\n[one sentence]\n\n"
+            f"## FILES (all created/modified)\n"
+            f"[bullet: /path — description]\n"
+            f"{files_line}\n\n"
+            f"## KEY FACTS\n[bullet: ports, URLs, credentials, config values discovered]\n\n"
+            f"## CURRENT STATE\n[2-3 bullets: what is running, what works now]\n\n"
+            f"## FAILED\n[bullet: tried X → reason]\n\n"
+            f"## NEXT (≤5 steps)\n[numbered: exact next actions]\n\n"
+            f"HARD LIMIT: Stop at 3500 characters. Truncate NEXT if needed."
+        )
+
+        summary_raw = self._call_model_oneshot(
+            self.fast_model, compress_prompt,
+            "Return only the compact summary. No extra text.",
+            timeout=60,
+        )
+
+        if not summary_raw:
+            print(f"  ⚠️  Compressor returned empty — keeping tail only")
+            return initial + tail
+
+        # Enforce hard size limit
+        if len(summary_raw) > 4000:
+            summary_raw = summary_raw[:3900].rsplit("\n", 1)[0] + "\n[truncated]"
+            print(f"  ✂️  Compressor output truncated to fit 4000-char target")
+
+        # Re-pin FILES_CREATED if mentioned in summary
+        import re as _re
+        fc_match = _re.search(r"FILES_CREATED:\s*(.+)", summary_raw)
+        if fc_match:
+            paths = [p.strip() for p in fc_match.group(1).split(",") if p.strip()]
+            if paths:
+                self._files_created = list(dict.fromkeys(self._files_created + paths))
+                self._refresh_file_manifest_pin()
+
+        summary_msg = {"role": "user", "content": f"[COMPRESSED CONTEXT]\n{summary_raw}"}
+        new_history = initial + [summary_msg] + tail
+        saved = self._estimate_tokens(react_history)
+        now = self._estimate_tokens(new_history)
+        print(f"  ✅ Compressed: {saved:,} → {now:,} tokens (~{new_history.__len__()} messages)")
+        return new_history
 
     # ---------------------------------------------------------------- LLM --
 
@@ -430,7 +561,6 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
-            "keep_alive": "10m",
             "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -464,7 +594,6 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "keep_alive": "10m",
             "options": {"num_ctx": self.HEAVY_NUM_CTX},
         }
 
@@ -488,31 +617,19 @@ class OllamaCommandAgent:
 
         return assistant_message
 
-    # Sentinel returned by call_ollama_react when stop_event fires mid-inference.
-    _STOP_SENTINEL = "__STOP_REQUESTED__"
-
     def call_ollama_react(
         self,
         react_history: List[Dict],
         system_prompt: str,
         timeout: int = 180,
     ) -> str:
-        """Fast-model caller for the ReAct decision loop.
-
-        When self.stop_event is set, uses streaming mode so the event is checked
-        between every token chunk — gives near-instant stop response instead of
-        waiting up to `timeout` seconds for a blocking read to finish.
-        Returns _STOP_SENTINEL ("__STOP_REQUESTED__") when stopped mid-inference.
+        """Fast-model (14b) caller for the ReAct decision loop.
+        Only picks tools and writes short args — never generates file content.
+        Does NOT touch self.conversation_history.
         """
-        import http.client as _http
-
-        stop_event = self.stop_event  # may be None
-
-        # Short-circuit before hitting the network if already stopped
-        if stop_event and stop_event.is_set():
-            return self._STOP_SENTINEL
-
         messages = [{"role": "system", "content": system_prompt}]
+        # Inject pinned architectural facts (ARCH.md, schema, models) after system prompt
+        # so they're always visible regardless of history trimming.
         if self.pinned_messages:
             messages.extend(self.pinned_messages)
         messages.extend(react_history)
@@ -520,99 +637,20 @@ class OllamaCommandAgent:
         request_data = {
             "model": self.fast_model,
             "messages": messages,
-            "keep_alive": -1,
+            "stream": False,
             "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
 
-        if stop_event is not None:
-            # ── Streaming mode: check stop_event between every token chunk ──────
-            request_data["stream"] = True
-            try:
-                body = json.dumps(request_data).encode()
-                conn = _http.HTTPConnection("localhost", 11434, timeout=30)
-                conn.request("POST", "/api/chat", body=body,
-                             headers={"Content-Type": "application/json"})
-                resp = conn.getresponse()
-                parts: List[str] = []
-                # Set 500ms socket read timeout so stop_event is checked every
-                # 500ms even during long prefill waits (time-to-first-token can
-                # be 30-45s). Without this the Stop button appears frozen.
-                import socket as _socket
-                try:
-                    conn.sock.settimeout(0.5)
-                except Exception:
-                    pass
-                try:
-                    while True:
-                        if stop_event.is_set():
-                            try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            return self._STOP_SENTINEL
-                        try:
-                            raw_line = resp.readline()
-                        except _socket.timeout:
-                            continue  # no data yet — check stop_event again
-                        if not raw_line:
-                            break
-                        line = raw_line.strip()
-                        if not line:
-                            continue
-                        try:
-                            chunk = json.loads(line.decode("utf-8"))
-                            delta = chunk.get("message", {}).get("content", "")
-                            if delta:
-                                parts.append(delta)
-                            if chunk.get("done"):
-                                break
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            pass
-                except Exception as _se:
-                    if stop_event.is_set():
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        return self._STOP_SENTINEL
-                    raise _se
-                return "".join(parts)
-            except Exception as e:
-                if stop_event and stop_event.is_set():
-                    return self._STOP_SENTINEL
-                print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
-                return ""
-
-        else:
-            # ── Non-streaming mode (original behaviour, no stop_event) ──────────
-            request_data["stream"] = False
-            try:
-                body = json.dumps(request_data).encode()
-                conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
-                conn.request("POST", "/api/chat", body=body,
-                             headers={"Content-Type": "application/json"})
-                resp = conn.getresponse()
-                return json.loads(resp.read())["message"]["content"]
-            except Exception as e:
-                print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
-                return ""
-
-    def _reset_keep_alive(self, keep_alive: str = "10m"):
-        """Send a no-op request to reset the model's keep_alive expiry timer.
-
-        Called at the end of run_react so the model unloads after `keep_alive`
-        of idle time, freeing VRAM for other processes.  During the job loop,
-        call_ollama_react uses keep_alive=-1 to prevent mid-job unloading.
-        """
         try:
-            subprocess.run(
-                ["curl", "-s", "http://localhost:11434/api/generate",
-                 "-d", json.dumps({"model": self.model, "prompt": "",
-                                   "keep_alive": keep_alive})],
-                capture_output=True, timeout=10,
+            result = subprocess.run(
+                ["curl", "-s", "http://localhost:11434/api/chat",
+                 "-d", json.dumps(request_data)],
+                capture_output=True, text=True, timeout=timeout,
             )
-        except Exception:
-            pass
+            return json.loads(result.stdout)["message"]["content"]
+        except Exception as e:
+            print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
+            return ""
 
     def call_ollama_heavy(
         self,
@@ -1311,7 +1349,7 @@ JSON only."""
             f"Recent actions:\n{trace_text}\n\n"
             f"Write the progress markdown file."
         )
-        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=3)
+        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=20)
         if not content:
             return
         try:
@@ -1354,7 +1392,7 @@ JSON only."""
             self.fast_model,
             f"Command/operation:\n{command_info}",
             system,
-            timeout=5,
+            timeout=15,
         ).strip().upper()
 
         if "UNSAFE" in verdict:
@@ -1421,166 +1459,6 @@ Return JSON only:
             snippet = msg["content"][:600].replace("\n", " ")
             lines.append(f"[{role}] {snippet}")
         return "\n".join(lines)
-
-    # ── Pinned-slot management ────────────────────────────────────────────────
-
-    def _update_pinned(self, key: str, msg: Dict) -> None:
-        """Insert or replace a pinned message slot in-place.
-
-        Pinned messages are injected into every LLM call after the system prompt
-        and survive all history trimming.  Using a keyed slot ensures updates
-        replace rather than grow the list (e.g. the file-manifest refreshes in-place).
-        """
-        if key in self._pinned_slot_keys:
-            idx = self._pinned_slot_keys[key]
-            if idx < len(self.pinned_messages):
-                self.pinned_messages[idx] = msg
-                return
-            # Index stale (list was rebuilt) — fall through to append
-        self.pinned_messages.append(msg)
-        self._pinned_slot_keys[key] = len(self.pinned_messages) - 1
-
-    def _refresh_file_manifest_pin(self) -> None:
-        """Rebuild the pinned file-manifest message from self._files_created."""
-        if not self._files_created:
-            return
-        unique = sorted(set(self._files_created))
-        manifest_msg = {
-            "role": "user",
-            "content": (
-                "📁 FILES CREATED/MODIFIED THIS SESSION:\n"
-                + "\n".join(f"  • {f}" for f in unique)
-                + "\n(These files exist on disk — do not recreate them unless patching.)"
-            ),
-        }
-        self._update_pinned("file_manifest", manifest_msg)
-
-    # ── Auto-compactor ────────────────────────────────────────────────────────
-
-    def _estimate_react_tokens(
-        self, react_history: List[Dict], system_prompt: str
-    ) -> int:
-        """Rough token estimate for the full context (system + pinned + history).
-        Uses 3 chars-per-token — conservative for code/JSON which tokenises densely.
-        """
-        chars = len(system_prompt)
-        chars += sum(len(str(m.get("content", ""))) for m in self.pinned_messages)
-        chars += sum(len(str(m.get("content", ""))) for m in react_history)
-        return chars // 3
-
-    def _compress_react_history(
-        self,
-        react_history: List[Dict],
-        system_prompt: str,
-        instruction: str,
-        iteration: int,
-        max_iter: int,
-    ) -> List[Dict]:
-        """Replace react_history with a dense structured summary.
-
-        Called automatically when estimated tokens exceed NUM_CTX - 1500.
-        Preserves the last 2 messages for immediate continuity, then prepends
-        a model-generated summary of everything before them.
-        """
-        msg_count  = len(react_history)
-        est_tokens = self._estimate_react_tokens(react_history, system_prompt)
-        print(
-            f"\n🗜️  AUTO-COMPRESS: ~{est_tokens} tokens in context "
-            f"(threshold {self.NUM_CTX - 1500}).  "
-            f"Summarising {msg_count} messages…"
-        )
-
-        # Build a readable snapshot of the history to feed the summariser.
-        # Cap each message at 1200 chars so the compressor prompt itself
-        # doesn't overflow (we're already near the limit).
-        snapshot_parts: List[str] = []
-        for i, msg in enumerate(react_history):
-            role    = msg["role"].upper()
-            content = str(msg.get("content", ""))
-            if len(content) > 1200:
-                content = content[:1100] + f" … [{len(content) - 1100} chars omitted]"
-            snapshot_parts.append(f"[{role} #{i+1}]\n{content}")
-        snapshot = "\n\n".join(snapshot_parts)
-
-        compress_prompt = (
-            f"You are compressing the working memory of an AI agent mid-task.\n\n"
-            f"TASK: {instruction[:600]}\n"
-            f"PROGRESS: iteration {iteration} of {max_iter} "
-            f"({max_iter - iteration} remaining)\n\n"
-            f"FULL HISTORY ({msg_count} messages):\n"
-            f"{snapshot}\n\n"
-            f"Write a DETAILED STRUCTURED SUMMARY that will REPLACE the above history.\n"
-            f"The agent will continue working from this summary alone — include every\n"
-            f"detail it needs: file paths, commands, outputs, errors, current state.\n\n"
-            f"Use this exact format:\n\n"
-            f"## TASK\n"
-            f"[The full goal — exactly what needs to be accomplished]\n\n"
-            f"## ACCOMPLISHED\n"
-            f"[Everything finished so far — specific files created, services started,\n"
-            f"commands that succeeded, URLs confirmed working, etc.]\n\n"
-            f"## CURRENT STATE\n"
-            f"[The exact state of the system right now: what is running, what files exist,\n"
-            f"what ports are open, what the screen shows, etc.]\n\n"
-            f"## FAILED ATTEMPTS\n"
-            f"[Everything tried that failed and WHY — to avoid repeating mistakes]\n\n"
-            f"## NEXT STEPS\n"
-            f"[The specific remaining actions needed to complete the task, in order]\n\n"
-            f"FILES_CREATED: list every absolute file path created or modified above.\n"
-            f"Format EXACTLY as: FILES_CREATED: /path/one, /path/two\n"
-            f"If none: FILES_CREATED: none"
-        )
-
-        summary = self._call_model_oneshot(
-            self.model,
-            compress_prompt,
-            system_prompt=None,
-            timeout=120,
-        )
-
-        if not summary or len(summary) < 100:
-            # Compression failed — fall back to hard trim to prevent overflow
-            print("⚠️  Compression failed — falling back to hard trim (last 5 messages)")
-            return react_history[-5:]
-
-        # Extract FILES_CREATED from the summary and refresh the pinned manifest
-        fc_match = re.search(r"FILES_CREATED:\s*(.+)", summary)
-        if fc_match:
-            fc_raw = fc_match.group(1).strip()
-            if fc_raw.lower() != "none":
-                new_paths = [p.strip() for p in fc_raw.split(",") if p.strip()]
-                for p in new_paths:
-                    if p not in self._files_created:
-                        self._files_created.append(p)
-                self._refresh_file_manifest_pin()
-                print(f"  📁 Compressor extracted {len(new_paths)} file path(s) → manifest updated")
-
-        compressed_msg = {
-            "role": "user",
-            "content": (
-                f"[CONTEXT AUTO-COMPRESSED — {msg_count} messages → summary "
-                f"at iteration {iteration}/{max_iter}]\n\n"
-                f"{summary}\n\n"
-                f"Continue from the NEXT STEPS above. "
-                f"Output valid JSON for your next action."
-            ),
-        }
-
-        # Keep the last 2 messages so the agent has immediate continuity
-        tail = react_history[-2:] if len(react_history) >= 2 else react_history
-        new_history = [compressed_msg] + tail
-
-        saved_tokens = est_tokens - self._estimate_react_tokens(new_history, system_prompt)
-        print(
-            f"✅ Compression done — saved ~{saved_tokens} tokens, "
-            f"new history: {len(new_history)} messages"
-        )
-        if _debug_logger:
-            _debug_logger.log("context_compressed", {
-                "iteration": iteration,
-                "messages_before": msg_count,
-                "tokens_saved": saved_tokens,
-            })
-        return new_history
 
     def _generate_file_content(
         self,
@@ -1821,6 +1699,26 @@ Return JSON only:
         if confirm_cb is None:
             confirm_cb = self._ai_confirm
 
+        # Reset per-run state
+        self._files_created = []
+        self._pinned_slot_keys = {}
+        self.pinned_messages = []
+        self._current_instruction = instruction
+
+        # Inject shared context board as a pinned slot (always visible)
+        try:
+            shared = self.memory.list_context()
+            if shared:
+                board_lines = ["🌐 SHARED CONTEXT BOARD (cross-agent facts):"]
+                for entry in shared:
+                    board_lines.append(f"  [{entry['agent']}] {entry['key']} = {entry['value']}")
+                self._update_pinned("shared_context_board", {
+                    "role": "user",
+                    "content": "\n".join(board_lines),
+                })
+        except Exception:
+            pass
+
         # Apply minion tool whitelist if provided
         if tool_whitelist is not None:
             self.tool_registry.allowed_tools = tool_whitelist
@@ -1830,8 +1728,6 @@ Return JSON only:
         max_iter = max_iterations if max_iterations is not None else self.max_react_iterations
         # Cap threshold so large --budget values don't prevent early finish
         _finish_threshold = max(20, min(max_iter // 4, 100))
-        # Expose budget to tool registry so _handle_finish can check early-exit guard
-        self.tool_registry._max_iterations = max_iter
 
         # System survey + runbook
         survey = self.memory.get_system_survey()
@@ -1993,13 +1889,7 @@ Return JSON only:
         react_history: List[Dict] = [{"role": "user", "content": initial_message}]
         self.react_trace = []
         finish_summary = ""
-        # Reset per-run file tracking (accumulates fresh within this run_react call)
-        self._files_created = []
-        self.pinned_messages = [m for m in self.pinned_messages
-                                if "📁 FILES CREATED" not in m.get("content", "")]
-        self._pinned_slot_keys.pop("file_manifest", None)
         final_confidence = 50
-        _stop_early = False  # set True when stop_event fires; skips verification
         # Tracks consecutive failures per file path to break permission-denied loops
         _path_fail_counts: Dict[str, int] = {}
         # How many times we've challenged a premature finish (challenge fires once only)
@@ -2020,41 +1910,26 @@ Return JSON only:
             print(f"\n{'=' * 70}")
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
-            # ── Context management (graduated pipeline) ───────────────────
-            # Stage 1: Tool output budget-cap (applied at observation build time — see below)
-            # Stage 2: History snip (zero model cost) — drop oldest non-pinned messages
-            #          when estimated tokens > 70% of context window.
-            # Stage 3: Full LLM summarization — only when Stage 2 isn't enough (> 85%).
-            # Simple tail-trim for normal operation (keeps first + last 9).
-            _est = self._estimate_react_tokens(react_history, system_prompt)
-            _SNIP_THRESHOLD   = int(self.NUM_CTX * 0.70)
-            _COMPRESS_THRESHOLD = self.NUM_CTX - 1500  # ~95% (original behaviour)
+            # Graduated context management:
+            # Stage 2 (70% of NUM_CTX) — cheap snip: drop oldest middle messages
+            # Stage 3 (82% of NUM_CTX) — LLM compressor: summarize to ~5k tokens
+            _tok_est = self._estimate_tokens(react_history)
+            _stage2_threshold = int(self.NUM_CTX * 0.70)
+            _stage3_threshold = int(self.NUM_CTX * 0.82)
 
-            if _est > _SNIP_THRESHOLD and len(react_history) > 6:
-                # Stage 2: Drop the oldest N non-pinned history messages until under 70%.
-                # Always keep react_history[0] (initial_message) + last 4 messages.
-                _snip_count = 0
-                while self._estimate_react_tokens(react_history, system_prompt) > _SNIP_THRESHOLD \
-                        and len(react_history) > 5:
-                    react_history.pop(1)  # remove second-oldest (keep [0])
-                    _snip_count += 1
-                if _snip_count:
-                    react_history.insert(1, {
-                        "role": "user",
-                        "content": f"[{_snip_count} older messages snipped to save context — see pinned FILE MANIFEST for what was created]",
-                    })
-                    _est = self._estimate_react_tokens(react_history, system_prompt)
-                    print(f"\n✂️  Stage-2 snip: removed {_snip_count} messages, ~{_est} tokens remaining")
-
-            if _est > _COMPRESS_THRESHOLD:
-                # Stage 3: Full LLM summarization (expensive — last resort)
+            if _tok_est >= _stage3_threshold:
+                print(f"  🗜️  Stage 3 compress: {_tok_est:,} tokens ≥ {_stage3_threshold:,} (82%)")
                 react_history = self._compress_react_history(
-                    react_history, system_prompt, instruction,
-                    iteration, max_iter,
+                    react_history, system_prompt, instruction
                 )
-            elif len(react_history) > 10:
-                keep_tail = react_history[-9:]
-                react_history = react_history[:1] + keep_tail
+            elif _tok_est >= _stage2_threshold:
+                # Stage 2: free snip — keep initial + last 8 messages
+                if len(react_history) > 9:
+                    print(f"  ✂️  Stage 2 snip: {_tok_est:,} tokens ≥ {_stage2_threshold:,} (70%)")
+                    react_history = react_history[:1] + react_history[-8:]
+            elif len(react_history) > 12:
+                # Baseline trim: keep initial + last 11
+                react_history = react_history[:1] + react_history[-11:]
 
             # Periodic task-progress reminder (every _checkpoint_interval iterations)
             if iteration > 1 and iteration % _checkpoint_interval == 0:
@@ -2077,19 +1952,7 @@ Return JSON only:
             # Call LLM
             raw = self.call_ollama_react(react_history, system_prompt)
 
-            # Stop button pressed mid-inference → exit immediately
-            if raw == self._STOP_SENTINEL:
-                finish_summary = "Stopped by user request."
-                _stop_early = True
-                break
-
             if not raw:
-                print(f"⚠️  Empty response at iter {iteration}")
-                try:
-                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
-                        _f.write(json.dumps({"iter": iteration, "reason": "empty_response"}) + "\n")
-                except Exception:
-                    pass
                 react_history.append({
                     "role": "user",
                     "content": (
@@ -2097,20 +1960,6 @@ Return JSON only:
                         "Produce valid JSON with thought, confidence, tool, and args."
                     ),
                 })
-                continue
-
-            # Strip <think>…</think> blocks before history + parse.
-            # qwen3 reasoning models emit these; extract_json finds the first { inside
-            # them (which is not valid JSON), wastes an iteration on a parse failure.
-            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-            if not raw:
-                print(f"⚠️  Think-only response at iter {iteration}")
-                try:
-                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
-                        _f.write(json.dumps({"iter": iteration, "reason": "think_only"}) + "\n")
-                except Exception:
-                    pass
-                react_history.append({"role": "user", "content": "ERROR: Response was only a <think> block. Produce a JSON tool call."})
                 continue
 
             react_history.append({"role": "assistant", "content": raw})
@@ -2121,18 +1970,6 @@ Return JSON only:
             if not parsed or not isinstance(parsed, dict):
                 _consecutive_json_failures += 1
                 print(f"⚠️  Failed to parse JSON ({_consecutive_json_failures} consecutive)")
-                # Log raw response to file so we can diagnose what the model actually output
-                try:
-                    import threading as _threading
-                    _fail_entry = json.dumps({
-                        "iter": iteration,
-                        "consecutive": _consecutive_json_failures,
-                        "raw": raw[:800],
-                    }) + "\n"
-                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
-                        _f.write(_fail_entry)
-                except Exception:
-                    pass
                 if _consecutive_json_failures >= 5:
                     print(f"🆘 JSON cascade — calling heavy model to rescue...")
                     ctx = self._build_context_summary(react_history[-8:])
@@ -2175,16 +2012,10 @@ Return JSON only:
             tool = parsed.get("tool", "")
             args = parsed.get("args", {})
 
-            print(f"💭 Thought: {thought}")
+            print(f"💭 Thought: {thought[:120]}")
             print(f"🎯 Tool: {tool}  |  Confidence: {confidence}%")
 
             if not tool:
-                print(f"⚠️  No tool field at iter {iteration} — parsed keys: {list(parsed.keys())}")
-                try:
-                    with open("/tmp/gui_parse_failures.jsonl", "a") as _f:
-                        _f.write(json.dumps({"iter": iteration, "reason": "no_tool", "parsed": str(parsed)[:400]}) + "\n")
-                except Exception:
-                    pass
                 react_history.append({
                     "role": "user",
                     "content": "ERROR: Missing 'tool' field. You MUST specify a tool name.",
@@ -2247,9 +2078,6 @@ Return JSON only:
                     })
                     continue
 
-            # Update iteration counter so _handle_finish can pace early-exit guard
-            self.tool_registry._iteration_count = iteration
-
             # Dispatch
             result = self.tool_registry.dispatch(tool, args, confidence, confirm_cb)
 
@@ -2310,26 +2138,20 @@ Return JSON only:
                     confidence=confidence,
                 )
 
-            # Track created/modified files and refresh pinned manifest
-            if result.success and tool in ("create_file", "patch_file"):
-                _file_path = args.get("path", "")
-                if _file_path and _file_path not in self._files_created:
-                    self._files_created.append(_file_path)
-                    self._refresh_file_manifest_pin()
-
-            # Track forward progress
+            # Track forward progress + update file manifest pin
             if result.success:
                 if tool in ("create_file", "patch_file"):
                     _last_progress_iteration = iteration
+                    # Track created/patched files for manifest pin
+                    fpath = args.get("path", "")
+                    if fpath and fpath not in self._files_created:
+                        self._files_created.append(fpath)
+                    self._refresh_file_manifest_pin()
                 elif tool == "execute_command":
                     cmd_key = args.get("command", "").strip()
                     if cmd_key not in _seen_commands:
                         _seen_commands.add(cmd_key)
                         _last_progress_iteration = iteration
-                elif tool_whitelist and tool not in ("screenshot", "wait", "zoom"):
-                    # In whitelist mode (e.g. GUI agent), any successful action
-                    # other than passive observation tools counts as forward progress.
-                    _last_progress_iteration = iteration
 
             # Pin architectural reads so they survive history trimming
             _ARCH_PATTERNS = ("ARCH.md", "schema.sql", "models.py", "schema.py",
@@ -2352,16 +2174,7 @@ Return JSON only:
                     })
 
             if tool == "finish":
-                # finish() was rejected by _handle_finish (missing files or too early)
-                if not result.success:
-                    react_history.append({"role": "user", "content": (
-                        f"OBSERVATION [iteration {iteration}] — 🚫 finish() REJECTED\n"
-                        f"{result.error}\n\n"
-                        f"Produce your next thought and tool call as JSON."
-                    )})
-                    continue  # Do not break — agent must fix the issue
-
-                # Challenge premature success: fire every iteration while < 25% budget used
+                # Challenge premature success: fire once if < 50% of budget used
                 if (
                     args.get("success")
                     and _premature_finish_challenges < 1
@@ -2476,63 +2289,37 @@ Return JSON only:
                     f"OBSERVATION [iteration {iteration}] — ✅ SUCCESS\n"
                     f"Tool: {tool}\n"
                     f"Args: {json.dumps(args)}\n"
-                    f"Output:\n{result.output[:6000]}\n"
+                    f"Output:\n{result.output[:800]}\n"
                     f"Metadata: {json.dumps(result.metadata)}{extra_hint}\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )
-            # If a GUI zoom tool set pending_images (list), inline both images so the
-            # model sees full-screen context + zoomed detail simultaneously.
-            # Otherwise fall back to single pending_image (screenshot tool).
-            _pending_imgs = getattr(self.tool_registry, "pending_images", None)
-            _pending_img  = getattr(self.tool_registry, "pending_image",  None)
-            if _pending_imgs:
-                react_history.append({"role": "user", "content": obs, "images": _pending_imgs})
-                self.tool_registry.pending_images = None
-                self.tool_registry.pending_image  = None
-            elif _pending_img:
-                react_history.append({"role": "user", "content": obs, "images": [_pending_img]})
-                self.tool_registry.pending_image = None
-            else:
-                react_history.append({"role": "user", "content": obs})
+            react_history.append({"role": "user", "content": obs})
 
-            # Stagnation / forward progress enforcement — warn only, never hard-kill.
-            # First nudge at _progress_warn_at idle iterations; repeated every 15 after that.
+            # Stagnation / forward progress enforcement
             _idle = iteration - _last_progress_iteration
-            _nudge_every = 15
-            if _idle > 0 and _idle >= _progress_warn_at and (
-                _idle == _progress_warn_at
-                or (_idle - _progress_warn_at) % _nudge_every == 0
-            ):
-                level = (_idle - _progress_warn_at) // _nudge_every  # 0 = first warn, 1+ = escalating
-                tag   = "STAGNATION WARNING" if level == 0 else f"STAGNATION ESCALATION #{level}"
-                print(f"⚠️  No forward progress for {_idle} iterations — injecting nudge (level {level})")
+            if _idle == _progress_warn_at:
+                print(f"⚠️  No forward progress for {_idle} iterations — injecting warning")
                 react_history.append({"role": "user", "content": (
-                    f"[{tag} — {_idle} iterations without meaningful progress]\n\n"
-                    f"You have not made tangible forward progress in {_idle} iterations.\n\n"
+                    f"[STAGNATION WARNING — {_idle} iterations without meaningful progress]\n\n"
+                    f"You have not created/modified a file or run a new successful command in {_idle} iterations.\n\n"
                     f"REQUIRED: Diagnose the blocker:\n"
                     f"• What exactly is blocking you?\n"
                     f"• Try a fundamentally different approach\n"
-                    f"• If the task is genuinely unresolvable, call finish(success=false)\n\n"
+                    f"• If the task is unresolvable, call finish(success=false) now\n\n"
+                    f"You have {_progress_kill_at - _idle} iterations before this phase is force-aborted.\n\n"
                     f"Produce your next thought and tool call as JSON."
                 )})
+            elif _idle >= _progress_kill_at:
+                finish_summary = (
+                    f"Phase aborted: {_idle} consecutive iterations with no forward progress. "
+                    f"Last meaningful action at iteration {_last_progress_iteration}."
+                )
+                print(f"💀 {finish_summary}")
+                break
 
         else:
             finish_summary = f"Max iterations ({max_iter}) reached without finishing"
             print(f"⚠️  {finish_summary}")
-
-        # Fast exit when user hit Stop — skip verification entirely
-        if _stop_early:
-            iterations_used = len(self.react_trace)
-            self._reset_keep_alive("5m")
-            return {
-                "success": False,
-                "summary": finish_summary,
-                "finish_summary": finish_summary,
-                "confidence": 0,
-                "verification_notes": "Stopped by user.",
-                "iterations_used": iterations_used,
-                "trace": self.react_trace,
-            }
 
         # Verify completion via a separate LLM call
         print("\n🔬 Verifying completion...")
@@ -2556,7 +2343,6 @@ Return JSON only:
 
         result_dict = {
             "success": verification.get("verified", False),
-            "summary": finish_summary,   # alias so callers can use result.get("summary")
             "confidence": verification.get("confidence", final_confidence),
             "verification_notes": verification.get("notes", ""),
             "finish_summary": finish_summary,
@@ -2594,10 +2380,6 @@ Return JSON only:
             except Exception:
                 pass
 
-        # Job done — reset keep_alive so the model can unload after 10m idle
-        # (during the loop it was -1 so the model stayed hot between iterations)
-        self._reset_keep_alive("10m")
-
         return result_dict
 
     # ================================================ public entry point ==
@@ -2608,7 +2390,8 @@ Return JSON only:
         print(f"🎯 TASK: {instruction}")
         print(f"💻 SYSTEM: {self.os_info}")
         print(f"🔄 MAX ITERATIONS: {self.max_react_iterations}")
-        print(f"🧠 MODEL: {self.fast_model}")
+        print(f"⚡ FAST MODEL: {self.fast_model}  (ReAct loop)")
+        print(f"🧠 HEAVY MODEL: {self.model}  (code generation)")
         print(f"🛡️  SAFETY: Enabled")
         if incoming_handoff:
             print(f"🔗 CHAIN HANDOFF: from '{incoming_handoff.get('source_instruction', '')[:60]}'")

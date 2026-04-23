@@ -10,6 +10,7 @@ import json
 import os
 import time
 import glob as glob_module
+from threading import Lock
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
@@ -38,12 +39,15 @@ class AgentMemory:
         ("lang_versions",   "python3 --version 2>&1; node --version 2>&1; rustc --version 2>&1; go version 2>&1; java -version 2>&1 | head -1; echo done"),
         ("pip_packages",    "pip3 list 2>/dev/null | wc -l | xargs echo 'pip packages:'"),
         ("firewall",        "sudo nft list ruleset 2>/dev/null | grep -E 'chain|tcp dport|udp dport' | head -30 || echo '(nft: needs sudo or not installed)'"),
+        ("installed_packages",
+         "pacman -Qe 2>/dev/null | awk '{print $1}' | tr '\\n' ' '"),
     ]
 
     def __init__(self):
         os.makedirs(self.DB_DIR, exist_ok=True)
         os.makedirs(self.RUNBOOK_DIR, exist_ok=True)
         os.makedirs(self.BACKUP_DIR, exist_ok=True)
+        self._lock = Lock()
         self._init_db()
         self._survey_cache: Optional[Dict[str, str]] = None
         self._survey_cache_time: float = 0.0
@@ -62,6 +66,15 @@ class AgentMemory:
                     duration_ms   INTEGER,
                     used_at       TEXT NOT NULL,
                     success_count INTEGER DEFAULT 1
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS shared_context (
+                    key         TEXT PRIMARY KEY,
+                    value       TEXT NOT NULL,
+                    agent_id    TEXT,
+                    updated_at  TEXT NOT NULL,
+                    ttl_seconds INTEGER DEFAULT 86400
                 )
             """)
             conn.commit()
@@ -183,6 +196,80 @@ class AgentMemory:
         except Exception:
             pass
         return None
+
+
+    # --------------------------------------------------- shared context board --
+
+    def set_context(self, key: str, value: str,
+                    agent_id: str = "cmd", ttl: int = 86400) -> None:
+        """Publish a fact to the shared cross-agent context board."""
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            with sqlite3.connect(self.DB_PATH) as conn:
+                conn.execute("""
+                    INSERT INTO shared_context(key, value, agent_id, updated_at, ttl_seconds)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value=excluded.value, agent_id=excluded.agent_id,
+                      updated_at=excluded.updated_at, ttl_seconds=excluded.ttl_seconds
+                """, (key, value, agent_id, now, ttl))
+                conn.commit()
+
+    def get_context(self, key: str) -> Optional[str]:
+        """Read a single key from shared context (None if missing or expired)."""
+        row = None
+        with sqlite3.connect(self.DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT value, updated_at, ttl_seconds FROM shared_context WHERE key = ?",
+                (key,)
+            ).fetchone()
+        if not row:
+            return None
+        value, updated_at, ttl = row
+        if ttl and ttl > 0:
+            try:
+                age = (datetime.utcnow() - datetime.fromisoformat(updated_at)).total_seconds()
+                if age > ttl:
+                    with sqlite3.connect(self.DB_PATH) as conn:
+                        conn.execute("DELETE FROM shared_context WHERE key = ?", (key,))
+                        conn.commit()
+                    return None
+            except Exception:
+                pass
+        return value
+
+    def list_context(self, prefix: str = "") -> List[Dict]:
+        """Return all non-expired context entries, optionally filtered by key prefix."""
+        with sqlite3.connect(self.DB_PATH) as conn:
+            rows = conn.execute("""
+                SELECT key, value, agent_id, updated_at, ttl_seconds
+                FROM shared_context
+                WHERE key LIKE ?
+                ORDER BY updated_at DESC
+            """, (f"{prefix}%",)).fetchall()
+        now = datetime.utcnow()
+        result = []
+        expired_keys = []
+        for key, value, agent_id, updated_at, ttl in rows:
+            if ttl and ttl > 0:
+                try:
+                    age = (now - datetime.fromisoformat(updated_at)).total_seconds()
+                    if age > ttl:
+                        expired_keys.append(key)
+                        continue
+                except Exception:
+                    pass
+            result.append({"key": key, "value": value, "agent": agent_id,
+                            "updated_at": updated_at})
+        if expired_keys:
+            try:
+                with sqlite3.connect(self.DB_PATH) as conn:
+                    conn.executemany("DELETE FROM shared_context WHERE key = ?",
+                                     [(k,) for k in expired_keys])
+                    conn.commit()
+            except Exception:
+                pass
+        return result
 
 
 # ----------------------------------------------------------------- CLI test --

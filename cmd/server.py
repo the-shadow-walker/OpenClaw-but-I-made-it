@@ -1764,6 +1764,21 @@ def blueteam_run_daily_report():
             return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/v1/context', methods=['GET'])
+def get_shared_context():
+    """Return all non-expired shared context board entries.
+
+    Query param: ?prefix=<key_prefix> (optional)
+    """
+    try:
+        agent = _get_quick_agent()
+        prefix = request.args.get('prefix', '')
+        entries = agent.memory.list_context(prefix=prefix)
+        return jsonify({'context': entries, 'count': len(entries)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")

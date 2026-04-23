@@ -28,7 +28,11 @@ class ToolRegistry:
         "read_file",
         "memory_lookup",
         "finish",
-        "manage_server",   # NEW
+        "manage_server",
+        "gui_task",
+        "save_context",
+        "publish_context",
+        "read_context",
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
@@ -36,6 +40,8 @@ class ToolRegistry:
         self.safety_validator = safety_validator
         self.search_agent = search_agent
         self.memory = memory
+        # AgentMemory reference for shared context board
+        self.agent_memory = memory
         # Optional callable(command: str) -> str that returns a human-readable
         # breakdown of the command segments, shown before execution / confirmation.
         self.explain_cb = explain_cb
@@ -51,9 +57,6 @@ class ToolRegistry:
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
         self._read_file_counts: Dict[str, int] = {}     # path → read count (no-offset reads)
-        # Updated by run_react before each dispatch so _handle_finish can pace early exits
-        self._iteration_count: int = 0
-        self._max_iterations: int = 50
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -210,6 +213,10 @@ class ToolRegistry:
             "memory_lookup":   self._handle_memory_lookup,
             "finish":          self._handle_finish,
             "manage_server":   self._handle_manage_server,
+            "gui_task":        self._handle_gui_task,
+            "save_context":    self._handle_save_context,
+            "publish_context": self._handle_publish_context,
+            "read_context":    self._handle_read_context,
         }
         return handler_map[tool](args)
 
@@ -569,57 +576,33 @@ class ToolRegistry:
             return ToolResult(False, "", "No path provided", {})
         offset = int(args.get("offset", 0))
         limit  = int(args.get("limit", 200))
-
-        # Track ALL reads (any offset) per path — catches pagination loops too
-        self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
-        total_reads = self._read_file_counts[path]
-
-        # Hard block at 8 total reads of the same file
-        if total_reads > 8:
-            fname = os.path.basename(path)
-            return ToolResult(
-                False, "",
-                f"BLOCKED: {fname} has been read {total_reads} times this phase. "
-                f"Re-reading is NOT helping. You MUST take a different action:\n"
-                f"• Use execute_command: grep -n 'symbol' {path}\n"
-                f"• Use execute_command: python3 -c \"import ast; ...\" to inspect structure\n"
-                f"• Use patch_file or create_file to fix what you already know is wrong\n"
-                f"• If imports are missing, ADD them — don't keep reading the file.",
-                {"read_blocked": True, "total_reads": total_reads}
-            )
-
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
             total = len(lines)
             slice_ = lines[offset : offset + limit]
             content = "".join(slice_)
-
-            # Header so model always knows exactly where it is
-            end_line = min(offset + limit, total)
-            header = f"[FILE: {path} | TOTAL: {total} lines | SHOWING: lines {offset+1}-{end_line}]\n"
-            content = header + content
-
             remaining = total - (offset + limit)
             if remaining > 0:
                 content += (
-                    f"\n[... {remaining} more lines. "
-                    f"Use offset={offset + limit} to continue, "
-                    f"or grep to find specific content instead of paginating.]"
+                    f"\n\n[... {remaining} more lines not shown. "
+                    f"Call read_file with offset={offset + limit} to continue reading.]"
                 )
-
-            # Warn at 4+ reads regardless of offset
-            if total_reads >= 4:
-                content += (
-                    f"\n\n⚠️  READ #{total_reads} of {path}. "
-                    f"You have {8 - total_reads} reads left before this file is blocked.\n"
-                    f"STOP re-reading. Use grep or just patch what you know is wrong."
-                )
-
+            # Track no-offset re-reads and inject redirect note at 3rd read
+            if offset == 0:
+                self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
+                count = self._read_file_counts[path]
+                if count >= 3:
+                    content += (
+                        f"\n\n⚠️  You have read {path} from the top {count} times. "
+                        f"If you haven't found what you need:\n"
+                        f"• Use offset= to read a different section\n"
+                        f"• Use execute_command with grep/sed to locate specific content\n"
+                        f"• Proceed with what you already know — re-reading rarely helps"
+                    )
             return ToolResult(True, content, "", {
                 "path": path, "total_lines": total,
                 "shown_lines": len(slice_), "offset": offset,
-                "total_reads": total_reads,
             })
         except FileNotFoundError:
             return ToolResult(False, "", f"File not found: {path}", {})
@@ -647,48 +630,13 @@ class ToolRegistry:
             return ToolResult(False, "", str(e), {})
 
     def _handle_finish(self, args: dict) -> ToolResult:
-        summary  = args.get("summary", "Task completed.")
-        success  = bool(args.get("success", True))
-        declared = args.get("files_created", [])
-
-        # --- Guard 1: verify all declared files exist on disk ---
-        missing = [f for f in declared if not os.path.exists(os.path.expanduser(f))]
-        if missing:
-            msg = (
-                f"finish() REJECTED — {len(missing)} declared file(s) not found on disk:\n"
-                + "\n".join(f"  ✗ {f}" for f in missing)
-                + "\nCreate the missing files first, then call finish() again."
-            )
-            print(f"\n{'=' * 70}")
-            print(f"🚫 FINISH REJECTED (missing files):")
-            for f in missing:
-                print(f"   ✗ {f}")
-            print(f"{'=' * 70}")
-            return ToolResult(False, "", msg, {"missing_files": missing})
-
-        # --- Guard 2: reject no-op early exits ---
-        if success and not declared and self._max_iterations > 0:
-            budget_pct = self._iteration_count / self._max_iterations
-            if budget_pct < 0.5:
-                msg = (
-                    f"finish() REJECTED — no files_created declared and only "
-                    f"{self._iteration_count}/{self._max_iterations} iterations used "
-                    f"({budget_pct:.0%} of budget). "
-                    "Complete the task or list all files you wrote in files_created."
-                )
-                print(f"\n{'=' * 70}")
-                print(f"🚫 FINISH REJECTED (no files, too early): {self._iteration_count}/{self._max_iterations} iters")
-                print(f"{'=' * 70}")
-                return ToolResult(False, "", msg, {})
-
-        # --- Accepted ---
+        summary = args.get("summary", "")
+        success = bool(args.get("success", True))
         icon = "✅" if success else "⚠️ "
         print(f"\n{'=' * 70}")
         print(f"{icon} FINISH: {summary}")
-        if declared:
-            print(f"   Files verified: {len(declared)}")
         print(f"{'=' * 70}")
-        return ToolResult(success, summary, "", {"finished": True, "files_created": declared})
+        return ToolResult(success, summary, "", {"finished": True})
 
     def _handle_manage_server(self, args: dict) -> ToolResult:
         action = (args.get("action") or "").lower()
@@ -743,3 +691,78 @@ class ToolRegistry:
                 return ToolResult(True, f"'{name}' running (pid={proc.pid}). Redirect server logs in command: e.g. 'uvicorn ... >/tmp/{name}.log 2>&1'", "", {"pid": proc.pid})
             except Exception as e:
                 return ToolResult(False, "", f"Start failed: {e}", {})
+
+    def _handle_gui_task(self, args: dict) -> ToolResult:
+        task = args.get("task", "")
+        max_iter = int(args.get("max_iterations", 20))
+        if not task:
+            return ToolResult(False, "", "No task provided", {})
+        # Auto-save CMD context before running the GUI agent (safety net)
+        snapshot_path = None
+        if hasattr(self, "_save_context_cb") and self._save_context_cb:
+            try:
+                snapshot_path = self._save_context_cb(f"pre_gui_{task[:20]}")
+            except Exception:
+                pass
+        try:
+            from gui_agent import GUIAgent
+            agent = GUIAgent()
+            result = agent.run(task=task, max_iterations=max_iter)
+            summary = result.get("summary", result.get("finish_summary", ""))
+            success = result.get("success", False)
+            files = []
+            try:
+                for e in agent.agent.react_trace:
+                    if e.get("tool") == "create_file" and getattr(e.get("result"), "success", False):
+                        p = e.get("args", {}).get("path", "")
+                        if p:
+                            files.append(p)
+            except Exception:
+                pass
+            output = f"GUI task {'succeeded' if success else 'failed'}.\nSummary: {summary}"
+            if files:
+                output += f"\nFiles created: {', '.join(files)}"
+            meta = {"gui_iterations": result.get("iterations_used", 0),
+                    "files_created": files}
+            if snapshot_path:
+                meta["context_snapshot"] = snapshot_path
+            return ToolResult(success, output, "" if success else summary, meta)
+        except ImportError:
+            return ToolResult(False, "", "GUI agent not available on this machine", {})
+        except Exception as e:
+            return ToolResult(False, "", f"GUI task failed: {e}", {})
+
+    def _handle_save_context(self, args: dict) -> ToolResult:
+        label = args.get("label", "manual")
+        # Delegate to the agent's save_context if the callback is set
+        if hasattr(self, "_save_context_cb") and self._save_context_cb:
+            try:
+                path = self._save_context_cb(label)
+                return ToolResult(True, f"Context saved → {path}", "", {"path": path})
+            except Exception as e:
+                return ToolResult(False, "", f"Save failed: {e}", {})
+        return ToolResult(False, "", "save_context not wired up (no callback)", {})
+
+    def _handle_publish_context(self, args: dict) -> ToolResult:
+        key = args.get("key", "")
+        value = args.get("value", "")
+        ttl_hours = int(args.get("ttl_hours", 24))
+        if not key or not value:
+            return ToolResult(False, "", "key and value are required", {})
+        try:
+            self.agent_memory.set_context(key, value, agent_id="cmd", ttl=ttl_hours * 3600)
+            return ToolResult(True, f"Published: {key} = {value}", "", {"key": key})
+        except Exception as e:
+            return ToolResult(False, "", f"publish_context failed: {e}", {})
+
+    def _handle_read_context(self, args: dict) -> ToolResult:
+        key = args.get("key", "")
+        if not key:
+            return ToolResult(False, "", "key is required", {})
+        try:
+            value = self.agent_memory.get_context(key)
+            if value is None:
+                return ToolResult(False, "", f"Key '{key}' not found or expired", {})
+            return ToolResult(True, f"{key} = {value}", "", {"key": key, "value": value})
+        except Exception as e:
+            return ToolResult(False, "", f"read_context failed: {e}", {})
