@@ -221,6 +221,10 @@ class GUIScreen:
             bx2 = min(iw - 1, int(cx + hw))
             by2 = min(ih - 1, int(cy + hh))
 
+            # Skip off-screen elements (clamping produced degenerate / inverted rect)
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+
             # 1px colored border around bounding box
             draw.rectangle([bx1, by1, bx2, by2], outline=color)
 
