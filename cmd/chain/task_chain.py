@@ -12,6 +12,7 @@ Classes:
 
 import json
 import os
+import re as _re
 import subprocess
 import time
 import uuid
@@ -23,9 +24,92 @@ from ollama_agent_core import CommandSafetyValidator
 
 CHAINS_DIR = os.path.expanduser("~/.agent_bin/chains")
 INCOMPLETE_TASK_PATH = os.path.expanduser("~/.agent_bin/last_incomplete_task.json")
+SIDECHAIN_DIR = os.path.expanduser("~/.agent_bin/sidechains")
 
 # Common dev ports to clean up between chain phases
 _CLEANUP_PORTS = [5000, 8000, 3000, 8080, 8443]
+
+# ---------------------------------------------------------------------------
+# ROLES — four specialist subagent configurations
+# ---------------------------------------------------------------------------
+
+ROLES: Dict[str, Dict] = {
+    "planner": {
+        "tools": {"read_file", "web_search", "memory_lookup", "finish"},
+        "system_prefix": (
+            "You are the PLANNER. Read existing code/docs and write a plan file.\n"
+            "Do NOT write implementation code. Do NOT run commands.\n"
+            "Output one markdown plan/spec file using create_file, then finish() "
+            "with files_created listing the plan file path."
+        ),
+        "first_action": "read_file",
+        "single_minion": True,   # skip micro-task decomposition
+    },
+    "builder": {
+        "tools": {"read_file", "create_file", "patch_file", "finish"},
+        "system_prefix": (
+            "You are the BUILDER. Write and modify code files only.\n"
+            "Do NOT run servers or execute shell commands.\n"
+            "Read the plan, create all required files, then finish() with "
+            "files_created listing EVERY file path you wrote."
+        ),
+        "first_action": "create_file",
+        "single_minion": False,
+    },
+    "tester": {
+        "tools": {"read_file", "execute_command", "finish"},
+        "system_prefix": (
+            "You are the TESTER. Run verification checks only — do NOT modify source files.\n"
+            "Run: syntax checks (python -m py_compile *.py), import checks, unit tests.\n"
+            "finish() with a test_results summary. Set success=false if any check fails."
+        ),
+        "first_action": "execute_command",
+        "single_minion": True,
+    },
+    "commander": {
+        "tools": {"read_file", "execute_command", "manage_server", "finish"},
+        "system_prefix": (
+            "You are the COMMANDER. Handle infrastructure: install deps, migrate db,\n"
+            "start services, configure ports. Do NOT write application code.\n"
+            "finish() with a summary of services_running and ports_open."
+        ),
+        "first_action": "execute_command",
+        "single_minion": False,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# HandoffResult — structured bidirectional handoff between subagents
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HandoffResult:
+    """Structured result returned from SubtaskOrchestrator to the chain parent."""
+    success: bool
+    summary: str
+    role: str                          # which role produced this
+    files_created: List[str] = field(default_factory=list)   # verified to exist on disk
+    files_modified: List[str] = field(default_factory=list)
+    services_running: List[str] = field(default_factory=list)  # "name:port" strings
+    ports_open: List[int] = field(default_factory=list)
+    test_results: Dict = field(default_factory=dict)           # {"passed": N, "failed": N, "errors": [...]}
+    pinned_facts: Dict = field(default_factory=dict)           # key→value carried to all future subtasks
+    next_subtask_hints: str = ""
+
+    def to_dict(self) -> Dict:
+        return {
+            "success": self.success,
+            "summary": self.summary,
+            "role": self.role,
+            "files_created": self.files_created,
+            "files_modified": self.files_modified,
+            "services_running": self.services_running,
+            "ports_open": self.ports_open,
+            "test_results": self.test_results,
+            "pinned_facts": self.pinned_facts,
+            "next_subtask_hints": self.next_subtask_hints,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +408,38 @@ class TaskDecomposer:
         target_phases = min(8, max(3, total_budget // 100))
         per_phase_hint = max(25, total_budget // target_phases)
 
+        # Extract an explicit workspace path from the goal if provided
+        # Matches: "workspace in /abs/path" or "workspace: /abs/path" etc.
+        ws_match = _re.search(
+            r'workspace[:\s]+(/[^\s,."\']+)',
+            goal,
+            _re.IGNORECASE,
+        )
+        workspace = ws_match.group(1).rstrip('/') if ws_match else ""
+
+        if workspace:
+            arch_path     = f"{workspace}/DOCS/ARCH.md"
+            arch_ac       = f"test -f {arch_path}"
+            phase0_instr  = (
+                f"Create {arch_path} with: module list, DB schema (if needed), "
+                f"API route table, port assignments, auth approach, and file layout. "
+                f"No code — specification only."
+            )
+            workspace_rule = (
+                f"\n0. WORKSPACE: ALL files MUST be created under {workspace}/. "
+                f"Use ABSOLUTE paths only — no relative paths ever. "
+                f"acceptance_criteria shell commands must also use the full absolute path."
+            )
+        else:
+            arch_path     = "DOCS/ARCH.md"
+            arch_ac       = "test -f DOCS/ARCH.md"
+            phase0_instr  = (
+                "Create DOCS/ARCH.md with: module list, DB schema (if needed), "
+                "API route table, port assignments, auth approach, and file layout. "
+                "No code — specification only."
+            )
+            workspace_rule = ""
+
         prompt = f"""Decompose this goal into sequential sub-tasks for an autonomous agent.
 
 GOAL: {goal}
@@ -336,23 +452,35 @@ Return a JSON array of sub-tasks. Each element:
   "instruction": "specific, actionable instruction for one sub-task",
   "acceptance_criteria": "shell command that exits 0 on success, or null",
   "estimated_complexity": "small|medium|large",
-  "max_iterations": {per_phase_hint}
+  "max_iterations": {per_phase_hint},
+  "role": "planner|builder|tester|commander"
 }}
 
-MANDATORY DECOMPOSITION RULES:
-1. PHASE 0 MUST be: "Create DOCS/ARCH.md with: module list, DB schema (if needed), API route table,
-   port assignments, auth approach, and file layout. No code — specification only."
-   Its acceptance_criteria: "test -f DOCS/ARCH.md"
+ROLE ASSIGNMENTS (REQUIRED — every subtask must have a role):
+- "planner": read existing code/docs and write one specification/plan file. No code implementation.
+- "builder": write/modify code files only. No shell commands.
+- "tester": run syntax checks, import checks, unit tests. Does NOT modify source files.
+- "commander": install deps, migrate db, start services. No application code writing.
+- Never assign builder to a phase that only runs shell commands.
+- Never assign commander to a phase that writes code files.
+- Phase 0 (architecture/spec) MUST use role=planner.
+- Verification phases (curl health, syntax check) MUST use role=tester.
+- Dependency install / service start phases MUST use role=commander.
+
+MANDATORY DECOMPOSITION RULES:{workspace_rule}
+1. PHASE 0 MUST be: "{phase0_instr}"
+   Its acceptance_criteria MUST be: "{arch_ac}"
+   Its role MUST be: "planner"
 2. MODULAR STRUCTURE: Decompose so each phase touches ≤3 files. Prefer src/auth/, src/models/,
    src/api/ layout over a monolithic app.py.
 3. DB MIGRATION: If a database is needed, one phase must be: "Initialize DB schema using schema.sql
    or Alembic migration — do NOT create tables at app startup."
 4. SERVER VERIFICATION: Any phase that starts a server must be followed immediately by a
-   verification phase: "Read the server log and curl the /health endpoint to confirm it started."
+   tester phase: "Run syntax checks and curl the /health endpoint to confirm it started."
 5. ORDER: Always put install/dependency phases before code phases, code before server start.
 6. Order tasks so each builds on the previous.
-7. acceptance_criteria must be a simple verifiable shell command
-   (e.g. "systemctl is-active nginx", "test -f /etc/nginx/nginx.conf", "curl -sf http://localhost")
+7. acceptance_criteria must be a simple verifiable shell command using ABSOLUTE paths
+   (e.g. "test -f {arch_path}", "curl -sf http://localhost:PORT")
 8. Set max_iterations proportional to complexity: simpler phases get fewer, complex phases get more.
 9. Total max_iterations across all tasks must sum to approximately {total_budget}.
 10. Aim for {target_phases} sub-tasks; prefer fewer larger phases over many tiny ones.
@@ -385,6 +513,7 @@ Return ONLY the JSON array, no other text."""
                 task["max_iterations"] = self.COMPLEXITY_DEFAULTS.get(complexity, 25)
             task.setdefault("acceptance_criteria", None)
             task.setdefault("estimated_complexity", "medium")
+            task.setdefault("role", "builder")  # default if LLM omitted the field
 
         # Re-index sequentially
         for i, task in enumerate(subtasks):
@@ -487,12 +616,11 @@ Return JSON only:
 
 class SubtaskOrchestrator:
     """
-    Producer tier. Given one subtask + full chain context, breaks it into
-    3-5 micro-tasks and spawns sequential Minion agents (clean history each).
+    Producer tier. Given one subtask + full chain context, dispatches to a
+    role-specific handler, writes a sidechain transcript, and auto-injects a
+    tester gate after every builder phase.
 
-    Tool sets:
-      CODER_TOOLS    — for code-writing micro-tasks (no command execution)
-      COMMANDER_TOOLS — for infrastructure micro-tasks (no file writing)
+    Legacy tool-set aliases kept for TDA helpers:
     """
 
     CODER_TOOLS = {"read_file", "create_file", "patch_file", "finish"}
@@ -510,14 +638,58 @@ class SubtaskOrchestrator:
         chain_context: Dict,
     ) -> ImplementationArtifact:
         """
-        Break subtask into micro-tasks and run each as a Minion.
-        Returns an ImplementationArtifact aggregating all micro-task results.
+        Dispatch subtask to a role-specific handler, write sidechain transcript,
+        and auto-inject tester gate after builder phases.
+        Returns an ImplementationArtifact aggregating all results.
         """
         subtask_index = subtask.get("index", 0)
         subtask_instruction = subtask.get("instruction", "")
+        role = subtask.get("role", "builder")
+        role_cfg = ROLES.get(role, ROLES["builder"])
 
         print(f"\n{'=' * 70}")
-        print(f"🎬 SubtaskOrchestrator: phase {subtask_index} — {subtask_instruction[:80]}")
+        print(f"🎬 SubtaskOrchestrator: phase {subtask_index} [{role}] — {subtask_instruction[:80]}")
+
+        # Role-based dispatch:
+        # planner / tester → single-minion with role's tool whitelist + system prefix
+        # builder / commander → micro-task decomposition with appropriate tool set
+        if role_cfg.get("single_minion") or self._is_single_file_task(subtask_instruction):
+            artifact = self._run_as_role_minion(subtask, chain_context, role_cfg)
+        else:
+            # builder / commander: micro-task decomposition with role-appropriate tool set
+            # Map role → tool whitelist (fall back to type-based selection inside loop)
+            _role_tools = role_cfg["tools"]
+            artifact = self._orchestrate_with_microtasks(
+                subtask, chain_context, role_override_tools=_role_tools
+            )
+
+        # ── Auto-tester gate: run inline verification after every builder phase ──
+        if role == "builder" and artifact.status in ("completed", "partial"):
+            tester_summary = self._run_inline_tester(artifact, chain_context, subtask_index)
+            if tester_summary.get("failed", 0) > 0 or not tester_summary.get("success", True):
+                artifact.notes.append(
+                    f"Tester gate detected issues: {tester_summary.get('summary', '')[:200]}"
+                )
+                artifact.status = "partial"
+                print(f"  ⚠️  Tester gate: issues detected — marked phase as partial")
+            else:
+                print(f"  ✅ Tester gate: all checks passed")
+
+        # ── Sidechain transcript: write full trace to disk, zero out in artifact ──
+        self._write_sidechain(subtask_index, role)
+
+        print(f"\n✅ SubtaskOrchestrator phase {subtask_index} [{role}] done: {artifact.status}")
+        return artifact
+
+    def _orchestrate_with_microtasks(
+        self,
+        subtask: Dict,
+        chain_context: Dict,
+        role_override_tools: Optional[set] = None,
+    ) -> ImplementationArtifact:
+        """Run subtask through micro-task decomposition.  Called for builder/commander roles."""
+        subtask_index = subtask.get("index", 0)
+        subtask_instruction = subtask.get("instruction", "")
 
         # 1. Decompose subtask into micro-tasks
         micro_tasks = self._decompose_to_micro_tasks(subtask_instruction, chain_context)
@@ -539,21 +711,23 @@ class SubtaskOrchestrator:
 
             print(f"\n  🤖 Minion {i + 1}/{len(micro_tasks)} [{mt_type}]: {work_order[:80]}")
 
-            # Feature 1: snapshot files before code micro-tasks so we can revert on failure
+            # Snapshot files before code micro-tasks so we can revert on failure
             snapshot: Dict[str, Optional[str]] = {}
             if mt_type == "code" and file_scope:
                 snapshot = self._snapshot_files(file_scope)
                 print(f"  📸 Snapshotted {len(snapshot)} file(s)")
 
-            # Feature 4: TDA — use test-first loop for Python code tasks
+            # TDA — use test-first loop for Python code tasks
             if self._is_tda_eligible(micro_task):
                 print(f"  🧪 TDA: running QA→Coder→Validator loop")
                 report = self._run_tda_code_task(micro_task, chain_context, micro_task_reports)
             else:
-                # Determine tool whitelist based on micro-task type
-                tools = self.CODER_TOOLS if mt_type == "code" else self.COMMANDER_TOOLS
+                # Tool whitelist: role override > type-based fallback
+                if role_override_tools is not None:
+                    tools = role_override_tools
+                else:
+                    tools = self.CODER_TOOLS if mt_type == "code" else self.COMMANDER_TOOLS
 
-                # Build minion prompt
                 prompt = self._build_minion_prompt(
                     work_order=work_order,
                     chain_context=chain_context,
@@ -562,10 +736,9 @@ class SubtaskOrchestrator:
                     mt_type=mt_type,
                 )
 
-                # Clear agent history for a fresh minion context
                 self.agent.react_trace = []
+                self.agent.tool_registry.reset_phase_state()
 
-                # Run the minion — use subtask's allocated budget (min 15)
                 minion_iters = max(15, subtask.get("max_iterations", 25))
                 result = self.agent.run_react(
                     instruction=prompt,
@@ -606,7 +779,6 @@ class SubtaskOrchestrator:
 
             micro_task_reports.append(report)
 
-            # Feature 1: revert files if code micro-task failed
             if not report["success"] and snapshot:
                 self._restore_snapshot(snapshot)
                 all_notes.append(
@@ -618,11 +790,10 @@ class SubtaskOrchestrator:
                 all_notes.append(f"Minion {i + 1} failed: {report['finish_summary'][:120]}")
                 overall_status = "partial"
 
-        # 3. Build ImplementationArtifact
         summary_parts = [r.get("finish_summary", "") for r in micro_task_reports if r.get("finish_summary")]
         summary = " | ".join(summary_parts[:3])[:500] or f"Phase {subtask_index} complete"
 
-        artifact = ImplementationArtifact(
+        return ImplementationArtifact(
             subtask_index=subtask_index,
             subtask_instruction=subtask_instruction,
             status=overall_status,
@@ -635,10 +806,240 @@ class SubtaskOrchestrator:
             notes=all_notes,
         )
 
-        print(f"\n✅ SubtaskOrchestrator phase {subtask_index} done: {overall_status}")
-        return artifact
-
     # ---------------------------------------------------- private helpers --
+
+    def _is_single_file_task(self, instruction: str) -> bool:
+        """
+        Return True when the instruction clearly involves creating/writing exactly
+        one file.  Used to skip micro-task decomposition and run as a single minion.
+        """
+        # Match "Create /absolute/path/to/file.ext" at the start of the instruction
+        return bool(_re.match(r'Create\s+/[^\s,]+\.[a-zA-Z]+', instruction.strip()))
+
+    def _run_as_role_minion(
+        self,
+        subtask: Dict,
+        chain_context: Dict,
+        role_cfg: Dict,
+    ) -> ImplementationArtifact:
+        """Run the subtask as a single minion using the role's tool whitelist and system prefix."""
+        subtask_index = subtask.get("index", 0)
+        subtask_instruction = subtask.get("instruction", "")
+        budget = max(15, subtask.get("max_iterations", 25))
+        role = subtask.get("role", "builder")
+
+        print(f"  🎭 Role={role} — single minion (budget={budget})")
+
+        # Build the prompt using _build_minion_prompt, then prepend role's system prefix
+        mt_type = "code" if role in ("planner", "builder") else "command"
+        base_prompt = self._build_minion_prompt(
+            work_order=subtask_instruction,
+            chain_context=chain_context,
+            previous_reports=[],
+            file_scope=[],
+            mt_type=mt_type,
+        )
+        # Prepend role persona so the model knows its constraints immediately
+        full_prompt = f"{role_cfg['system_prefix']}\n\n{base_prompt}"
+
+        self.agent.react_trace = []
+        self.agent.tool_registry.reset_phase_state()
+        result = self.agent.run_react(
+            instruction=full_prompt,
+            tool_whitelist=role_cfg["tools"],
+            max_iterations=budget,
+        )
+
+        success = result.get("success", False)
+        finish_summary = result.get("finish_summary", "")
+        files_created: List[str] = []
+        files_modified: List[str] = []
+
+        for entry in result.get("trace", []):
+            tool = entry.get("tool", "")
+            args = entry.get("args", {})
+            res = entry.get("result")
+            ok = getattr(res, "success", False) if hasattr(res, "success") \
+                else (res or {}).get("success", False)
+            if ok and tool == "create_file":
+                p = args.get("path", "")
+                if p and p not in files_created:
+                    files_created.append(p)
+            elif ok and tool == "patch_file":
+                p = args.get("path", "")
+                if p and p not in files_modified:
+                    files_modified.append(p)
+
+        return ImplementationArtifact(
+            subtask_index=subtask_index,
+            subtask_instruction=subtask_instruction,
+            status="completed" if success else "partial",
+            summary=finish_summary[:500] or f"Phase {subtask_index} ({role}) complete",
+            files_created=files_created,
+            files_modified=files_modified,
+            micro_task_reports=[{
+                "micro_task_index": 0,
+                "type": mt_type,
+                "work_order": subtask_instruction,
+                "success": success,
+                "finish_summary": finish_summary,
+                "iterations_used": result.get("iterations_used", 0),
+            }],
+        )
+
+    def _run_inline_tester(
+        self,
+        artifact: ImplementationArtifact,
+        chain_context: Dict,
+        subtask_index: int,
+    ) -> Dict:
+        """Run a quick tester minion against the files created by a builder phase.
+        Returns {"success": bool, "failed": int, "summary": str}.
+        """
+        all_files = artifact.files_created + artifact.files_modified
+        if not all_files:
+            return {"success": True, "failed": 0, "summary": "no files to check"}
+
+        py_files = [f for f in all_files if f.endswith(".py")]
+        js_files = [f for f in all_files if f.endswith((".js", ".ts"))]
+
+        check_cmds = []
+        for f in py_files[:5]:
+            check_cmds.append(f"python3 -m py_compile {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
+        for f in js_files[:3]:
+            check_cmds.append(f"node --check {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
+        if not check_cmds:
+            return {"success": True, "failed": 0, "summary": "no .py/.js files to check"}
+
+        tester_instruction = (
+            f"Run syntax checks for files created in phase {subtask_index}.\n"
+            "Run each command and report PASS or FAIL:\n"
+            + "\n".join(f"  {cmd}" for cmd in check_cmds)
+            + "\n\nfinish() with test_results summary. Set success=false if any FAIL."
+        )
+
+        tester_role_cfg = ROLES["tester"]
+        base_prompt = self._build_minion_prompt(
+            work_order=tester_instruction,
+            chain_context=chain_context,
+            previous_reports=[],
+            file_scope=all_files[:8],
+            mt_type="command",
+        )
+        full_prompt = f"{tester_role_cfg['system_prefix']}\n\n{base_prompt}"
+
+        print(f"\n  🧪 Auto-tester gate: checking {len(all_files)} file(s)...")
+        self.agent.react_trace = []
+        self.agent.tool_registry.reset_phase_state()
+        result = self.agent.run_react(
+            instruction=full_prompt,
+            tool_whitelist=tester_role_cfg["tools"],
+            max_iterations=8,
+        )
+
+        summary = result.get("finish_summary", "")
+        failed_count = summary.lower().count("fail") if summary else 0
+        return {
+            "success": result.get("success", False),
+            "failed": failed_count,
+            "summary": summary[:300],
+        }
+
+    def _write_sidechain(self, subtask_index: int, role: str) -> None:
+        """Write the agent's react_trace to a sidechain jsonl file and zero it out.
+        This keeps the chain parent context free of full minion traces.
+        """
+        try:
+            os.makedirs(SIDECHAIN_DIR, exist_ok=True)
+            ts = int(time.time())
+            fname = f"subtask_{subtask_index:02d}_{role}_{ts}.jsonl"
+            fpath = os.path.join(SIDECHAIN_DIR, fname)
+            with open(fpath, "w") as f:
+                for entry in self.agent.react_trace:
+                    # Serialize result (ToolResult namedtuple → dict)
+                    entry_copy = dict(entry)
+                    r = entry_copy.get("result")
+                    if hasattr(r, "_asdict"):
+                        entry_copy["result"] = r._asdict()
+                    try:
+                        f.write(json.dumps(entry_copy) + "\n")
+                    except (TypeError, ValueError):
+                        f.write(json.dumps({"serialization_error": str(entry_copy)[:200]}) + "\n")
+            # Zero out the trace so it doesn't inflate parent context
+            self.agent.react_trace = []
+            print(f"  📼 Sidechain saved → {fpath}")
+        except Exception as e:
+            print(f"  ⚠️  Sidechain write failed: {e}")
+
+    def _run_as_single_minion(
+        self,
+        subtask: Dict,
+        chain_context: Dict,
+    ) -> ImplementationArtifact:
+        """Run the entire subtask as one CODER minion — no micro-task decomposition."""
+        subtask_index = subtask.get("index", 0)
+        subtask_instruction = subtask.get("instruction", "")
+        budget = max(20, subtask.get("max_iterations", 25))
+
+        print(f"  📝 Single-file task — running as one CODER minion (budget={budget})")
+
+        prompt = self._build_minion_prompt(
+            work_order=subtask_instruction,
+            chain_context=chain_context,
+            previous_reports=[],
+            file_scope=[],
+            mt_type="code",
+        )
+
+        self.agent.react_trace = []
+        self.agent.tool_registry.reset_phase_state()
+        result = self.agent.run_react(
+            instruction=prompt,
+            tool_whitelist=self.CODER_TOOLS,
+            max_iterations=budget,
+        )
+
+        success = result.get("success", False)
+        finish_summary = result.get("finish_summary", "")
+        files_created: List[str] = []
+        files_modified: List[str] = []
+
+        for entry in result.get("trace", []):
+            tool = entry.get("tool", "")
+            args = entry.get("args", {})
+            res = entry.get("result")
+            ok = getattr(res, "success", False) if hasattr(res, "success") \
+                else (res or {}).get("success", False)
+            if ok and tool == "create_file":
+                p = args.get("path", "")
+                if p and p not in files_created:
+                    files_created.append(p)
+            elif ok and tool == "patch_file":
+                p = args.get("path", "")
+                if p and p not in files_modified:
+                    files_modified.append(p)
+
+        report = {
+            "micro_task_index": 0,
+            "type": "code",
+            "work_order": subtask_instruction,
+            "success": success,
+            "finish_summary": finish_summary,
+            "iterations_used": result.get("iterations_used", 0),
+        }
+
+        print(f"\n✅ SubtaskOrchestrator phase {subtask_index} done (single-minion): "
+              f"{'completed' if success else 'partial'}")
+
+        return ImplementationArtifact(
+            subtask_index=subtask_index,
+            subtask_instruction=subtask_instruction,
+            status="completed" if success else "partial",
+            summary=finish_summary[:500] or f"Phase {subtask_index} complete",
+            files_created=files_created,
+            files_modified=files_modified,
+            micro_task_reports=[report],
+        )
 
     def _decompose_to_micro_tasks(
         self, subtask_instruction: str, chain_context: Dict
@@ -646,7 +1047,7 @@ class SubtaskOrchestrator:
         """LLM call (fast model, one-shot) to break a subtask into 3-5 micro-tasks."""
         context_summary = self._build_context_summary(chain_context)
 
-        prompt = f"""Break this sub-task into 3-5 sequential micro-tasks for individual worker agents.
+        prompt = f"""Break this sub-task into sequential micro-tasks for individual worker agents.
 
 SUB-TASK: {subtask_instruction}
 
@@ -666,7 +1067,11 @@ Rules:
 - type "command": for running shell commands, installing packages, starting services
 - Each micro-task should be completable in ≤15 iterations
 - Keep micro-tasks atomic and non-overlapping in file scope
-- 3 micro-tasks minimum, 5 maximum
+- IMPORTANT: If the sub-task involves writing a SINGLE file (e.g. an architecture spec,
+  a config file, or one source file), return exactly 1 micro-task — do NOT split it.
+  Splitting single-file tasks causes workers to overwrite each other.
+- For multi-file tasks: 2-5 micro-tasks, grouped by file or concern
+- Maximum 5 micro-tasks
 
 Return ONLY the JSON array, no prose."""
 
@@ -724,6 +1129,14 @@ Return ONLY the JSON array, no prose."""
         goal = chain_context.get("goal", "")
         arch_summary = chain_context.get("arch_summary", "(not yet written)")
 
+        # Carry workspace constraint into minion prompts if set in goal
+        _ws_match = _re.search(r'workspace[:\s]+(/[^\s,."\']+)', goal, _re.IGNORECASE)
+        _workspace = _ws_match.group(1).rstrip('/') if _ws_match else ""
+        workspace_constraint = (
+            f"  - WORKSPACE: all files MUST live under {_workspace}/ — absolute paths only\n"
+            if _workspace else ""
+        )
+
         # Compact previous micro-task reports
         prev_summaries = []
         for r in previous_reports:
@@ -778,6 +1191,7 @@ Return ONLY the JSON array, no prose."""
             f"PREVIOUSLY COMPLETED IN THIS PHASE:\n{prev_text}\n\n"
             f"CONSTRAINTS:\n"
             f"  - {file_scope_text}\n"
+            f"{workspace_constraint}"
             f"  - Budget: 15 iterations — use them efficiently\n"
             f"  - DO NOT start servers or background processes (unless type=command)\n"
             f"  - Call finish() with a clear summary of exactly what you did and any key\n"
@@ -854,6 +1268,7 @@ Return ONLY the JSON array, no prose."""
             mt_type="code",
         )
         self.agent.react_trace = []
+        self.agent.tool_registry.reset_phase_state()
         self.agent.run_react(qa_prompt, tool_whitelist=self.CODER_TOOLS, max_iterations=10)
 
         test_output = ""
@@ -874,6 +1289,7 @@ Return ONLY the JSON array, no prose."""
                 mt_type="code",
             )
             self.agent.react_trace = []
+            self.agent.tool_registry.reset_phase_state()
             coder_result = self.agent.run_react(
                 coder_prompt, tool_whitelist=self.CODER_TOOLS, max_iterations=15
             )
@@ -891,6 +1307,7 @@ Return ONLY the JSON array, no prose."""
                 mt_type="command",
             )
             self.agent.react_trace = []
+            self.agent.tool_registry.reset_phase_state()
             val_result = self.agent.run_react(
                 validator_prompt, tool_whitelist=self.COMMANDER_TOOLS, max_iterations=5
             )
@@ -955,6 +1372,7 @@ class TaskChain:
                 "acceptance_criteria": st.get("acceptance_criteria"),
                 "max_iterations": st.get("max_iterations", 25),
                 "estimated_complexity": st.get("estimated_complexity", "medium"),
+                "role": st.get("role", "builder"),
                 "status": "pending",
                 "job_id": None,
                 "retry_count": 0,

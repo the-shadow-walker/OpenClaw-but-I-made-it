@@ -195,7 +195,10 @@ TOOL_SCHEMAS: dict = {
     "web_search":       '  web_search       — {{"query": str}}',
     "read_file":        '  read_file        — {{"path": str, "offset": int (opt, default 0), "limit": int (opt, default 200 lines)}}',
     "memory_lookup":    '  memory_lookup    — {{"query": str}}',
-    "finish":           '  finish           — {{"summary": str, "success": bool}}',
+    "finish":           '  finish           — {{"summary": str, "success": bool, "files_created": [str]}}\n'
+                       '    # files_created: absolute paths of EVERY file you wrote this session.\n'
+                       '    # finish() is REJECTED if any listed file is absent from disk.\n'
+                       '    # Always list all created files — omitting them causes rejection.',
     "manage_server":    '  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}',
 }
 _ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
@@ -400,6 +403,10 @@ class OllamaCommandAgent:
         # Pinned messages: always injected after system prompt regardless of history trimming
         # (e.g. ARCH.md contents, schema.sql, key model definitions)
         self.pinned_messages: List[Dict] = []
+        # Maps slot_key → index in pinned_messages for in-place updates (_update_pinned)
+        self._pinned_slot_keys: Dict[str, int] = {}
+        # Running list of files created/patched this session — survives compaction via pin
+        self._files_created: List[str] = []
 
     # ---------------------------------------------------------------- LLM --
 
@@ -1415,6 +1422,39 @@ Return JSON only:
             lines.append(f"[{role}] {snippet}")
         return "\n".join(lines)
 
+    # ── Pinned-slot management ────────────────────────────────────────────────
+
+    def _update_pinned(self, key: str, msg: Dict) -> None:
+        """Insert or replace a pinned message slot in-place.
+
+        Pinned messages are injected into every LLM call after the system prompt
+        and survive all history trimming.  Using a keyed slot ensures updates
+        replace rather than grow the list (e.g. the file-manifest refreshes in-place).
+        """
+        if key in self._pinned_slot_keys:
+            idx = self._pinned_slot_keys[key]
+            if idx < len(self.pinned_messages):
+                self.pinned_messages[idx] = msg
+                return
+            # Index stale (list was rebuilt) — fall through to append
+        self.pinned_messages.append(msg)
+        self._pinned_slot_keys[key] = len(self.pinned_messages) - 1
+
+    def _refresh_file_manifest_pin(self) -> None:
+        """Rebuild the pinned file-manifest message from self._files_created."""
+        if not self._files_created:
+            return
+        unique = sorted(set(self._files_created))
+        manifest_msg = {
+            "role": "user",
+            "content": (
+                "📁 FILES CREATED/MODIFIED THIS SESSION:\n"
+                + "\n".join(f"  • {f}" for f in unique)
+                + "\n(These files exist on disk — do not recreate them unless patching.)"
+            ),
+        }
+        self._update_pinned("file_manifest", manifest_msg)
+
     # ── Auto-compactor ────────────────────────────────────────────────────────
 
     def _estimate_react_tokens(
@@ -1484,7 +1524,10 @@ Return JSON only:
             f"## FAILED ATTEMPTS\n"
             f"[Everything tried that failed and WHY — to avoid repeating mistakes]\n\n"
             f"## NEXT STEPS\n"
-            f"[The specific remaining actions needed to complete the task, in order]"
+            f"[The specific remaining actions needed to complete the task, in order]\n\n"
+            f"FILES_CREATED: list every absolute file path created or modified above.\n"
+            f"Format EXACTLY as: FILES_CREATED: /path/one, /path/two\n"
+            f"If none: FILES_CREATED: none"
         )
 
         summary = self._call_model_oneshot(
@@ -1498,6 +1541,18 @@ Return JSON only:
             # Compression failed — fall back to hard trim to prevent overflow
             print("⚠️  Compression failed — falling back to hard trim (last 5 messages)")
             return react_history[-5:]
+
+        # Extract FILES_CREATED from the summary and refresh the pinned manifest
+        fc_match = re.search(r"FILES_CREATED:\s*(.+)", summary)
+        if fc_match:
+            fc_raw = fc_match.group(1).strip()
+            if fc_raw.lower() != "none":
+                new_paths = [p.strip() for p in fc_raw.split(",") if p.strip()]
+                for p in new_paths:
+                    if p not in self._files_created:
+                        self._files_created.append(p)
+                self._refresh_file_manifest_pin()
+                print(f"  📁 Compressor extracted {len(new_paths)} file path(s) → manifest updated")
 
         compressed_msg = {
             "role": "user",
@@ -1775,6 +1830,8 @@ Return JSON only:
         max_iter = max_iterations if max_iterations is not None else self.max_react_iterations
         # Cap threshold so large --budget values don't prevent early finish
         _finish_threshold = max(20, min(max_iter // 4, 100))
+        # Expose budget to tool registry so _handle_finish can check early-exit guard
+        self.tool_registry._max_iterations = max_iter
 
         # System survey + runbook
         survey = self.memory.get_system_survey()
@@ -1936,6 +1993,11 @@ Return JSON only:
         react_history: List[Dict] = [{"role": "user", "content": initial_message}]
         self.react_trace = []
         finish_summary = ""
+        # Reset per-run file tracking (accumulates fresh within this run_react call)
+        self._files_created = []
+        self.pinned_messages = [m for m in self.pinned_messages
+                                if "📁 FILES CREATED" not in m.get("content", "")]
+        self._pinned_slot_keys.pop("file_manifest", None)
         final_confidence = 50
         _stop_early = False  # set True when stop_event fires; skips verification
         # Tracks consecutive failures per file path to break permission-denied loops
@@ -1958,13 +2020,34 @@ Return JSON only:
             print(f"\n{'=' * 70}")
             print(f"🔄 ReAct Iteration {iteration}/{max_iter}")
 
-            # ── Context management ────────────────────────────────────────
-            # 1. Auto-compress when approaching the context window limit.
-            #    Triggered when estimated tokens > NUM_CTX - 1500 (leaving
-            #    room for the model's response + safety buffer).
-            # 2. Simple trim for normal operation (keeps first + last 9).
+            # ── Context management (graduated pipeline) ───────────────────
+            # Stage 1: Tool output budget-cap (applied at observation build time — see below)
+            # Stage 2: History snip (zero model cost) — drop oldest non-pinned messages
+            #          when estimated tokens > 70% of context window.
+            # Stage 3: Full LLM summarization — only when Stage 2 isn't enough (> 85%).
+            # Simple tail-trim for normal operation (keeps first + last 9).
             _est = self._estimate_react_tokens(react_history, system_prompt)
-            if _est > self.NUM_CTX - 1500:
+            _SNIP_THRESHOLD   = int(self.NUM_CTX * 0.70)
+            _COMPRESS_THRESHOLD = self.NUM_CTX - 1500  # ~95% (original behaviour)
+
+            if _est > _SNIP_THRESHOLD and len(react_history) > 6:
+                # Stage 2: Drop the oldest N non-pinned history messages until under 70%.
+                # Always keep react_history[0] (initial_message) + last 4 messages.
+                _snip_count = 0
+                while self._estimate_react_tokens(react_history, system_prompt) > _SNIP_THRESHOLD \
+                        and len(react_history) > 5:
+                    react_history.pop(1)  # remove second-oldest (keep [0])
+                    _snip_count += 1
+                if _snip_count:
+                    react_history.insert(1, {
+                        "role": "user",
+                        "content": f"[{_snip_count} older messages snipped to save context — see pinned FILE MANIFEST for what was created]",
+                    })
+                    _est = self._estimate_react_tokens(react_history, system_prompt)
+                    print(f"\n✂️  Stage-2 snip: removed {_snip_count} messages, ~{_est} tokens remaining")
+
+            if _est > _COMPRESS_THRESHOLD:
+                # Stage 3: Full LLM summarization (expensive — last resort)
                 react_history = self._compress_react_history(
                     react_history, system_prompt, instruction,
                     iteration, max_iter,
@@ -2164,6 +2247,9 @@ Return JSON only:
                     })
                     continue
 
+            # Update iteration counter so _handle_finish can pace early-exit guard
+            self.tool_registry._iteration_count = iteration
+
             # Dispatch
             result = self.tool_registry.dispatch(tool, args, confidence, confirm_cb)
 
@@ -2224,6 +2310,13 @@ Return JSON only:
                     confidence=confidence,
                 )
 
+            # Track created/modified files and refresh pinned manifest
+            if result.success and tool in ("create_file", "patch_file"):
+                _file_path = args.get("path", "")
+                if _file_path and _file_path not in self._files_created:
+                    self._files_created.append(_file_path)
+                    self._refresh_file_manifest_pin()
+
             # Track forward progress
             if result.success:
                 if tool in ("create_file", "patch_file"):
@@ -2259,7 +2352,16 @@ Return JSON only:
                     })
 
             if tool == "finish":
-                # Challenge premature success: fire once if < 50% of budget used
+                # finish() was rejected by _handle_finish (missing files or too early)
+                if not result.success:
+                    react_history.append({"role": "user", "content": (
+                        f"OBSERVATION [iteration {iteration}] — 🚫 finish() REJECTED\n"
+                        f"{result.error}\n\n"
+                        f"Produce your next thought and tool call as JSON."
+                    )})
+                    continue  # Do not break — agent must fix the issue
+
+                # Challenge premature success: fire every iteration while < 25% budget used
                 if (
                     args.get("success")
                     and _premature_finish_challenges < 1

@@ -51,6 +51,9 @@ class ToolRegistry:
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
         self._read_file_counts: Dict[str, int] = {}     # path → read count (no-offset reads)
+        # Updated by run_react before each dispatch so _handle_finish can pace early exits
+        self._iteration_count: int = 0
+        self._max_iterations: int = 50
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -644,13 +647,48 @@ class ToolRegistry:
             return ToolResult(False, "", str(e), {})
 
     def _handle_finish(self, args: dict) -> ToolResult:
-        summary = args.get("summary", "")
-        success = bool(args.get("success", True))
+        summary  = args.get("summary", "Task completed.")
+        success  = bool(args.get("success", True))
+        declared = args.get("files_created", [])
+
+        # --- Guard 1: verify all declared files exist on disk ---
+        missing = [f for f in declared if not os.path.exists(os.path.expanduser(f))]
+        if missing:
+            msg = (
+                f"finish() REJECTED — {len(missing)} declared file(s) not found on disk:\n"
+                + "\n".join(f"  ✗ {f}" for f in missing)
+                + "\nCreate the missing files first, then call finish() again."
+            )
+            print(f"\n{'=' * 70}")
+            print(f"🚫 FINISH REJECTED (missing files):")
+            for f in missing:
+                print(f"   ✗ {f}")
+            print(f"{'=' * 70}")
+            return ToolResult(False, "", msg, {"missing_files": missing})
+
+        # --- Guard 2: reject no-op early exits ---
+        if success and not declared and self._max_iterations > 0:
+            budget_pct = self._iteration_count / self._max_iterations
+            if budget_pct < 0.5:
+                msg = (
+                    f"finish() REJECTED — no files_created declared and only "
+                    f"{self._iteration_count}/{self._max_iterations} iterations used "
+                    f"({budget_pct:.0%} of budget). "
+                    "Complete the task or list all files you wrote in files_created."
+                )
+                print(f"\n{'=' * 70}")
+                print(f"🚫 FINISH REJECTED (no files, too early): {self._iteration_count}/{self._max_iterations} iters")
+                print(f"{'=' * 70}")
+                return ToolResult(False, "", msg, {})
+
+        # --- Accepted ---
         icon = "✅" if success else "⚠️ "
         print(f"\n{'=' * 70}")
         print(f"{icon} FINISH: {summary}")
+        if declared:
+            print(f"   Files verified: {len(declared)}")
         print(f"{'=' * 70}")
-        return ToolResult(success, summary, "", {"finished": True})
+        return ToolResult(success, summary, "", {"finished": True, "files_created": declared})
 
     def _handle_manage_server(self, args: dict) -> ToolResult:
         action = (args.get("action") or "").lower()
