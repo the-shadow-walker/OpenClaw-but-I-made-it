@@ -362,8 +362,8 @@ class OllamaCommandAgent:
 
     def __init__(
         self,
-        model: str = "qwen3-coder:30b",
-        fast_model: str = "qwen2.5-coder:14b",
+        model: str = "qwen3.6:35b-Grindlewalt",
+        fast_model: str = "qwen3.6:35b-Grindlewalt",
         searxng_url: str = "http://10.0.0.58:8080",
     ):
         # heavy model — only called for actual code/file generation

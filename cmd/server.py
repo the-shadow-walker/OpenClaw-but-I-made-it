@@ -178,7 +178,7 @@ def _inbox_watcher() -> None:
                         job = {
                             'job_id': job_id, 'job_type': 'blueteam_scan',
                             'instruction': 'SENTINEL security scan (inbox)',
-                            'focus': focus, 'model': 'qwen3-coder:30b',
+                            'focus': focus, 'model': 'qwen3.6:35b-Grindlewalt',
                             'searxng_url': 'http://10.0.0.58:8080',
                             'status': 'queued',
                             'created_at': datetime.now().isoformat(),
@@ -196,7 +196,7 @@ def _inbox_watcher() -> None:
                             'job_id': job_id, 'job_type': 'blueteam_investigate',
                             'instruction': f'SENTINEL investigation: {finding[:100]}',
                             'finding': finding, 'evidence': data.get("evidence", ""),
-                            'model': 'qwen3-coder:30b',
+                            'model': 'qwen3.6:35b-Grindlewalt',
                             'searxng_url': 'http://10.0.0.58:8080',
                             'status': 'queued',
                             'created_at': datetime.now().isoformat(),
@@ -223,7 +223,7 @@ def _inbox_watcher() -> None:
                         job = {
                             "job_id": job_id,
                             "instruction": instr,
-                            "model": data.get("model", "qwen3-coder:30b"),
+                            "model": data.get("model", "qwen3.6:35b-Grindlewalt"),
                             "searxng_url": "http://10.0.0.58:8080",
                             "max_iterations": int(data.get("max_iterations", 25)),
                             "status": "queued",
@@ -283,7 +283,7 @@ class JobRunner:
 
                 # Create agent
                 agent = OllamaCommandAgent(
-                    model=job.get('model', 'qwen3-coder:30b'),
+                    model=job.get('model', 'qwen3.6:35b-Grindlewalt'),
                     searxng_url=job.get('searxng_url', 'http://10.0.0.58:8080')
                 )
                 agent.current_job_id = job_id
@@ -476,7 +476,7 @@ def _get_quick_agent():
     if _quick_agent is None:
         with _quick_agent_lock:
             if _quick_agent is None:
-                _quick_agent = OllamaCommandAgent(model='qwen2.5-coder:14b')
+                _quick_agent = OllamaCommandAgent(model='qwen3.6:35b-Grindlewalt')
     return _quick_agent
 
 
@@ -516,7 +516,7 @@ def _submit_subtask_job(chain_id: str, chain_data: dict, index: int, retry_count
     job = {
         "job_id": job_id,
         "instruction": subtask["instruction"],
-        "model": chain_data.get("model", "qwen3-coder:30b"),
+        "model": chain_data.get("model", "qwen3.6:35b-Grindlewalt"),
         "searxng_url": "http://10.0.0.58:8080",
         "max_iterations": subtask.get("max_iterations", 25),
         "status": "queued",
@@ -571,7 +571,7 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
 
     # 2. Extract handoff using a temporary agent (LLM call)
     try:
-        temp_agent = OllamaCommandAgent(model=chain_data.get("model", "qwen3-coder:30b"))
+        temp_agent = OllamaCommandAgent(model=chain_data.get("model", "qwen3.6:35b-Grindlewalt"))
         extractor = HandoffExtractor(temp_agent)
         handoff = extractor.extract(subtask["instruction"], react_result)
     except Exception as e:
@@ -585,7 +585,7 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
             "source_instruction": subtask["instruction"],
             "completed_at": datetime.now().isoformat(),
         }
-        temp_agent = OllamaCommandAgent(model=chain_data.get("model", "qwen3-coder:30b"))
+        temp_agent = OllamaCommandAgent(model=chain_data.get("model", "qwen3.6:35b-Grindlewalt"))
 
     # 3. Save handoff to subtask
     chain.update_subtask(subtask_index, {"handoff": handoff})
@@ -964,7 +964,7 @@ def execute_command():
     Request body:
     {
         "instruction": "Run a vulnerability scan",
-        "model": "qwen3-coder:30b",  // optional
+        "model": "qwen3.6:35b-Grindlewalt",  // optional
         "searxng_url": "http://...",  // optional
         "async": true  // optional, default true
     }
@@ -986,7 +986,7 @@ def execute_command():
     job = {
         'job_id': job_id,
         'instruction': data['instruction'],
-        'model': data.get('model', 'qwen3-coder:30b'),
+        'model': data.get('model', 'qwen3.6:35b-Grindlewalt'),
         'searxng_url': data.get('searxng_url', 'http://10.0.0.58:8080'),
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
@@ -1224,7 +1224,7 @@ def get_config():
     return jsonify({
         'max_concurrent_jobs': MAX_CONCURRENT_JOBS,
         'job_timeout': JOB_TIMEOUT,
-        'default_model': 'qwen3-coder:30b',
+        'default_model': 'qwen3.6:35b-Grindlewalt',
         'searxng_url': 'http://10.0.0.58:8080'
     })
 
@@ -1262,7 +1262,7 @@ def watchdog():
     job = {
         'job_id': job_id,
         'instruction': instruction,
-        'model': data.get('model', 'qwen3-coder:30b'),
+        'model': data.get('model', 'qwen3.6:35b-Grindlewalt'),
         'searxng_url': data.get('searxng_url', 'http://10.0.0.58:8080'),
         'max_iterations': max_iterations,
         'status': 'queued',
@@ -1295,7 +1295,7 @@ def create_chain():
     {
         "goal": "Build a FastAPI app with auth and a database",
         "total_budget": 100,     // optional, default 100
-        "model": "qwen3-coder:30b",  // optional
+        "model": "qwen3.6:35b-Grindlewalt",  // optional
         "retry_policy": {"max_retries_per_subtask": 1}  // optional
     }
 
@@ -1313,7 +1313,7 @@ def create_chain():
 
     goal = data['goal']
     total_budget = int(data.get('total_budget', 100))
-    model = data.get('model', 'qwen3-coder:30b')
+    model = data.get('model', 'qwen3.6:35b-Grindlewalt')
     retry_policy = data.get('retry_policy', {'max_retries_per_subtask': 1})
 
     # Decompose the goal using a temporary agent
@@ -1547,7 +1547,7 @@ def blueteam_scan():
         'job_type': 'blueteam_scan',
         'instruction': f'SENTINEL security scan{f" (focus: {focus})" if focus else ""}',
         'focus': focus,
-        'model': 'qwen3-coder:30b',
+        'model': 'qwen3.6:35b-Grindlewalt',
         'searxng_url': 'http://10.0.0.58:8080',
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
@@ -1584,7 +1584,7 @@ def blueteam_investigate():
         'instruction': f'SENTINEL investigation: {finding[:100]}',
         'finding': finding,
         'evidence': data.get('evidence', ''),
-        'model': 'qwen3-coder:30b',
+        'model': 'qwen3.6:35b-Grindlewalt',
         'searxng_url': 'http://10.0.0.58:8080',
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
