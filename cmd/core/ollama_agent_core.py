@@ -621,9 +621,9 @@ class OllamaCommandAgent:
         self,
         react_history: List[Dict],
         system_prompt: str,
-        timeout: int = 180,
+        timeout: int = 3600,
     ) -> str:
-        """Fast-model (14b) caller for the ReAct decision loop.
+        """Fast-model caller for the ReAct decision loop.
         Only picks tools and writes short args — never generates file content.
         Does NOT touch self.conversation_history.
         """
@@ -1495,7 +1495,7 @@ Return JSON only:
             f"Recent agent context (for consistency):\n{context_summary}\n\n"
             f"Output ONLY the file content. Do not wrap in markdown fences."
         )
-        content = self.call_ollama_heavy(prompt, system, timeout=300)
+        content = self.call_ollama_heavy(prompt, system, timeout=3600)
         return self._strip_code_fences(content)
 
     def _generate_patch_replacement(
@@ -1528,7 +1528,7 @@ Return JSON only:
             f"Recent context:\n{context_summary}\n\n"
             f"Output ONLY the replacement text."
         )
-        replacement = self.call_ollama_heavy(prompt, system, timeout=180)
+        replacement = self.call_ollama_heavy(prompt, system, timeout=3600)
         return self._strip_code_fences(replacement)
 
     def _generate_patch_search_and_replace(
@@ -2606,7 +2606,7 @@ class PostRunVerifier:
         try:
             report = self.agent._call_model_oneshot(
                 self.agent.model, analyze_prompt,
-                "You are a senior engineer writing a concise technical verification report.", timeout=180
+                "You are a senior engineer writing a concise technical verification report.", timeout=3600
             )
         except Exception as e:
             report = f"(could not generate analysis report: {e})"
