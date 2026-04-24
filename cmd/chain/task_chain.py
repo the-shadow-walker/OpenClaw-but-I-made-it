@@ -903,6 +903,18 @@ class SubtaskOrchestrator:
         py_files = [f for f in all_files if f.endswith(".py")]
         js_files = [f for f in all_files if f.endswith((".js", ".ts"))]
 
+        # Auto-install requirements.txt files found near any created Python files.
+        # Builder can't run pip (no execute_command), so we do it here before checks.
+        req_candidates = set()
+        for f in py_files:
+            d = os.path.dirname(f)
+            req_candidates.add(os.path.join(d, "requirements.txt"))
+            req_candidates.add(os.path.join(os.path.dirname(d), "requirements.txt"))
+        install_cmds = [
+            f"[ -f {r} ] && python3 -m pip install -q -r {r} 2>&1 | tail -3 || true"
+            for r in sorted(req_candidates)
+        ]
+
         check_cmds = []
         for f in py_files[:5]:
             check_cmds.append(f"python3 -m py_compile {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
@@ -911,11 +923,12 @@ class SubtaskOrchestrator:
         if not check_cmds:
             return {"success": True, "failed": 0, "summary": "no .py/.js files to check"}
 
+        all_cmds = install_cmds + check_cmds
         tester_instruction = (
-            f"Run syntax checks for files created in phase {subtask_index}.\n"
-            "Run each command and report PASS or FAIL:\n"
-            + "\n".join(f"  {cmd}" for cmd in check_cmds)
-            + "\n\nfinish() with test_results summary. Set success=false if any FAIL."
+            f"Run dependency install then syntax checks for files created in phase {subtask_index}.\n"
+            "Run each command in order and report PASS or FAIL for each syntax check:\n"
+            + "\n".join(f"  {cmd}" for cmd in all_cmds)
+            + "\n\nfinish() with test_results summary. Set success=false if any syntax check FAILs."
         )
 
         tester_role_cfg = ROLES["tester"]
