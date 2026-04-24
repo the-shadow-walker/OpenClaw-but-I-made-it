@@ -33,6 +33,7 @@ class ToolRegistry:
         "save_context",
         "publish_context",
         "read_context",
+        "write_plan",
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
@@ -217,6 +218,7 @@ class ToolRegistry:
             "save_context":    self._handle_save_context,
             "publish_context": self._handle_publish_context,
             "read_context":    self._handle_read_context,
+            "write_plan":      self._handle_write_plan,
         }
         return handler_map[tool](args)
 
@@ -766,3 +768,27 @@ class ToolRegistry:
             return ToolResult(True, f"{key} = {value}", "", {"key": key, "value": value})
         except Exception as e:
             return ToolResult(False, "", f"read_context failed: {e}", {})
+
+    def _handle_write_plan(self, args: dict) -> ToolResult:
+        """Write/overwrite the persistent task plan file.
+        Auto-injected as a pinned slot so it survives context compression."""
+        content = args.get("content", "").strip()
+        if not content:
+            return ToolResult(False, "", "content is required", {})
+        try:
+            plan_path = os.path.expanduser("~/.agent_bin/task_plan.md")
+            os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+            with open(plan_path, "w") as f:
+                f.write(content)
+            # Notify the agent core so it can refresh the pinned slot immediately
+            if hasattr(self, "_plan_updated_cb") and self._plan_updated_cb:
+                self._plan_updated_cb(content)
+            lines = content.count("\n") + 1
+            unchecked = content.count("- [ ]")
+            checked = content.count("- [x]")
+            return ToolResult(True,
+                f"Plan written ({lines} lines, {checked} done / {unchecked} remaining tasks).\n"
+                "Plan is now pinned — visible every iteration even after compression.",
+                "", {"unchecked": unchecked, "checked": checked})
+        except Exception as e:
+            return ToolResult(False, "", f"write_plan failed: {e}", {})

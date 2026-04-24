@@ -35,7 +35,7 @@ _CLEANUP_PORTS = [5000, 8000, 3000, 8080, 8443]
 
 ROLES: Dict[str, Dict] = {
     "planner": {
-        "tools": {"read_file", "web_search", "memory_lookup", "finish"},
+        "tools": {"read_file", "create_file", "web_search", "memory_lookup", "finish"},
         "system_prefix": (
             "You are the PLANNER. Read existing code/docs and write a plan file.\n"
             "Do NOT write implementation code. Do NOT run commands.\n"
@@ -46,14 +46,16 @@ ROLES: Dict[str, Dict] = {
         "single_minion": True,   # skip micro-task decomposition
     },
     "builder": {
-        "tools": {"read_file", "create_file", "patch_file", "finish"},
+        "tools": {"read_file", "create_file", "patch_file", "finish", "write_plan"},
         "system_prefix": (
             "You are the BUILDER. Write and modify code files only.\n"
             "Do NOT run servers or execute shell commands.\n"
-            "Read the plan, create all required files, then finish() with "
-            "files_created listing EVERY file path you wrote."
+            "Your FIRST action MUST be write_plan — write a full markdown plan covering:\n"
+            "  ## Architecture, ## Files (- [ ] /path — description), ## Dependencies\n"
+            "After each file is written, re-call write_plan with that item checked (- [x]).\n"
+            "finish() only when ALL [ ] items are checked. List EVERY file in files_created."
         ),
-        "first_action": "create_file",
+        "first_action": "write_plan",
         "single_minion": False,
     },
     "tester": {
@@ -623,7 +625,7 @@ class SubtaskOrchestrator:
     Legacy tool-set aliases kept for TDA helpers:
     """
 
-    CODER_TOOLS = {"read_file", "create_file", "patch_file", "finish"}
+    CODER_TOOLS = {"read_file", "create_file", "patch_file", "finish", "write_plan"}
     COMMANDER_TOOLS = {"execute_command", "manage_server", "read_file", "finish"}
 
     def __init__(self, agent):
@@ -1167,18 +1169,20 @@ Return ONLY the JSON array, no prose."""
         if mt_type == "code":
             tool_block = (
                 "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
+                "  ✅ write_plan   — write your task plan (FIRST action — required)\n"
                 "  ✅ read_file    — read an existing file\n"
                 "  ✅ create_file  — write a new file (or overwrite)\n"
                 "  ✅ patch_file   — make a targeted edit to an existing file\n"
-                "  ✅ finish       — call when done\n"
+                "  ✅ finish       — call when done (only after all plan items checked off)\n"
                 "  ❌ execute_command — BLOCKED. Do NOT attempt it.\n"
                 "  ❌ memory_lookup  — BLOCKED. Do NOT attempt it.\n"
                 "  ❌ web_search     — BLOCKED. Do NOT attempt it.\n"
                 "  ❌ manage_server  — BLOCKED. Do NOT attempt it.\n"
                 "\n"
-                "CRITICAL: Your FIRST tool call MUST be create_file or read_file.\n"
-                "Do NOT check prerequisites. Do NOT install packages.\n"
-                "Go straight to writing code with create_file."
+                "CRITICAL: Your FIRST tool call MUST be write_plan.\n"
+                "Write a plan with ## Architecture, ## Files (- [ ] checkboxes), ## Dependencies.\n"
+                "After each file is written, re-call write_plan with that item checked (- [x]).\n"
+                "Do NOT call finish() until every [ ] item is checked off in your plan."
             )
         else:
             tool_block = (

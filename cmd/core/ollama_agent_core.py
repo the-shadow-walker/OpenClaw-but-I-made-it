@@ -71,6 +71,15 @@ GENERAL RULES:
    A server starting does NOT mean the task is done — check ALL feature requirements.
    If you call finish(success=true) with unused budget remaining, you will be asked
    to justify it; be prepared to continue if anything is still outstanding.
+   Before calling finish(), confirm every `- [ ]` item in your task plan is checked off.
+3a. PLANNING RULE: For any task involving 3+ files or multiple features, your FIRST
+   action MUST be write_plan with a structured markdown plan:
+   ## Architecture (stack, entry point, port)
+   ## Files (- [ ] /full/path/file.py — what it contains)
+   ## Dependencies (pip/npm packages needed)
+   ## Known Issues (errors found, updated as you work)
+   After completing each file, re-call write_plan with that item checked off (- [x]).
+   The plan is pinned and survives context compression — it is your source of truth.
 4. Set confidence < 90 to trigger human confirmation for risky actions
 5. confidence >= 95 AND risk safe/low → auto-execute without confirmation
 6. Call `memory_lookup` before attempting tasks you may have done before
@@ -190,6 +199,7 @@ TOOL_SCHEMAS: dict = {
     "save_context":     '  save_context     — {{"label": str}} — snapshot current session context to disk before heavy operations',
     "publish_context":  '  publish_context  — {{"key": str, "value": str, "ttl_hours": int (opt, default 24)}} — write a cross-agent fact to shared context board',
     "read_context":     '  read_context     — {{"key": str}} — read a specific key from the shared cross-agent context board',
+    "write_plan":       '  write_plan       — {{"content": str}} — write/overwrite the persistent task plan (markdown). Use as your FIRST action on any multi-file task. Include: ## Architecture, ## Files (with [ ] checkboxes), ## Dependencies, ## Known Issues. Plan is pinned and survives compression.',
 }
 _ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
 
@@ -386,8 +396,9 @@ class OllamaCommandAgent:
             self.memory,
             explain_cb=self.explain_command_detailed,
         )
-        # Wire save_context callback so the save_context tool can call us back
+        # Wire callbacks so tools can push updates back to us
         self.tool_registry._save_context_cb = self.save_context
+        self.tool_registry._plan_updated_cb = self._refresh_task_plan_pin
         self.react_trace: List[Dict] = []
         self.max_react_iterations = 50
         self.current_job_id: Optional[str] = None  # set by server before run()
@@ -424,6 +435,24 @@ class OllamaCommandAgent:
         self._update_pinned("file_manifest", {
             "role": "user",
             "content": "\n".join(lines),
+        })
+
+    def _refresh_task_plan_pin(self, content: str = "") -> None:
+        """Update the '📋 TASK PLAN' pinned slot from write_plan content or disk."""
+        if not content:
+            try:
+                with open(self.TASK_PLAN_PATH) as f:
+                    content = f.read().strip()
+            except Exception:
+                return
+        if not content:
+            return
+        unchecked = content.count("- [ ]")
+        checked = content.count("- [x]")
+        header = f"📋 TASK PLAN ({checked} done, {unchecked} remaining — update checkboxes with write_plan as you complete items):"
+        self._update_pinned("task_plan", {
+            "role": "user",
+            "content": f"{header}\n{content}",
         })
 
     # ------------------------------------------------- session save/restore --
@@ -1326,6 +1355,7 @@ JSON only."""
 
     PROGRESS_PATH = os.path.expanduser("~/.agent_bin/progress.md")
     CHECKLIST_PATH = os.path.expanduser("~/.agent_bin/checklist.md")
+    TASK_PLAN_PATH = os.path.expanduser("~/.agent_bin/task_plan.md")
 
     def _write_progress_md(self, instruction: str, iteration: int, max_iter: int) -> None:
         """Fast model summarises the recent trace into a human-readable progress file."""
@@ -1716,6 +1746,13 @@ Return JSON only:
                     "role": "user",
                     "content": "\n".join(board_lines),
                 })
+        except Exception:
+            pass
+
+        # Inject task plan as pinned slot if one exists on disk
+        try:
+            if os.path.exists(self.TASK_PLAN_PATH):
+                self._refresh_task_plan_pin()
         except Exception:
             pass
 
