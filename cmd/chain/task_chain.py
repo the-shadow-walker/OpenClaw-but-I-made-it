@@ -493,7 +493,7 @@ Return ONLY the JSON array, no other text."""
 
         try:
             raw = self.agent._call_model_oneshot(
-                self.agent.fast_model, prompt, system, timeout=45
+                self.agent.fast_model, prompt, system, timeout=180
             )
             subtasks = self.agent.extract_json(raw)
             if not subtasks or not isinstance(subtasks, list) or len(subtasks) == 0:
@@ -1099,7 +1099,7 @@ Return ONLY the JSON array, no prose."""
         system = "You are a micro-task decomposer. Return only a JSON array. No prose."
         try:
             raw = self.agent._call_model_oneshot(
-                self.agent.fast_model, prompt, system, timeout=30
+                self.agent.fast_model, prompt, system, timeout=120
             )
             micro_tasks = self.agent.extract_json(raw)
             if micro_tasks and isinstance(micro_tasks, list) and len(micro_tasks) >= 1:
