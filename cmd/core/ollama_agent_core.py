@@ -590,7 +590,8 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
+            "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX,
+                        "num_predict": 4096},
         }
 
         try:
@@ -623,7 +624,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"num_ctx": self.HEAVY_NUM_CTX},
+            "options": {"num_ctx": self.HEAVY_NUM_CTX, "num_predict": 4096},
         }
 
         curl_cmd = [
@@ -667,7 +668,8 @@ class OllamaCommandAgent:
             "model": self.fast_model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
+            "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX,
+                        "num_predict": 8192},  # cap: prevents infinite CoT loops
         }
 
         try:
