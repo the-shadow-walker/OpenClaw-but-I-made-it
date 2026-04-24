@@ -905,6 +905,12 @@ class SubtaskOrchestrator:
         py_files = [f for f in all_files if f.endswith(".py")]
         js_files = [f for f in all_files if f.endswith((".js", ".ts"))]
 
+        # Use the same Python interpreter running this service (guaranteed venv).
+        # Bare `python3` in a subprocess is the system Python on Arch (PEP 668 blocked).
+        import sys as _sys
+        _py = _sys.executable          # e.g. /mnt/storage/NAS/Jarvis/.venv/bin/python3
+        _pip = f"{_py} -m pip"
+
         # Auto-install requirements.txt files found near any created Python files.
         # Builder can't run pip (no execute_command), so we do it here before checks.
         req_candidates = set()
@@ -913,13 +919,13 @@ class SubtaskOrchestrator:
             req_candidates.add(os.path.join(d, "requirements.txt"))
             req_candidates.add(os.path.join(os.path.dirname(d), "requirements.txt"))
         install_cmds = [
-            f"[ -f {r} ] && python3 -m pip install -q -r {r} 2>&1 | tail -3 || true"
+            f"[ -f {r} ] && {_pip} install -q -r {r} 2>&1 | tail -3 || true"
             for r in sorted(req_candidates)
         ]
 
         check_cmds = []
         for f in py_files[:5]:
-            check_cmds.append(f"python3 -m py_compile {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
+            check_cmds.append(f"{_py} -m py_compile {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
         for f in js_files[:3]:
             check_cmds.append(f"node --check {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
         if not check_cmds:
@@ -949,7 +955,7 @@ class SubtaskOrchestrator:
         result = self.agent.run_react(
             instruction=full_prompt,
             tool_whitelist=tester_role_cfg["tools"],
-            max_iterations=8,
+            max_iterations=15,
         )
 
         summary = result.get("finish_summary", "")
