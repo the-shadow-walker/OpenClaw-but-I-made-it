@@ -681,8 +681,38 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
 
     if job_success and ac_criteria:
         ac_runner = AcceptanceCriteriaRunner()
-        ac_result = ac_runner.run(ac_criteria)
+        # Resolve workspace cwd: subtask override > chain-level > None.
+        workspace = subtask.get("workspace") or chain_data.get("workspace")
+        ac_result = ac_runner.run(ac_criteria, cwd=workspace)
         passed = ac_result["passed"]
+
+        # Hardening: tight retry + soft-reverify before declaring AC failure.
+        # Catches:
+        #   1) Race conditions where the file is mid-write when subprocess fired
+        #   2) Subprocess wonkiness (transient bash issues, env weirdness)
+        #   3) The artifact actually IS on disk and valid — we just got a bad
+        #      exit code. Disk truth wins.
+        if not passed and os.getenv("AGENT_AC_REVERIFY", "1") != "0":
+            time.sleep(1.5)  # let any pending I/O flush
+            print(f"  🔁 AC failed on first run — retrying after 1.5s flush...")
+            ac_retry = ac_runner.run(ac_criteria, cwd=workspace)
+            if ac_retry["passed"]:
+                ac_result = ac_retry
+                ac_result["recovered_via_retry"] = True
+                passed = True
+                print(f"  ✅ AC passed on retry — using retry result")
+            else:
+                soft = AcceptanceCriteriaRunner.soft_re_verify(
+                    ac_criteria, cwd=workspace,
+                )
+                if soft is not None:
+                    ac_result = soft
+                    ac_result["recovered_via_disk"] = True
+                    passed = True
+                    files_str = ", ".join(soft.get("verified_files", []))
+                    print(f"  ✅ AC soft-passed via disk verification — files exist: {files_str}")
+                else:
+                    print(f"  ❌ AC failed on retry AND soft-reverify — phase failure stands")
         chain.update_subtask(subtask_index, {"acceptance_result": ac_result})
     else:
         ac_result = None

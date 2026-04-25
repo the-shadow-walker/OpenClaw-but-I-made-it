@@ -31,6 +31,7 @@ class ToolRegistry:
         "manage_server",
         "validate_arch",   # PR0: ARCH.json validator (pure, no LLM)
         "get_deps",        # PR2: import dependency graph (pure, no LLM)
+        "write_plan",      # Hardening: persists planner/builder task plan markdown
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
@@ -56,6 +57,13 @@ class ToolRegistry:
         # Updated by run_react before each dispatch so _handle_finish can pace early exits
         self._iteration_count: int = 0
         self._max_iterations: int = 50
+        # Optional callback(plan_text: str) -> None. Wired by OllamaCommandAgent so that
+        # write_plan invocations can refresh a pinned "📋 PLAN" slot in the agent's
+        # message history. None when running without an agent (tests, etc).
+        self._save_plan_cb: Optional[Callable[[str], None]] = None
+        # Optional callback(label: str) -> str — mirrors flat react_tools.py. Used by
+        # gui_task / save_context tools when those are wired in. Safe to leave None.
+        self._save_context_cb: Optional[Callable[[str], str]] = None
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -81,7 +89,7 @@ class ToolRegistry:
 
         # Stuck-loop guard: if the last 4 calls are identical, warn first then terminate.
         # Exempt idempotent read-only tools — re-calling them is harmless and often useful.
-        _STUCK_EXEMPT = {"read_file", "validate_arch", "get_deps"}
+        _STUCK_EXEMPT = {"read_file", "validate_arch", "get_deps", "write_plan"}
         call_key = (tool, json.dumps(args, sort_keys=True))
         if tool not in _STUCK_EXEMPT:
             self._recent_calls.append(call_key)
@@ -218,6 +226,7 @@ class ToolRegistry:
             "manage_server":   self._handle_manage_server,
             "validate_arch":   self._handle_validate_arch,
             "get_deps":        self._handle_get_deps,
+            "write_plan":      self._handle_write_plan,
         }
         return handler_map[tool](args)
 
@@ -738,6 +747,60 @@ class ToolRegistry:
             "dependents_of_paths": {p: sorted(s) for p, s in dependents_of.items()},
         }
         return ToolResult(True, output, "", meta)
+
+    def _handle_write_plan(self, args: dict) -> ToolResult:
+        """Persist a markdown task plan and refresh the agent's pinned PLAN slot.
+
+        Args: {"plan": str} — markdown body. Convention: the planner/builder writes
+        ## Architecture / ## Files / ## Dependencies sections with `- [ ]` checkboxes
+        and re-calls write_plan with `- [x]` after each file is written.
+
+        Idempotent: rewrites the same path on every call. Returns checkbox totals
+        so the agent (and the pinned slot) can see plan completion at a glance.
+        """
+        plan = args.get("plan", "")
+        if not isinstance(plan, str) or not plan.strip():
+            return ToolResult(False, "", "write_plan requires a non-empty 'plan' string", {})
+
+        agent_id = "agent"
+        try:
+            if self.memory is not None and getattr(self.memory, "agent_id", None):
+                agent_id = self.memory.agent_id
+        except Exception:
+            pass
+        # Sanitize for filename
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(agent_id))[:40] or "agent"
+
+        plans_dir = os.path.expanduser("~/.agent_bin/plans")
+        try:
+            os.makedirs(plans_dir, exist_ok=True)
+        except Exception as e:
+            return ToolResult(False, "", f"Could not create plans dir: {e}", {})
+        path = os.path.join(plans_dir, f"{safe_id}_plan.md")
+
+        try:
+            with open(path, "w") as f:
+                f.write(plan)
+        except Exception as e:
+            return ToolResult(False, "", f"Failed to write plan to {path}: {e}", {})
+
+        total = len(re.findall(r"^\s*- \[[ xX]\]", plan, re.M))
+        checked = len(re.findall(r"^\s*- \[[xX]\]", plan, re.M))
+
+        # Refresh pinned PLAN slot via callback (mirrors _save_context_cb pattern)
+        if callable(self._save_plan_cb):
+            try:
+                self._save_plan_cb(plan)
+            except Exception as e:
+                # Non-fatal — plan is still on disk. Log and continue.
+                print(f"⚠️  _save_plan_cb failed (non-fatal): {e}")
+
+        summary = f"plan saved ({checked}/{total} items checked)"
+        print(f"\n📋 {summary} → {path}")
+        return ToolResult(
+            True, summary, "",
+            {"plan_path": path, "checked": checked, "total": total},
+        )
 
     def _handle_finish(self, args: dict) -> ToolResult:
         summary  = args.get("summary", "Task completed.")

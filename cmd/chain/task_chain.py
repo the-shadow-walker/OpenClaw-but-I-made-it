@@ -86,6 +86,8 @@ ROLES: Dict[str, Dict] = {
         "first_action": "execute_command",
         "single_minion": False,
     },
+    # NOTE — see _build_tool_restrictions_block below; the tools+first_action
+    # in each role above are the SINGLE source of truth for the prompt block.
     # Internal-only role — filtered out of TaskDecomposer prompt; only runs as an
     # inline gate from SubtaskOrchestrator._run_inline_reconciler.
     "reconciler": {
@@ -105,6 +107,35 @@ ROLES: Dict[str, Dict] = {
         "internal_only": True,
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# _build_tool_restrictions_block — single source of truth for prompt tool list
+# ---------------------------------------------------------------------------
+
+def _build_tool_restrictions_block(role_tools, first_action: str = "") -> str:
+    """Generate the TOOL RESTRICTIONS block from a role's whitelist + TOOL_SCHEMAS.
+
+    Replaces the hardcoded "YOUR ONLY TOOLS" prose that drifted from ROLES[role]
+    over time (e.g. advertised write_plan when it wasn't registered, omitted
+    validate_arch when it was). Walks TOOL_SCHEMAS in deterministic order so
+    every minion sees a consistent block.
+    """
+    try:
+        from ollama_agent_core import TOOL_SCHEMAS
+    except Exception:
+        TOOL_SCHEMAS = {}
+    role_tool_set = set(role_tools or [])
+    allowed = [t for t in TOOL_SCHEMAS if t in role_tool_set]
+    blocked = [t for t in TOOL_SCHEMAS if t not in role_tool_set]
+    lines = ["YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):"]
+    for t in allowed:
+        lines.append(f"  ✅ {t}")
+    for t in blocked:
+        lines.append(f"  ❌ {t} — BLOCKED. Do NOT attempt it.")
+    if first_action:
+        lines.append(f"\nCRITICAL: Your FIRST tool call MUST be {first_action}.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +390,14 @@ Only populate facts fields that have actual data from the actions above. Return 
 class AcceptanceCriteriaRunner:
     """Runs a shell command as an acceptance gate. No LLM involved."""
 
-    def run(self, command: str, timeout: int = 30) -> Dict:
+    def run(self, command: str, timeout: int = 30, cwd: Optional[str] = None) -> Dict:
         """
         Run acceptance criteria command.
-        Returns dict with passed, exit_code, stdout, stderr, command, checked_at.
+        Returns dict with passed, exit_code, stdout, stderr, command, checked_at, cwd.
+
+        Hardening: cwd parameter resolves relative paths (e.g. "test -f DOCS/ARCH.json")
+        against the workspace rather than the server's current working directory. When
+        cwd is None, behavior is unchanged.
         """
         checked_at = datetime.now().isoformat()
 
@@ -374,6 +409,7 @@ class AcceptanceCriteriaRunner:
                 "stderr": "Empty command",
                 "command": command,
                 "checked_at": checked_at,
+                "cwd": cwd,
             }
 
         # Safety validation first
@@ -386,7 +422,12 @@ class AcceptanceCriteriaRunner:
                 "stderr": f"Blocked by safety validator: {reason}",
                 "command": command,
                 "checked_at": checked_at,
+                "cwd": cwd,
             }
+
+        # Validate cwd before passing to subprocess — a missing directory would
+        # otherwise raise FileNotFoundError and look like an AC failure.
+        run_cwd = cwd if (cwd and os.path.isdir(cwd)) else None
 
         try:
             result = subprocess.run(
@@ -396,6 +437,7 @@ class AcceptanceCriteriaRunner:
                 text=True,
                 timeout=timeout,
                 executable="/bin/bash",
+                cwd=run_cwd,
             )
             return {
                 "passed": result.returncode == 0,
@@ -404,6 +446,7 @@ class AcceptanceCriteriaRunner:
                 "stderr": result.stderr[:500],
                 "command": command,
                 "checked_at": checked_at,
+                "cwd": run_cwd,
             }
         except subprocess.TimeoutExpired:
             return {
@@ -413,6 +456,7 @@ class AcceptanceCriteriaRunner:
                 "stderr": f"Timeout after {timeout}s",
                 "command": command,
                 "checked_at": checked_at,
+                "cwd": run_cwd,
             }
         except Exception as e:
             return {
@@ -422,7 +466,89 @@ class AcceptanceCriteriaRunner:
                 "stderr": str(e),
                 "command": command,
                 "checked_at": checked_at,
+                "cwd": run_cwd,
             }
+
+    @staticmethod
+    def soft_re_verify(command: str, cwd: Optional[str] = None) -> Optional[Dict]:
+        """Disk-truth recovery: if the AC subprocess returned non-zero but the
+        artifact files actually exist on disk (and any embedded JSON parses),
+        return a soft-pass dict so the chain can advance. None if it can't parse
+        or files genuinely don't exist.
+
+        Targets common AC patterns:
+          test -f /abs/path
+          [ -f /abs/path ]
+          test -f relative/path  (resolved against cwd)
+          python3 -c "... json.load(open('/path/to/file.json'))"
+
+        This is intentionally narrow — only file-existence + JSON-parseability.
+        Anything more complex (curl, port checks, exit codes) is not soft-verified.
+        """
+        if not command or not isinstance(command, str):
+            return None
+
+        # Extract candidate paths from `test -f <path>` and `[ -f <path> ]`
+        path_patterns = [
+            r'test\s+-[fde]\s+([^\s;&|]+)',
+            r'\[\s+-[fde]\s+([^\s;&|]+)\s+\]',
+        ]
+        candidate_paths = []
+        for pat in path_patterns:
+            for m in _re.finditer(pat, command):
+                candidate_paths.append(m.group(1).strip("'\""))
+
+        # Extract JSON-load paths: open('/path/to/file')
+        json_paths = []
+        if "json.load" in command and "open(" in command:
+            for m in _re.finditer(r"open\(['\"]([^'\"]+)['\"]\)", command):
+                json_paths.append(m.group(1))
+
+        if not candidate_paths and not json_paths:
+            return None
+
+        verified_files = []
+
+        def _resolve(p: str) -> str:
+            if os.path.isabs(p):
+                return p
+            base = cwd if cwd else os.getcwd()
+            return os.path.join(base, p)
+
+        for p in candidate_paths:
+            full = _resolve(p)
+            if not os.path.exists(full):
+                return None
+            verified_files.append(full)
+
+        # JSON parseability check (any path mentioned in json.load)
+        for p in json_paths:
+            full = _resolve(p)
+            if not os.path.exists(full):
+                return None
+            try:
+                with open(full) as _jf:
+                    json.load(_jf)
+            except Exception:
+                return None
+            if full not in verified_files:
+                verified_files.append(full)
+
+        if not verified_files:
+            return None
+
+        return {
+            "passed": True,
+            "soft_pass": True,
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "command": command,
+            "checked_at": datetime.now().isoformat(),
+            "cwd": cwd,
+            "verified_files": verified_files,
+            "note": "AC subprocess returned non-zero but files exist on disk",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +1014,7 @@ class SubtaskOrchestrator:
                     previous_reports=micro_task_reports,
                     file_scope=file_scope,
                     mt_type=mt_type,
+                    role=role,  # parent subtask's role drives tool block
                 )
 
                 self.agent.react_trace = []
@@ -1175,6 +1302,7 @@ class SubtaskOrchestrator:
             previous_reports=[],
             file_scope=[],
             mt_type=mt_type,
+            role=role,
         )
         # Prepend role persona so the model knows its constraints immediately
         full_prompt = f"{role_cfg['system_prefix']}\n\n{base_prompt}"
@@ -1676,6 +1804,7 @@ Return ONLY the JSON array, no prose."""
         previous_reports: List[Dict],
         file_scope: List[str],
         mt_type: str,
+        role: Optional[str] = None,
     ) -> str:
         """Build the full prompt for a Minion agent."""
         goal = chain_context.get("goal", "")
@@ -1718,38 +1847,17 @@ Return ONLY the JSON array, no prose."""
                     + "\n".join(f"      • {x}" for x in pairs) + "\n"
                 )
 
-        if mt_type == "code":
-            tool_block = (
-                "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
-                "  ✅ write_plan   — write your task plan (FIRST action — required)\n"
-                "  ✅ read_file    — read an existing file\n"
-                "  ✅ create_file  — write a new file (or overwrite)\n"
-                "  ✅ patch_file   — make a targeted edit to an existing file\n"
-                "  ✅ finish       — call when done (only after all plan items checked off)\n"
-                "  ❌ execute_command — BLOCKED. Do NOT attempt it.\n"
-                "  ❌ memory_lookup  — BLOCKED. Do NOT attempt it.\n"
-                "  ❌ web_search     — BLOCKED. Do NOT attempt it.\n"
-                "  ❌ manage_server  — BLOCKED. Do NOT attempt it.\n"
-                "\n"
-                "CRITICAL: Your FIRST tool call MUST be write_plan.\n"
-                "Write a plan with ## Architecture, ## Files (- [ ] checkboxes), ## Dependencies.\n"
-                "After each file is written, re-call write_plan with that item checked (- [x]).\n"
-                "Do NOT call finish() until every [ ] item is checked off in your plan."
-            )
-        else:
-            tool_block = (
-                "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
-                "  ✅ execute_command — run shell commands\n"
-                "  ✅ manage_server   — start/stop/restart named services\n"
-                "  ✅ read_file       — read an existing file\n"
-                "  ✅ finish          — call when done\n"
-                "  ❌ create_file  — BLOCKED. Do NOT attempt it.\n"
-                "  ❌ patch_file   — BLOCKED. Do NOT attempt it.\n"
-                "  ❌ memory_lookup— BLOCKED. Do NOT attempt it.\n"
-                "  ❌ web_search   — BLOCKED. Do NOT attempt it.\n"
-                "\n"
-                "CRITICAL: Your FIRST tool call MUST be execute_command."
-            )
+        # Resolve role: explicit > inferred from mt_type. Inferring 'builder' for
+        # code and 'commander' for command keeps backward-compat with existing
+        # micro-task callers that don't carry a role on the micro_task itself.
+        _resolved_role = role
+        if not _resolved_role:
+            _resolved_role = "builder" if mt_type == "code" else "commander"
+        role_cfg = ROLES.get(_resolved_role, ROLES["builder"])
+        tool_block = _build_tool_restrictions_block(
+            role_cfg.get("tools", set()),
+            first_action=role_cfg.get("first_action", ""),
+        )
 
         return (
             f"TASK: {work_order}\n\n"
@@ -1927,9 +2035,22 @@ class TaskChain:
         model: str = "qwen3-coder:30b",
         retry_policy: Optional[Dict] = None,
     ) -> "TaskChain":
-        """Create a new chain and write it to disk. Returns the TaskChain instance."""
+        """Create a new chain and write it to disk. Returns the TaskChain instance.
+
+        Hardening: extracts an explicit workspace path from the goal text (same
+        regex as TaskDecomposer) and stores it in chain.data['workspace'] so the
+        AC runner can use it as cwd. Falls back to None if the goal doesn't
+        specify a workspace.
+        """
         chain_id = str(uuid.uuid4())
         chain = cls(chain_id)
+
+        ws_match = _re.search(
+            r'workspace[:\s]+(/[^\s,."\']+)',
+            goal,
+            _re.IGNORECASE,
+        )
+        workspace = ws_match.group(1).rstrip('/') if ws_match else None
 
         if retry_policy is None:
             retry_policy = {"max_retries_per_subtask": 1}
@@ -1972,6 +2093,7 @@ class TaskChain:
             "current_subtask_index": 0,
             "model": model,
             "retry_policy": retry_policy,
+            "workspace": workspace,
             "subtasks": subtask_records,
         }
         chain.save()

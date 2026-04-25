@@ -206,6 +206,9 @@ TOOL_SCHEMAS: dict = {
     "get_deps":         '  get_deps         — {{"paths": [str]}}\n'
                        '    # Returns import graph + reverse deps + transitive dependents.\n'
                        '    # Pure AST analysis; no LLM call. Safe to call repeatedly.',
+    "write_plan":       '  write_plan       — {{"plan": str (markdown with ## Architecture, ## Files - [ ], ## Dependencies)}}\n'
+                       '    # Persists your task plan. Idempotent — call again to update checkboxes.\n'
+                       '    # Returns {checked, total, plan_path}. Required first action for planner/builder roles.',
 }
 _ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
 
@@ -374,6 +377,10 @@ class OllamaCommandAgent:
     NUM_CTX = 32768       # ReAct loop context window (matches qwen3.6:35b-Grindlewalt Modelfile)
     HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
+    # Hardening: bound generation so qwen3 thinking-mode can't run unbounded.
+    # 8192 tokens ≈ 30KB output — plenty for any single-file artifact or patch.
+    FILE_GEN_NUM_PREDICT = 8192
+    PATCH_NUM_PREDICT = 4096
 
     def __init__(
         self,
@@ -413,6 +420,13 @@ class OllamaCommandAgent:
         self._pinned_slot_keys: Dict[str, int] = {}
         # Running list of files created/patched this session — survives compaction via pin
         self._files_created: List[str] = []
+        # Wire the write_plan tool's pinned-slot callback so plan updates show up
+        # in the agent's context window even after history compaction.
+        try:
+            self.tool_registry._save_plan_cb = self._save_plan_pin
+        except AttributeError:
+            # Older ToolRegistry without the attribute — non-fatal
+            pass
 
     # ---------------------------------------------------------------- LLM --
 
@@ -422,8 +436,14 @@ class OllamaCommandAgent:
         prompt: str,
         system_prompt: str = None,
         timeout: int = 60,
+        num_predict: Optional[int] = None,
     ) -> str:
-        """Raw one-shot call to any Ollama model. No history, no side effects."""
+        """Raw one-shot call to any Ollama model. No history, no side effects.
+
+        Hardening: bounded retry loop on transient failures (timeout, connection
+        errors). Caps tokens with num_predict when supplied so qwen3 thinking-mode
+        cannot run unbounded. Retry count via AGENT_OLLAMA_RETRIES env (default 2).
+        """
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -432,27 +452,45 @@ class OllamaCommandAgent:
         # One-shot calls (decomposer, planner, ai_confirm, etc.) never need the
         # full 32k window — allocating it adds seconds of overhead even for short
         # prompts. Only call_ollama_react (the ReAct loop) uses NUM_CTX=32k.
+        options: Dict[str, Any] = {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX}
+        if num_predict is not None and num_predict > 0:
+            options["num_predict"] = int(num_predict)
         request_data = {
             "model": model,
             "messages": messages,
             "stream": False,
             "keep_alive": "10m",
-            "options": {"temperature": 0.1, "num_ctx": self.HEAVY_NUM_CTX},
+            "options": options,
         }
 
-        try:
-            result = subprocess.run(
-                ["curl", "-s", "http://localhost:11434/api/chat",
-                 "-d", json.dumps(request_data)],
-                capture_output=True, text=True, timeout=timeout,
-            )
-            content = json.loads(result.stdout)["message"]["content"]
-            # Strip qwen3-style thinking blocks so extract_json sees only the answer
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-            return content
-        except Exception as e:
-            print(f"❌ Ollama call failed ({model}): {e}")
-            return ""
+        retries = max(0, int(os.getenv("AGENT_OLLAMA_RETRIES", "2")))
+        last_err = ""
+        for attempt in range(retries + 1):
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "http://localhost:11434/api/chat",
+                     "-d", json.dumps(request_data)],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                if result.returncode != 0:
+                    last_err = (result.stderr or "")[:200]
+                    raise RuntimeError(f"curl exit {result.returncode}: {last_err}")
+                content = json.loads(result.stdout)["message"]["content"]
+                # Strip qwen3-style thinking blocks so extract_json sees only the answer
+                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                return content
+            except subprocess.TimeoutExpired:
+                last_err = f"timeout after {timeout}s"
+                if attempt >= retries:
+                    break
+                time.sleep(1.0 * (1.5 ** attempt))
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {str(e)[:160]}"
+                if attempt >= retries:
+                    break
+                time.sleep(1.0)
+        print(f"❌ Ollama call failed ({model}) after {retries + 1} attempts ({last_err})")
+        return ""
 
     def call_ollama(self, prompt: str, system_prompt: str = None, timeout: int = 60) -> str:
         """Call Ollama API and get response (uses/updates self.conversation_history)."""
@@ -591,17 +629,27 @@ class OllamaCommandAgent:
 
         else:
             # ── Non-streaming mode (original behaviour, no stop_event) ──────────
+            # Hardening: single retry on transient failure. ReAct calls can be very
+            # long (60+ minutes), so we retry at most once — more would compound cost.
             request_data["stream"] = False
-            try:
-                body = json.dumps(request_data).encode()
-                conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
-                conn.request("POST", "/api/chat", body=body,
-                             headers={"Content-Type": "application/json"})
-                resp = conn.getresponse()
-                return json.loads(resp.read())["message"]["content"]
-            except Exception as e:
-                print(f"❌ Ollama ReAct call failed ({self.fast_model}): {e}")
-                return ""
+            _react_retries = max(0, min(1, int(os.getenv("AGENT_OLLAMA_RETRIES", "2"))))
+            last_err = ""
+            for attempt in range(_react_retries + 1):
+                try:
+                    body = json.dumps(request_data).encode()
+                    conn = _http.HTTPConnection("localhost", 11434, timeout=timeout)
+                    conn.request("POST", "/api/chat", body=body,
+                                 headers={"Content-Type": "application/json"})
+                    resp = conn.getresponse()
+                    return json.loads(resp.read())["message"]["content"]
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {str(e)[:160]}"
+                    if attempt >= _react_retries:
+                        break
+                    time.sleep(1.5)
+            print(f"❌ Ollama ReAct call failed ({self.fast_model}) after "
+                  f"{_react_retries + 1} attempts: {last_err}")
+            return ""
 
     def _reset_keep_alive(self, keep_alive: str = "10m"):
         """Send a no-op request to reset the model's keep_alive expiry timer.
@@ -625,9 +673,12 @@ class OllamaCommandAgent:
         prompt: str,
         system_prompt: str = None,
         timeout: int = 300,
+        num_predict: Optional[int] = None,
     ) -> str:
         """Heavy-model (30b) one-shot call for code/file generation only."""
-        return self._call_model_oneshot(self.model, prompt, system_prompt, timeout)
+        return self._call_model_oneshot(
+            self.model, prompt, system_prompt, timeout, num_predict=num_predict,
+        )
 
     # ------------------------------------------------------------ helpers --
 
@@ -1296,7 +1347,13 @@ JSON only."""
     CHECKLIST_PATH = os.path.expanduser("~/.agent_bin/checklist.md")
 
     def _write_progress_md(self, instruction: str, iteration: int, max_iter: int) -> None:
-        """Fast model summarises the recent trace into a human-readable progress file."""
+        """Fast model summarises the recent trace into a human-readable progress file.
+
+        Hardening:
+        - Generous 60s timeout (cold-model warmup can exceed the previous 3s).
+        - Best-effort: any failure is logged once, quietly; never blocks the agent.
+        - Rate-limited externally via AGENT_PROGRESS_EVERY in run_react.
+        """
         # Build a compact trace summary from the last 10 entries
         recent = self.react_trace[-10:] if self.react_trace else []
         trace_text = ""
@@ -1317,8 +1374,16 @@ JSON only."""
             f"Recent actions:\n{trace_text}\n\n"
             f"Write the progress markdown file."
         )
-        content = self._call_model_oneshot(self.fast_model, prompt, system, timeout=3)
+        try:
+            content = self._call_model_oneshot(
+                self.fast_model, prompt, system, timeout=60,
+            )
+        except Exception as e:
+            # Single-line warning — do NOT spam journalctl with full payloads.
+            print(f"⚠️  progress.md skip iter {iteration}: {type(e).__name__}")
+            return
         if not content:
+            print(f"⚠️  progress.md skip iter {iteration}: empty response")
             return
         try:
             os.makedirs(os.path.dirname(self.PROGRESS_PATH), exist_ok=True)
@@ -1328,8 +1393,8 @@ JSON only."""
                 f.write(f"<!-- updated: iteration {iteration}/{max_iter} -->\n")
                 f.write(content.strip() + "\n")
             print(f"\n📝 Progress saved → {self.PROGRESS_PATH}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️  progress.md write failed iter {iteration}: {type(e).__name__}")
 
     # ================================================================ ReAct ==
 
@@ -1460,6 +1525,23 @@ Return JSON only:
             ),
         }
         self._update_pinned("file_manifest", manifest_msg)
+
+    def _save_plan_pin(self, plan_text: str) -> None:
+        """Refresh the pinned 📋 PLAN slot. Called by ToolRegistry on write_plan.
+
+        Truncated to keep context manageable — the full plan is always on disk
+        at ~/.agent_bin/plans/<agent>_plan.md if the model needs the full text.
+        """
+        if not isinstance(plan_text, str) or not plan_text.strip():
+            return
+        body = plan_text.strip()
+        if len(body) > 2400:
+            body = body[:2400] + "\n... (plan truncated for pin — full text on disk)"
+        plan_msg = {
+            "role": "user",
+            "content": "📋 PLAN (most recent write_plan):\n" + body,
+        }
+        self._update_pinned("plan", plan_msg)
 
     # ── Auto-compactor ────────────────────────────────────────────────────────
 
@@ -1623,7 +1705,9 @@ Return JSON only:
             f"Recent agent context (for consistency):\n{context_summary}\n\n"
             f"Output ONLY the file content. Do not wrap in markdown fences."
         )
-        content = self.call_ollama_heavy(prompt, system, timeout=300)
+        content = self.call_ollama_heavy(
+            prompt, system, timeout=600, num_predict=self.FILE_GEN_NUM_PREDICT,
+        )
         return self._strip_code_fences(content)
 
     def _generate_patch_replacement(
@@ -1656,7 +1740,9 @@ Return JSON only:
             f"Recent context:\n{context_summary}\n\n"
             f"Output ONLY the replacement text."
         )
-        replacement = self.call_ollama_heavy(prompt, system, timeout=180)
+        replacement = self.call_ollama_heavy(
+            prompt, system, timeout=600, num_predict=self.FILE_GEN_NUM_PREDICT,
+        )
         return self._strip_code_fences(replacement)
 
     def _generate_patch_search_and_replace(
@@ -1699,7 +1785,9 @@ Return JSON only:
             "Return a JSON object: {{\"search\": \"<exact text to find>\", \"replace\": \"<replacement text>\"}}\n"
             "The search string MUST match the file content exactly (same whitespace/indentation)."
         )
-        raw = self.call_ollama_heavy(prompt, system, timeout=240)
+        raw = self.call_ollama_heavy(
+            prompt, system, timeout=180, num_predict=self.PATCH_NUM_PREDICT,
+        )
         raw = self._strip_code_fences(raw).strip()
         try:
             result = json.loads(raw)
@@ -1846,14 +1934,25 @@ Return JSON only:
         runbook_text = runbook_content[:2000] if runbook_content else "No runbook found."
 
         # Build tool list — only show whitelisted tools to minions so the model
-        # cannot plan around blocked tools.
+        # cannot plan around blocked tools. Walks TOOL_SCHEMAS so any new tool
+        # (write_plan, validate_arch, get_deps, ...) is automatically advertised
+        # without having to maintain a parallel hardcoded list.
+        # Feature-flag the dynamic build for emergency rollback.
+        _dynamic_tools = os.getenv("AGENT_TOOL_LIST_DYNAMIC", "1") != "0"
         if tool_whitelist:
-            available_tools_text = "\n".join(
-                TOOL_SCHEMAS[t] for t in ("execute_command", "create_file", "patch_file",
-                                           "web_search", "read_file", "memory_lookup",
-                                           "finish", "manage_server")
-                if t in tool_whitelist and t in TOOL_SCHEMAS
-            )
+            if _dynamic_tools:
+                available_tools_text = "\n".join(
+                    TOOL_SCHEMAS[t] for t in TOOL_SCHEMAS
+                    if t in tool_whitelist
+                )
+            else:
+                # Legacy fallback (pre-hardening): only the original 8 tools advertised
+                available_tools_text = "\n".join(
+                    TOOL_SCHEMAS[t] for t in ("execute_command", "create_file", "patch_file",
+                                               "web_search", "read_file", "memory_lookup",
+                                               "finish", "manage_server")
+                    if t in tool_whitelist and t in TOOL_SCHEMAS
+                )
         else:
             available_tools_text = _ALL_TOOLS_TEXT
 
@@ -2002,8 +2101,10 @@ Return JSON only:
         # Reset per-run file tracking (accumulates fresh within this run_react call)
         self._files_created = []
         self.pinned_messages = [m for m in self.pinned_messages
-                                if "📁 FILES CREATED" not in m.get("content", "")]
+                                if "📁 FILES CREATED" not in m.get("content", "")
+                                and "📋 PLAN" not in m.get("content", "")]
         self._pinned_slot_keys.pop("file_manifest", None)
+        self._pinned_slot_keys.pop("plan", None)
         final_confidence = 50
         _stop_early = False  # set True when stop_event fires; skips verification
         # Tracks consecutive failures per file path to break permission-denied loops
@@ -2062,9 +2163,19 @@ Return JSON only:
                 keep_tail = react_history[-9:]
                 react_history = react_history[:1] + keep_tail
 
-            # Periodic task-progress reminder (every _checkpoint_interval iterations)
-            if iteration > 1 and iteration % _checkpoint_interval == 0:
+            # Periodic task-progress reminder (every _checkpoint_interval iterations).
+            # Hardening: AGENT_PROGRESS_EVERY (default 3) further rate-limits the
+            # progress.md LLM call. AGENT_PROGRESS_EVERY=0 disables it entirely.
+            _progress_every = int(os.getenv("AGENT_PROGRESS_EVERY", "3"))
+            _progress_due = (
+                iteration > 1
+                and iteration % _checkpoint_interval == 0
+                and _progress_every > 0
+                and iteration % _progress_every == 0
+            )
+            if _progress_due:
                 self._write_progress_md(instruction, iteration, max_iter)
+            if iteration > 1 and iteration % _checkpoint_interval == 0:
                 remaining = max_iter - iteration
                 react_history.append({"role": "user", "content": (
                     f"[PROGRESS CHECK — iteration {iteration}/{max_iter}, "
