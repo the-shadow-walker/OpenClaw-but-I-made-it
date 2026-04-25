@@ -29,11 +29,8 @@ class ToolRegistry:
         "memory_lookup",
         "finish",
         "manage_server",
-        "gui_task",
-        "save_context",
-        "publish_context",
-        "read_context",
-        "write_plan",
+        "validate_arch",   # PR0: ARCH.json validator (pure, no LLM)
+        "get_deps",        # PR2: import dependency graph (pure, no LLM)
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
@@ -41,8 +38,6 @@ class ToolRegistry:
         self.safety_validator = safety_validator
         self.search_agent = search_agent
         self.memory = memory
-        # AgentMemory reference for shared context board
-        self.agent_memory = memory
         # Optional callable(command: str) -> str that returns a human-readable
         # breakdown of the command segments, shown before execution / confirmation.
         self.explain_cb = explain_cb
@@ -58,6 +53,9 @@ class ToolRegistry:
         self._failed_commands: Dict[str, int] = {}      # command → fail count
         self._server_procs: Dict[str, Any] = {}         # name → Popen
         self._read_file_counts: Dict[str, int] = {}     # path → read count (no-offset reads)
+        # Updated by run_react before each dispatch so _handle_finish can pace early exits
+        self._iteration_count: int = 0
+        self._max_iterations: int = 50
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -82,10 +80,14 @@ class ToolRegistry:
         """Route a tool call through the safety/confidence gate."""
 
         # Stuck-loop guard: if the last 4 calls are identical, warn first then terminate.
+        # Exempt idempotent read-only tools — re-calling them is harmless and often useful.
+        _STUCK_EXEMPT = {"read_file", "validate_arch", "get_deps"}
         call_key = (tool, json.dumps(args, sort_keys=True))
-        self._recent_calls.append(call_key)
+        if tool not in _STUCK_EXEMPT:
+            self._recent_calls.append(call_key)
         if (
-            len(self._recent_calls) == 4
+            tool not in _STUCK_EXEMPT
+            and len(self._recent_calls) == 4
             and len(set(self._recent_calls)) == 1
         ):
             self._stuck_warn_count += 1
@@ -214,11 +216,8 @@ class ToolRegistry:
             "memory_lookup":   self._handle_memory_lookup,
             "finish":          self._handle_finish,
             "manage_server":   self._handle_manage_server,
-            "gui_task":        self._handle_gui_task,
-            "save_context":    self._handle_save_context,
-            "publish_context": self._handle_publish_context,
-            "read_context":    self._handle_read_context,
-            "write_plan":      self._handle_write_plan,
+            "validate_arch":   self._handle_validate_arch,
+            "get_deps":        self._handle_get_deps,
         }
         return handler_map[tool](args)
 
@@ -578,33 +577,57 @@ class ToolRegistry:
             return ToolResult(False, "", "No path provided", {})
         offset = int(args.get("offset", 0))
         limit  = int(args.get("limit", 200))
+
+        # Track ALL reads (any offset) per path — catches pagination loops too
+        self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
+        total_reads = self._read_file_counts[path]
+
+        # Hard block at 8 total reads of the same file
+        if total_reads > 8:
+            fname = os.path.basename(path)
+            return ToolResult(
+                False, "",
+                f"BLOCKED: {fname} has been read {total_reads} times this phase. "
+                f"Re-reading is NOT helping. You MUST take a different action:\n"
+                f"• Use execute_command: grep -n 'symbol' {path}\n"
+                f"• Use execute_command: python3 -c \"import ast; ...\" to inspect structure\n"
+                f"• Use patch_file or create_file to fix what you already know is wrong\n"
+                f"• If imports are missing, ADD them — don't keep reading the file.",
+                {"read_blocked": True, "total_reads": total_reads}
+            )
+
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
             total = len(lines)
             slice_ = lines[offset : offset + limit]
             content = "".join(slice_)
+
+            # Header so model always knows exactly where it is
+            end_line = min(offset + limit, total)
+            header = f"[FILE: {path} | TOTAL: {total} lines | SHOWING: lines {offset+1}-{end_line}]\n"
+            content = header + content
+
             remaining = total - (offset + limit)
             if remaining > 0:
                 content += (
-                    f"\n\n[... {remaining} more lines not shown. "
-                    f"Call read_file with offset={offset + limit} to continue reading.]"
+                    f"\n[... {remaining} more lines. "
+                    f"Use offset={offset + limit} to continue, "
+                    f"or grep to find specific content instead of paginating.]"
                 )
-            # Track no-offset re-reads and inject redirect note at 3rd read
-            if offset == 0:
-                self._read_file_counts[path] = self._read_file_counts.get(path, 0) + 1
-                count = self._read_file_counts[path]
-                if count >= 3:
-                    content += (
-                        f"\n\n⚠️  You have read {path} from the top {count} times. "
-                        f"If you haven't found what you need:\n"
-                        f"• Use offset= to read a different section\n"
-                        f"• Use execute_command with grep/sed to locate specific content\n"
-                        f"• Proceed with what you already know — re-reading rarely helps"
-                    )
+
+            # Warn at 4+ reads regardless of offset
+            if total_reads >= 4:
+                content += (
+                    f"\n\n⚠️  READ #{total_reads} of {path}. "
+                    f"You have {8 - total_reads} reads left before this file is blocked.\n"
+                    f"STOP re-reading. Use grep or just patch what you know is wrong."
+                )
+
             return ToolResult(True, content, "", {
                 "path": path, "total_lines": total,
                 "shown_lines": len(slice_), "offset": offset,
+                "total_reads": total_reads,
             })
         except FileNotFoundError:
             return ToolResult(False, "", f"File not found: {path}", {})
@@ -631,14 +654,141 @@ class ToolRegistry:
         except Exception as e:
             return ToolResult(False, "", str(e), {})
 
+    def _handle_validate_arch(self, args: dict) -> ToolResult:
+        """Validate a DOCS/ARCH.json file against arch_schema. No LLM call.
+        Returns {ok, errors, summary}. Missing file is a warning, not a hard fail.
+        """
+        path = os.path.expanduser(args.get("path") or "DOCS/ARCH.json")
+        try:
+            import arch_schema  # flat import — added to sys.path by server.py
+        except ImportError as e:
+            return ToolResult(False, "", f"arch_schema module unavailable: {e}", {})
+
+        if not os.path.exists(path):
+            return ToolResult(
+                True,
+                f"ARCH.json not found at {path} — treating as empty contract (warning).",
+                "",
+                {"ok": True, "warn": "no ARCH.json", "errors": []},
+            )
+
+        try:
+            data = arch_schema.load_arch(path)
+        except Exception as e:
+            return ToolResult(
+                False, "", f"ARCH.json parse failed: {e}",
+                {"ok": False, "errors": [str(e)]},
+            )
+
+        ok, errors = arch_schema.validate_arch(data)
+        summary = arch_schema.extract_summary(data, max_chars=400)
+        hard = [e for e in errors if not e.startswith("warning:")]
+        warn = [e for e in errors if e.startswith("warning:")]
+
+        head = f"ARCH.json @ {path}\n{summary}\n"
+        body_parts = []
+        if hard:
+            body_parts.append("ERRORS:\n" + "\n".join(f"  ✗ {e}" for e in hard))
+        if warn:
+            body_parts.append("WARNINGS:\n" + "\n".join(f"  ⚠ {e}" for e in warn))
+        if not body_parts:
+            body_parts.append("✅ No violations.")
+        output = head + "\n".join(body_parts)
+
+        return ToolResult(
+            ok, output, "" if ok else "arch validation failed",
+            {"ok": ok, "errors": errors, "summary": summary},
+        )
+
+    def _handle_get_deps(self, args: dict) -> ToolResult:
+        """Return the import dependency graph for a set of files (or current workspace).
+
+        args:
+          paths: list[str] — files to analyse (required)
+        Response metadata: {graph, reverse_graph, dependents_of_paths}.
+        """
+        try:
+            import dep_graph as _dep
+        except ImportError as e:
+            return ToolResult(False, "", f"dep_graph module unavailable: {e}", {})
+        paths = args.get("paths") or []
+        if isinstance(paths, str):
+            paths = [paths]
+        paths = [os.path.expanduser(p) for p in paths if isinstance(p, str)]
+        if not paths:
+            return ToolResult(False, "", "get_deps requires paths:[...]", {})
+        g = _dep.build_graph(paths)
+        rev = _dep.reverse(g)
+        dependents_of = {p: _dep.files_affected_by({p}, g) for p in paths if p in g}
+
+        # Human-readable output
+        lines = ["Dep graph:"]
+        for f, ds in sorted(g.items()):
+            short = os.path.basename(f)
+            lines.append(f"  {short} -> {[os.path.basename(d) for d in ds]}")
+        for p, affected in dependents_of.items():
+            if affected:
+                lines.append(f"  Dependents of {os.path.basename(p)}: "
+                             f"{sorted(os.path.basename(x) for x in affected)}")
+        output = "\n".join(lines)[:3000]
+
+        meta = {
+            "graph": {k: list(v) for k, v in g.items()},
+            "reverse_graph": rev,
+            "dependents_of_paths": {p: sorted(s) for p, s in dependents_of.items()},
+        }
+        return ToolResult(True, output, "", meta)
+
     def _handle_finish(self, args: dict) -> ToolResult:
-        summary = args.get("summary", "")
-        success = bool(args.get("success", True))
+        summary  = args.get("summary", "Task completed.")
+        success  = bool(args.get("success", True))
+        declared = args.get("files_created", [])
+
+        # --- Guard 1: verify all declared files exist on disk ---
+        missing = [f for f in declared if not os.path.exists(os.path.expanduser(f))]
+        if missing:
+            msg = (
+                f"finish() REJECTED — {len(missing)} declared file(s) not found on disk:\n"
+                + "\n".join(f"  ✗ {f}" for f in missing)
+                + "\nCreate the missing files first, then call finish() again."
+            )
+            print(f"\n{'=' * 70}")
+            print(f"🚫 FINISH REJECTED (missing files):")
+            for f in missing:
+                print(f"   ✗ {f}")
+            print(f"{'=' * 70}")
+            return ToolResult(False, "", msg, {"missing_files": missing})
+
+        # --- Guard 2: reject no-op early exits (coder roles only) ---
+        # Skip for commander/tester style roles that don't have create_file/patch_file.
+        is_coder = True
+        try:
+            if self.allowed_tools is not None:
+                is_coder = ("create_file" in self.allowed_tools) or ("patch_file" in self.allowed_tools)
+        except AttributeError:
+            is_coder = True
+        if is_coder and success and not declared and self._max_iterations > 0:
+            budget_pct = self._iteration_count / self._max_iterations
+            if budget_pct < 0.5:
+                msg = (
+                    f"finish() REJECTED — no files_created declared and only "
+                    f"{self._iteration_count}/{self._max_iterations} iterations used "
+                    f"({budget_pct:.0%} of budget). "
+                    "Complete the task or list all files you wrote in files_created."
+                )
+                print(f"\n{'=' * 70}")
+                print(f"🚫 FINISH REJECTED (no files, too early): {self._iteration_count}/{self._max_iterations} iters")
+                print(f"{'=' * 70}")
+                return ToolResult(False, "", msg, {})
+
+        # --- Accepted ---
         icon = "✅" if success else "⚠️ "
         print(f"\n{'=' * 70}")
         print(f"{icon} FINISH: {summary}")
+        if declared:
+            print(f"   Files verified: {len(declared)}")
         print(f"{'=' * 70}")
-        return ToolResult(success, summary, "", {"finished": True})
+        return ToolResult(success, summary, "", {"finished": True, "files_created": declared})
 
     def _handle_manage_server(self, args: dict) -> ToolResult:
         action = (args.get("action") or "").lower()
@@ -693,102 +843,3 @@ class ToolRegistry:
                 return ToolResult(True, f"'{name}' running (pid={proc.pid}). Redirect server logs in command: e.g. 'uvicorn ... >/tmp/{name}.log 2>&1'", "", {"pid": proc.pid})
             except Exception as e:
                 return ToolResult(False, "", f"Start failed: {e}", {})
-
-    def _handle_gui_task(self, args: dict) -> ToolResult:
-        task = args.get("task", "")
-        max_iter = int(args.get("max_iterations", 20))
-        if not task:
-            return ToolResult(False, "", "No task provided", {})
-        # Auto-save CMD context before running the GUI agent (safety net)
-        snapshot_path = None
-        if hasattr(self, "_save_context_cb") and self._save_context_cb:
-            try:
-                snapshot_path = self._save_context_cb(f"pre_gui_{task[:20]}")
-            except Exception:
-                pass
-        try:
-            from gui_agent import GUIAgent
-            agent = GUIAgent()
-            result = agent.run(task=task, max_iterations=max_iter)
-            summary = result.get("summary", result.get("finish_summary", ""))
-            success = result.get("success", False)
-            files = []
-            try:
-                for e in agent.agent.react_trace:
-                    if e.get("tool") == "create_file" and getattr(e.get("result"), "success", False):
-                        p = e.get("args", {}).get("path", "")
-                        if p:
-                            files.append(p)
-            except Exception:
-                pass
-            output = f"GUI task {'succeeded' if success else 'failed'}.\nSummary: {summary}"
-            if files:
-                output += f"\nFiles created: {', '.join(files)}"
-            meta = {"gui_iterations": result.get("iterations_used", 0),
-                    "files_created": files}
-            if snapshot_path:
-                meta["context_snapshot"] = snapshot_path
-            return ToolResult(success, output, "" if success else summary, meta)
-        except ImportError:
-            return ToolResult(False, "", "GUI agent not available on this machine", {})
-        except Exception as e:
-            return ToolResult(False, "", f"GUI task failed: {e}", {})
-
-    def _handle_save_context(self, args: dict) -> ToolResult:
-        label = args.get("label", "manual")
-        # Delegate to the agent's save_context if the callback is set
-        if hasattr(self, "_save_context_cb") and self._save_context_cb:
-            try:
-                path = self._save_context_cb(label)
-                return ToolResult(True, f"Context saved → {path}", "", {"path": path})
-            except Exception as e:
-                return ToolResult(False, "", f"Save failed: {e}", {})
-        return ToolResult(False, "", "save_context not wired up (no callback)", {})
-
-    def _handle_publish_context(self, args: dict) -> ToolResult:
-        key = args.get("key", "")
-        value = args.get("value", "")
-        ttl_hours = int(args.get("ttl_hours", 24))
-        if not key or not value:
-            return ToolResult(False, "", "key and value are required", {})
-        try:
-            self.agent_memory.set_context(key, value, agent_id="cmd", ttl=ttl_hours * 3600)
-            return ToolResult(True, f"Published: {key} = {value}", "", {"key": key})
-        except Exception as e:
-            return ToolResult(False, "", f"publish_context failed: {e}", {})
-
-    def _handle_read_context(self, args: dict) -> ToolResult:
-        key = args.get("key", "")
-        if not key:
-            return ToolResult(False, "", "key is required", {})
-        try:
-            value = self.agent_memory.get_context(key)
-            if value is None:
-                return ToolResult(False, "", f"Key '{key}' not found or expired", {})
-            return ToolResult(True, f"{key} = {value}", "", {"key": key, "value": value})
-        except Exception as e:
-            return ToolResult(False, "", f"read_context failed: {e}", {})
-
-    def _handle_write_plan(self, args: dict) -> ToolResult:
-        """Write/overwrite the persistent task plan file.
-        Auto-injected as a pinned slot so it survives context compression."""
-        content = args.get("content", "").strip()
-        if not content:
-            return ToolResult(False, "", "content is required", {})
-        try:
-            plan_path = os.path.expanduser("~/.agent_bin/task_plan.md")
-            os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-            with open(plan_path, "w") as f:
-                f.write(content)
-            # Notify the agent core so it can refresh the pinned slot immediately
-            if hasattr(self, "_plan_updated_cb") and self._plan_updated_cb:
-                self._plan_updated_cb(content)
-            lines = content.count("\n") + 1
-            unchecked = content.count("- [ ]")
-            checked = content.count("- [x]")
-            return ToolResult(True,
-                f"Plan written ({lines} lines, {checked} done / {unchecked} remaining tasks).\n"
-                "Plan is now pinned — visible every iteration even after compression.",
-                "", {"unchecked": unchecked, "checked": checked})
-        except Exception as e:
-            return ToolResult(False, "", f"write_plan failed: {e}", {})

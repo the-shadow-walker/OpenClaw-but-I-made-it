@@ -271,6 +271,11 @@ class AgentMemory:
                 pass
         return result
 
+    def list_context_by_agent(self, prefix: str = "", agent_id: str = "") -> List[Dict]:
+        """Same as list_context but also filters by agent_id. Used by role memory
+        to fetch lessons tagged to a specific role."""
+        return [r for r in self.list_context(prefix) if r.get("agent") == agent_id]
+
 
 # ----------------------------------------------------------------- CLI test --
 

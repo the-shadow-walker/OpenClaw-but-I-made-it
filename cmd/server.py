@@ -374,10 +374,17 @@ class JobRunner:
                         artifact = orchestrator.orchestrate(subtask_rec, chain_data)
                         _original_print(f"[worker] orchestrator done: {artifact.status}", flush=True)
 
-                        # Store artifact in chain state for future phases
+                        # Store artifact in chain state for future phases.
+                        # Mirror iterations_used/failure_count onto the subtask record
+                        # itself so the budget rebalancer can read them cheaply.
+                        _art_dict = artifact.to_dict()
                         chain_state.update_subtask(
                             job['subtask_index'],
-                            {'artifact': artifact.to_dict()}
+                            {
+                                'artifact': _art_dict,
+                                'iterations_used': _art_dict.get('iterations_used', 0),
+                                'failure_count': _art_dict.get('failure_count', 0),
+                            }
                         )
 
                         # Build react_result in the shape _advance_chain expects
@@ -545,6 +552,84 @@ def _submit_subtask_job(chain_id: str, chain_data: dict, index: int, retry_count
     return job_id
 
 
+def _run_chain_convergence(chain) -> Dict[str, Any]:
+    """Chain-level global convergence loop.
+
+    Repeats reconciler+tester over the WHOLE codebase until stable or
+    AGENT_CONVERGENCE_PASSES is exhausted. Each pass writes its own sidechain
+    transcript under convergence_pass_{i}.jsonl. Never hard-fails — worst case
+    we exit with converged=False and surface a warning.
+    """
+    if os.getenv("AGENT_CONVERGENCE_LOOP", "1") == "0":
+        return {"skipped": True, "reason": "flag off"}
+    max_passes = int(os.getenv("AGENT_CONVERGENCE_PASSES", "3"))
+    if max_passes <= 0:
+        return {"skipped": True, "reason": "AGENT_CONVERGENCE_PASSES=0"}
+
+    try:
+        chain_data = chain.data
+        all_files: set = set()
+        for st in chain_data.get("subtasks", []):
+            art = st.get("artifact") or {}
+            for p in art.get("files_created", []) or []:
+                all_files.add(p)
+            for p in art.get("files_modified", []) or []:
+                all_files.add(p)
+        files_list = sorted(all_files)
+        if not files_list:
+            return {"skipped": True, "reason": "no files produced"}
+
+        total_budget = int(chain_data.get("total_budget", 100))
+        per_pass_budget = max(20, total_budget // 10)
+
+        # Spin a fresh agent / orchestrator (no chain-parent context)
+        agent = OllamaCommandAgent(model=chain_data.get("model", "qwen3.6:35b-Grindlewalt"))
+        orch = SubtaskOrchestrator(agent)
+
+        # Build a synthetic "artifact" that looks like a merged phase
+        from task_chain import ImplementationArtifact as _IA
+        merged_artifact = _IA(
+            subtask_index=999,
+            subtask_instruction="chain-level convergence",
+            status="completed",
+            summary="merged chain outputs",
+            files_created=files_list,
+            files_modified=[],
+        )
+
+        audit_passes = []
+        converged = False
+        for i in range(max_passes):
+            print(f"\n🔁 Chain convergence pass {i + 1}/{max_passes}")
+            rec_summary = orch._run_inline_reconciler(
+                artifact=merged_artifact,
+                chain_context=chain_data,
+                subtask_index=999,
+                budget=per_pass_budget,
+                scope=f"global_convergence_pass_{i}",
+                files_override=files_list,
+            )
+            orch._write_sidechain(999, f"convergence_pass_{i}")
+            audit_passes.append({
+                "pass": i,
+                "found_issues": rec_summary.get("found_issues", False),
+                "patched": rec_summary.get("patched_count", 0),
+                "arch_updated": rec_summary.get("arch_updated", False),
+                "summary": rec_summary.get("summary", "")[:200],
+            })
+            if not rec_summary.get("found_issues", False):
+                converged = True
+                break
+
+        return {
+            "converged": converged,
+            "passes_executed": len(audit_passes),
+            "passes": audit_passes,
+        }
+    except Exception as e:
+        return {"skipped": True, "error": str(e)}
+
+
 def _advance_chain(chain_id: str, subtask_index: int, job: dict):
     """
     Called after a sub-task job completes (success or failure).
@@ -614,7 +699,25 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
     chain.update_subtask(subtask_index, {
         "status": subtask_status,
         "completed_at": datetime.now().isoformat(),
+        "iterations_remaining_after": max(
+            0,
+            int(subtask.get("max_iterations", 0))
+            - int(subtask.get("iterations_used", 0))
+        ),
     })
+
+    # PR1 — failure-biased budget rebalance: donate slack from completed passing
+    # phases to the highest-need pending phase (biased by recorded failures).
+    if subtask_status == "passed":
+        try:
+            chain_fresh = TaskChain.load(chain_id)
+            audit = chain_fresh.rebalance_budget(subtask_index)
+            if audit.get("donation", 0) > 0:
+                print(f"  💰 Budget rebalance: donated {audit['donation']} iters "
+                      f"to phase {audit.get('to_index')} (slack={audit.get('slack')})")
+        except Exception as _e:
+            print(f"  ⚠️  Budget rebalance failed: {_e}")
+
     debug_logger.subtask_event(chain_id, subtask_status, subtask_index,
                                instruction=subtask.get("instruction", ""),
                                ac_command=(ac_result or {}).get("command", ""),
@@ -684,11 +787,22 @@ def _advance_chain(chain_id: str, subtask_index: int, job: dict):
             })
         break
 
-    # 9. If no more subtasks remain: mark chain completed
+    # 9. If no more subtasks remain: run chain-level convergence loop, then mark completed
     if next_index >= len(subtasks):
         chain = TaskChain.load(chain_id)
+        convergence_summary = _run_chain_convergence(chain)
+        chain = TaskChain.load(chain_id)
+        chain_status = "completed"
+        extras: Dict[str, Any] = {
+            "status": chain_status,
+            "completed_at": datetime.now().isoformat(),
+        }
+        if convergence_summary:
+            extras["convergence"] = convergence_summary
+            if not convergence_summary.get("converged", True):
+                print(f"⚠️  Chain {chain_id[:8]}: convergence loop exited without stable state")
         print(f"✅ Chain {chain_id[:8]}: all subtasks done — chain completed")
-        chain.update_chain({"status": "completed", "completed_at": datetime.now().isoformat()})
+        chain.update_chain(extras)
         debug_logger.chain_end(chain_id, chain.data.get("goal", ""), "completed")
         webhook_dispatcher.chain_status_changed(chain_id, chain.data.get("goal", ""),
                                                 "completed", len(chain.data.get("subtasks", [])))

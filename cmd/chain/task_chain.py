@@ -35,24 +35,32 @@ _CLEANUP_PORTS = [5000, 8000, 3000, 8080, 8443]
 
 ROLES: Dict[str, Dict] = {
     "planner": {
-        "tools": {"read_file", "create_file", "web_search", "memory_lookup", "finish"},
+        "tools": {"read_file", "create_file", "web_search", "memory_lookup",
+                  "validate_arch", "write_plan", "finish"},
         "system_prefix": (
-            "You are the PLANNER. Read existing code/docs and write a plan file.\n"
+            "You are the PLANNER. Read existing code/docs and write the architecture contract.\n"
             "Do NOT write implementation code. Do NOT run commands.\n"
-            "Output one markdown plan/spec file using create_file, then finish() "
-            "with files_created listing the plan file path."
+            "If AGENT_ARCH_JSON is in force, emit DOCS/ARCH.json — a structured JSON document\n"
+            "with keys: routes[], models[], ports[], files[], dependencies[].\n"
+            "Each route MUST have method, path, handler, request_schema, response_schema.\n"
+            "Each model MUST have name, fields:[{name,type}], relationships[].\n"
+            "After writing, call validate_arch {\"path\": \"DOCS/ARCH.json\"} before finish().\n"
+            "Tester role will auto-generate test stubs from this contract — do NOT write tests.\n"
+            "Then finish() with files_created listing the contract file path."
         ),
         "first_action": "read_file",
         "single_minion": True,   # skip micro-task decomposition
     },
     "builder": {
-        "tools": {"read_file", "create_file", "patch_file", "finish", "write_plan"},
+        "tools": {"read_file", "create_file", "patch_file", "validate_arch",
+                  "get_deps", "finish", "write_plan"},
         "system_prefix": (
             "You are the BUILDER. Write and modify code files only.\n"
             "Do NOT run servers or execute shell commands.\n"
             "Your FIRST action MUST be write_plan — write a full markdown plan covering:\n"
             "  ## Architecture, ## Files (- [ ] /path — description), ## Dependencies\n"
             "After each file is written, re-call write_plan with that item checked (- [x]).\n"
+            "You MAY call validate_arch to re-check the contract at any time (idempotent).\n"
             "finish() only when ALL [ ] items are checked. List EVERY file in files_created."
         ),
         "first_action": "write_plan",
@@ -77,6 +85,24 @@ ROLES: Dict[str, Dict] = {
         ),
         "first_action": "execute_command",
         "single_minion": False,
+    },
+    # Internal-only role — filtered out of TaskDecomposer prompt; only runs as an
+    # inline gate from SubtaskOrchestrator._run_inline_reconciler.
+    "reconciler": {
+        "tools": {"read_file", "patch_file", "create_file", "validate_arch",
+                  "get_deps", "execute_command", "write_plan", "finish"},
+        "system_prefix": (
+            "You are the RECONCILER. Close drift between ARCH.json and the codebase.\n"
+            "You may: read any file, patch/create files to align code with ARCH, or\n"
+            "rewrite ARCH.json when code has intentionally evolved past the contract.\n"
+            "A classification of findings is provided — obey the prescribed direction\n"
+            "(patch_code vs update_arch). Do NOT introduce new features. Run\n"
+            "validate_arch after writing ARCH.json. finish() with summary including\n"
+            "'PATCHED: N' and 'ARCH_UPDATED: True/False'."
+        ),
+        "first_action": "validate_arch",
+        "single_minion": True,
+        "internal_only": True,
     },
 }
 
@@ -146,6 +172,16 @@ class ImplementationArtifact:
     micro_task_reports: List[Dict] = field(default_factory=list) # raw Self-Correction Reports
     notes: List[str] = field(default_factory=list)               # e.g. "route expects 'email'"
 
+    @property
+    def iterations_used(self) -> int:
+        """Total iterations consumed across all micro-tasks in this phase."""
+        return sum(int(r.get("iterations_used", 0) or 0) for r in self.micro_task_reports)
+
+    @property
+    def failure_count(self) -> int:
+        """Number of micro-tasks that did not succeed."""
+        return sum(1 for r in self.micro_task_reports if not r.get("success"))
+
     def to_dict(self) -> Dict:
         return {
             "subtask_index": self.subtask_index,
@@ -158,6 +194,8 @@ class ImplementationArtifact:
             "credentials": self.credentials,
             "micro_task_reports": self.micro_task_reports,
             "notes": self.notes,
+            "iterations_used": self.iterations_used,
+            "failure_count": self.failure_count,
         }
 
     def compact_summary(self, max_chars: int = 500) -> str:
@@ -419,27 +457,62 @@ class TaskDecomposer:
         )
         workspace = ws_match.group(1).rstrip('/') if ws_match else ""
 
+        # PR0: ARCH.json feature flag. Default ON — planner emits structured JSON.
+        # If off, falls back to the legacy ARCH.md prompt for safe rollback.
+        _arch_json = os.getenv("AGENT_ARCH_JSON", "1") != "0"
+        _arch_filename = "ARCH.json" if _arch_json else "ARCH.md"
+
         if workspace:
-            arch_path     = f"{workspace}/DOCS/ARCH.md"
-            arch_ac       = f"test -f {arch_path}"
-            phase0_instr  = (
-                f"Create {arch_path} with: module list, DB schema (if needed), "
-                f"API route table, port assignments, auth approach, and file layout. "
-                f"No code — specification only."
-            )
+            arch_path      = f"{workspace}/DOCS/{_arch_filename}"
+            if _arch_json:
+                arch_ac = (
+                    f"test -f {arch_path} && "
+                    f"python3 -c \"import json; json.load(open('{arch_path}'))\""
+                )
+                phase0_instr = (
+                    f"Create {arch_path} — a structured JSON architecture contract with keys: "
+                    f"routes[{{method,path,handler,request_schema,response_schema}}], "
+                    f"models[{{name,fields,relationships}}], ports[{{service,port}}], "
+                    f"files[{{path,purpose}}], dependencies[]. "
+                    f"See DOCS/ARCH_SCHEMA.md for exact shape. "
+                    f"After writing, call validate_arch {{\"path\":\"{arch_path}\"}} to verify. "
+                    f"No implementation code — contract only."
+                )
+            else:
+                arch_ac = f"test -f {arch_path}"
+                phase0_instr = (
+                    f"Create {arch_path} with: module list, DB schema (if needed), "
+                    f"API route table, port assignments, auth approach, and file layout. "
+                    f"No code — specification only."
+                )
             workspace_rule = (
                 f"\n0. WORKSPACE: ALL files MUST be created under {workspace}/. "
                 f"Use ABSOLUTE paths only — no relative paths ever. "
                 f"acceptance_criteria shell commands must also use the full absolute path."
             )
         else:
-            arch_path     = "DOCS/ARCH.md"
-            arch_ac       = "test -f DOCS/ARCH.md"
-            phase0_instr  = (
-                "Create DOCS/ARCH.md with: module list, DB schema (if needed), "
-                "API route table, port assignments, auth approach, and file layout. "
-                "No code — specification only."
-            )
+            arch_path      = f"DOCS/{_arch_filename}"
+            if _arch_json:
+                arch_ac = (
+                    f"test -f {arch_path} && "
+                    f"python3 -c \"import json; json.load(open('{arch_path}'))\""
+                )
+                phase0_instr = (
+                    f"Create {arch_path} — a structured JSON architecture contract with keys: "
+                    f"routes[{{method,path,handler,request_schema,response_schema}}], "
+                    f"models[{{name,fields,relationships}}], ports[{{service,port}}], "
+                    f"files[{{path,purpose}}], dependencies[]. "
+                    f"See DOCS/ARCH_SCHEMA.md for exact shape. "
+                    f"After writing, call validate_arch {{\"path\":\"{arch_path}\"}} to verify. "
+                    f"No implementation code — contract only."
+                )
+            else:
+                arch_ac = f"test -f {arch_path}"
+                phase0_instr = (
+                    f"Create {arch_path} with: module list, DB schema (if needed), "
+                    f"API route table, port assignments, auth approach, and file layout. "
+                    f"No code — specification only."
+                )
             workspace_rule = ""
 
         prompt = f"""Decompose this goal into sequential sub-tasks for an autonomous agent.
@@ -491,11 +564,33 @@ Return ONLY the JSON array, no other text."""
 
         system = "You are a task decomposer. Return only a JSON array of sub-tasks. No prose."
 
+        # Use non-thinking coder model for decomposition — qwen3.6-Grindlewalt
+        # burns all num_predict tokens on thinking and returns empty content.
+        DECOMP_MODEL = "qwen3-coder:30b"
+
         try:
             raw = self.agent._call_model_oneshot(
-                self.agent.fast_model, prompt, system, timeout=180
+                DECOMP_MODEL, prompt, system, timeout=180
             )
-            subtasks = self.agent.extract_json(raw)
+            # Prefer direct JSON array parse; fall back to extract_json which
+            # only grabs the first {} object when the response is an array.
+            subtasks = None
+            try:
+                parsed = json.loads(raw.strip())
+                if isinstance(parsed, list):
+                    subtasks = parsed
+            except Exception:
+                pass
+            if subtasks is None:
+                # Try to extract an array via regex
+                m = _re.search(r'\[\s*\{.*\}\s*\]', raw, _re.DOTALL)
+                if m:
+                    try:
+                        subtasks = json.loads(m.group(0))
+                    except Exception:
+                        pass
+            if subtasks is None:
+                subtasks = self.agent.extract_json(raw)
             if not subtasks or not isinstance(subtasks, list) or len(subtasks) == 0:
                 raise ValueError("invalid decomposition result")
         except Exception:
@@ -509,6 +604,7 @@ Return ONLY the JSON array, no other text."""
             }]
 
         # Fill in max_iterations from complexity if missing or zero
+        _internal_only = {k for k, v in ROLES.items() if v.get("internal_only")}
         for task in subtasks:
             if not task.get("max_iterations"):
                 complexity = task.get("estimated_complexity", "medium")
@@ -516,6 +612,12 @@ Return ONLY the JSON array, no other text."""
             task.setdefault("acceptance_criteria", None)
             task.setdefault("estimated_complexity", "medium")
             task.setdefault("role", "builder")  # default if LLM omitted the field
+            # Safety: never allow decomposer to assign an internal-only role (e.g. reconciler).
+            if task.get("role") in _internal_only:
+                task["role"] = "builder"
+            # Preserve original budget so the rebalancer can compute slack + caps later.
+            task["original_max_iterations"] = task["max_iterations"]
+            task.setdefault("failure_count", 0)
 
         # Re-index sequentially
         for i, task in enumerate(subtasks):
@@ -625,12 +727,17 @@ class SubtaskOrchestrator:
     Legacy tool-set aliases kept for TDA helpers:
     """
 
-    CODER_TOOLS = {"read_file", "create_file", "patch_file", "finish", "write_plan"}
+    CODER_TOOLS = {"read_file", "create_file", "patch_file", "validate_arch",
+                   "get_deps", "finish", "write_plan"}
     COMMANDER_TOOLS = {"execute_command", "manage_server", "read_file", "finish"}
 
     def __init__(self, agent):
         """agent: shared OllamaCommandAgent instance (history cleared per minion)."""
         self.agent = agent
+        # PR2 — file ownership tracking: file_path -> {owner_role, phase_created, last_modified_phase}
+        self._file_ownership: Dict[str, Dict] = {}
+        # PR2 — active dep-graph reverify queue: files to re-check on next reconciler gate
+        self._pending_reverify_set: set = set()
 
     # -------------------------------------------------------- public API --
 
@@ -665,20 +772,61 @@ class SubtaskOrchestrator:
                 subtask, chain_context, role_override_tools=_role_tools
             )
 
+        # Write the builder/planner/commander sidechain BEFORE running gates, so each
+        # gate gets its own isolated trace file (fixes pre-existing overwrite bug).
+        self._write_sidechain(subtask_index, role)
+
         # ── Auto-tester gate: run inline verification after every builder phase ──
+        tester_summary: Dict = {}
         if role == "builder" and artifact.status in ("completed", "partial"):
             tester_summary = self._run_inline_tester(artifact, chain_context, subtask_index)
             if tester_summary.get("failed", 0) > 0 or not tester_summary.get("success", True):
                 artifact.notes.append(
                     f"Tester gate detected issues: {tester_summary.get('summary', '')[:200]}"
                 )
+                if tester_summary.get("contract_failed"):
+                    artifact.notes.append(
+                        f"Contract tests failed: {tester_summary['contract_failed']}"
+                    )
                 artifact.status = "partial"
                 print(f"  ⚠️  Tester gate: issues detected — marked phase as partial")
             else:
                 print(f"  ✅ Tester gate: all checks passed")
+            # Separate sidechain file for tester trace
+            self._write_sidechain(subtask_index, "tester")
 
-        # ── Sidechain transcript: write full trace to disk, zero out in artifact ──
-        self._write_sidechain(subtask_index, role)
+        # ── Reconciler gate: only after builder phases that didn't hard-fail ──
+        _reconciler_on = os.getenv("AGENT_RECONCILER", "1") != "0"
+        if _reconciler_on and role == "builder" and artifact.status != "failed":
+            builder_iters = int(subtask.get("max_iterations", 25))
+            rec_budget = max(10, builder_iters // 3)
+            # PR3 — integration-shaped tester failures get more reconciler budget
+            if tester_summary.get("needs_reconciler"):
+                rec_budget = max(rec_budget, builder_iters // 2)
+                print(f"  ⬆️  Reconciler budget boosted to {rec_budget} (integration failure detected)")
+            # PR2 — active dep graph: prepend queued reverify files so they get re-checked first
+            phase_files = list(artifact.files_created) + list(artifact.files_modified)
+            reverify = [f for f in self._pending_reverify_set if f not in phase_files]
+            files_for_rec = reverify + phase_files if reverify else None
+            if reverify:
+                print(f"  🔁 Active dep-graph: re-verifying {len(reverify)} dependent file(s)")
+            rec_summary = self._run_inline_reconciler(
+                artifact, chain_context, subtask_index,
+                budget=rec_budget, scope="phase",
+                files_override=files_for_rec,
+            )
+            # Clear the reverify queue — consumed by this gate
+            self._pending_reverify_set.clear()
+            if rec_summary.get("patched_count", 0) > 0 or rec_summary.get("arch_updated"):
+                artifact.notes.append(
+                    f"Reconciler: {rec_summary.get('summary', '')[:200]}"
+                )
+            self._write_sidechain(subtask_index, "reconciler")
+
+        # PR2 — record structured lesson on partial/failed phases
+        self._record_role_lesson(role, artifact, chain_context)
+        # PR2 — dump ownership map sidecar for audit
+        self._write_ownership_sidecar(subtask_index)
 
         print(f"\n✅ SubtaskOrchestrator phase {subtask_index} [{role}] done: {artifact.status}")
         return artifact
@@ -696,6 +844,10 @@ class SubtaskOrchestrator:
         # 1. Decompose subtask into micro-tasks
         micro_tasks = self._decompose_to_micro_tasks(subtask_instruction, chain_context)
         print(f"  📋 {len(micro_tasks)} micro-tasks planned")
+
+        # PR2 — inject role-scoped lessons before spawning minions
+        role = subtask.get("role", "builder")
+        self._inject_role_lessons(role, chain_context)
 
         micro_task_reports: List[Dict] = []
         all_files_created: List[str] = []
@@ -795,6 +947,14 @@ class SubtaskOrchestrator:
         summary_parts = [r.get("finish_summary", "") for r in micro_task_reports if r.get("finish_summary")]
         summary = " | ".join(summary_parts[:3])[:500] or f"Phase {subtask_index} complete"
 
+        # PR2 — record file ownership + enqueue dependents for next reconciler gate
+        own_warnings = self._record_ownership(
+            all_files_created, all_files_modified, role, subtask_index,
+        )
+        if own_warnings:
+            all_notes.extend(own_warnings)
+        self._update_reverify_set(all_files_created + all_files_modified)
+
         return ImplementationArtifact(
             subtask_index=subtask_index,
             subtask_instruction=subtask_instruction,
@@ -809,6 +969,178 @@ class SubtaskOrchestrator:
         )
 
     # ---------------------------------------------------- private helpers --
+
+    # ---------------------------------------------------- PR2 bookkeeping --
+
+    def _record_ownership(
+        self,
+        created: List[str],
+        modified: List[str],
+        role: str,
+        phase: int,
+    ) -> List[str]:
+        """Update file-ownership map and return a list of cross-phase-edit warnings
+        (strings) for patches that modified files owned by other roles/phases.
+        """
+        if os.getenv("AGENT_FILE_OWNERSHIP", "1") == "0":
+            return []
+        warnings: List[str] = []
+        for p in created:
+            if p and p not in self._file_ownership:
+                self._file_ownership[p] = {
+                    "owner_role": role,
+                    "phase_created": phase,
+                    "last_modified_phase": phase,
+                }
+        for p in modified:
+            if not p:
+                continue
+            record = self._file_ownership.get(p)
+            if record and record["owner_role"] != role and record["phase_created"] < phase:
+                warnings.append(
+                    f"⚠️ Cross-phase edit: {p} (owned by {record['owner_role']} from "
+                    f"phase {record['phase_created']}, patched by {role} in phase {phase})"
+                )
+            # Still update last_modified_phase even if not owned here
+            if record:
+                record["last_modified_phase"] = phase
+            else:
+                # File we didn't know about — treat this phase as owner
+                self._file_ownership[p] = {
+                    "owner_role": role,
+                    "phase_created": phase,
+                    "last_modified_phase": phase,
+                }
+        return warnings
+
+    def _update_reverify_set(self, changed_files: List[str]) -> None:
+        """Active dep-graph reverify: record files that depend on any of the changed
+        files, so the next reconciler gate can re-check them first.
+        """
+        if os.getenv("AGENT_DEP_GRAPH_ACTIVE", "1") == "0":
+            return
+        try:
+            import dep_graph as _dep
+        except ImportError:
+            return
+        known = list(self._file_ownership.keys())
+        graph = _dep.build_graph(known)
+        affected = _dep.files_affected_by(set(changed_files), graph)
+        if affected:
+            self._pending_reverify_set.update(affected)
+
+    def _write_ownership_sidecar(self, subtask_index: int) -> None:
+        """Dump current ownership map to sidechain dir alongside the phase transcript."""
+        try:
+            os.makedirs(SIDECHAIN_DIR, exist_ok=True)
+            ts = int(time.time())
+            fpath = os.path.join(
+                SIDECHAIN_DIR, f"subtask_{subtask_index:02d}_{ts}.ownership.json"
+            )
+            with open(fpath, "w") as f:
+                json.dump(self._file_ownership, f, indent=2)
+        except Exception:
+            pass
+
+    # ------------------------------------------------- PR2 role-memory I/O --
+
+    def _inject_role_lessons(self, role: str, chain_context: Dict) -> None:
+        """Fetch and pin goal-scoped + role-wide lessons for the current role."""
+        if os.getenv("AGENT_ROLE_MEMORY", "1") == "0":
+            return
+        memory = getattr(self.agent, "memory", None) or getattr(self.agent, "agent_memory", None)
+        if memory is None or not hasattr(memory, "list_context"):
+            return
+        try:
+            import role_lessons
+        except ImportError:
+            return
+        goal = chain_context.get("goal", "")
+        gh = role_lessons.goal_hash(goal)
+        try:
+            rows = memory.list_context(prefix=f"lesson_{role}_")
+        except Exception:
+            return
+        lessons: List[Dict] = []
+        for r in rows:
+            if r.get("agent") and r.get("agent") != role:
+                continue
+            try:
+                L = json.loads(r.get("value") or "{}")
+            except Exception:
+                continue
+            # Prefer goal-scoped, fall back to cross-goal shared patterns
+            if L.get("goal_hash") in (gh, None, ""):
+                lessons.append(L)
+        # If we got few goal-scoped, supplement with the highest-confidence shared patterns
+        if len(lessons) < 3:
+            for r in rows:
+                if r.get("agent") and r.get("agent") != role:
+                    continue
+                try:
+                    L = json.loads(r.get("value") or "{}")
+                except Exception:
+                    continue
+                if L.get("goal_hash") != gh and L.get("pattern") != "other":
+                    lessons.append(L)
+        if not lessons:
+            return
+        msg = role_lessons.format_for_prompt(lessons, max_items=5)
+        if not msg:
+            return
+        try:
+            # Pin under a role-specific slot so it updates in place across calls
+            self.agent._update_pinned(f"role_lessons_{role}",
+                                      {"role": "system", "content": msg})
+        except Exception:
+            pass
+
+    def _record_role_lesson(
+        self,
+        role: str,
+        artifact: "ImplementationArtifact",
+        chain_context: Dict,
+    ) -> None:
+        """After a partial/failed phase, extract a structured lesson and merge into memory."""
+        if os.getenv("AGENT_ROLE_MEMORY", "1") == "0":
+            return
+        if artifact.status not in ("partial", "failed"):
+            return
+        memory = getattr(self.agent, "memory", None) or getattr(self.agent, "agent_memory", None)
+        if memory is None or not hasattr(memory, "set_context"):
+            return
+        try:
+            import role_lessons
+        except ImportError:
+            return
+        summary = artifact.summary or ""
+        notes = list(artifact.notes or [])
+        goal = chain_context.get("goal", "")
+        lesson = role_lessons.extract_lesson(
+            summary, notes,
+            role=role,
+            source_phase=artifact.subtask_index,
+            goal=goal,
+        )
+        if not lesson:
+            return
+        pattern = lesson["pattern"]
+        gh = lesson["goal_hash"]
+        key = f"lesson_{role}_{pattern}_{gh}"
+        try:
+            existing_raw = memory.get_context(key)
+            if existing_raw:
+                try:
+                    existing = json.loads(existing_raw)
+                    lesson = role_lessons.merge_lesson(existing, lesson)
+                except Exception:
+                    pass
+            memory.set_context(
+                key, json.dumps(lesson),
+                agent_id=role, ttl=86400 * 7,
+            )
+        except Exception:
+            pass
 
     def _is_single_file_task(self, instruction: str) -> bool:
         """
@@ -831,6 +1163,9 @@ class SubtaskOrchestrator:
         role = subtask.get("role", "builder")
 
         print(f"  🎭 Role={role} — single minion (budget={budget})")
+
+        # PR2 — inject role-scoped lessons before spawning minion
+        self._inject_role_lessons(role, chain_context)
 
         # Build the prompt using _build_minion_prompt, then prepend role's system prefix
         mt_type = "code" if role in ("planner", "builder") else "command"
@@ -872,6 +1207,15 @@ class SubtaskOrchestrator:
                 if p and p not in files_modified:
                     files_modified.append(p)
 
+        # PR2 — record file ownership + enqueue dependents for next reconciler gate
+        own_notes: List[str] = []
+        own_warnings = self._record_ownership(
+            files_created, files_modified, role, subtask_index,
+        )
+        if own_warnings:
+            own_notes.extend(own_warnings)
+        self._update_reverify_set(files_created + files_modified)
+
         return ImplementationArtifact(
             subtask_index=subtask_index,
             subtask_instruction=subtask_instruction,
@@ -879,6 +1223,7 @@ class SubtaskOrchestrator:
             summary=finish_summary[:500] or f"Phase {subtask_index} ({role}) complete",
             files_created=files_created,
             files_modified=files_modified,
+            notes=own_notes,
             micro_task_reports=[{
                 "micro_task_index": 0,
                 "type": mt_type,
@@ -928,15 +1273,41 @@ class SubtaskOrchestrator:
             check_cmds.append(f"{_py} -m py_compile {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
         for f in js_files[:3]:
             check_cmds.append(f"node --check {f} && echo 'OK: {f}' || echo 'FAIL: {f}'")
-        if not check_cmds:
+
+        # PR3 — spec-driven contract tests: regenerate from latest ARCH.json and run pytest
+        contract_test_cmds: List[str] = []
+        contract_on = os.getenv("AGENT_CONTRACT_TESTS", "1") != "0"
+        happy_on = os.getenv("AGENT_HAPPY_PATH_TESTS", "1") != "0"
+        workspace = self._extract_workspace(chain_context)
+        if contract_on and workspace:
+            arch_path = self._guess_arch_path(chain_context)
+            if arch_path and os.path.exists(arch_path):
+                try:
+                    import arch_schema as _as
+                    import contract_test_template as _ctt
+                    arch_data = _as.load_arch(arch_path)
+                    emitted = _ctt.emit_all(arch_data, workspace)
+                    print(f"  📝 Contract tests regenerated: {list(emitted.keys())}")
+                    for name, tpath in emitted.items():
+                        if name == "happy_path" and not happy_on:
+                            continue
+                        contract_test_cmds.append(
+                            f"{_py} -m pytest {tpath} -x --tb=short -q 2>&1 | tail -15 "
+                            f"&& echo 'CONTRACT_OK: {name}' || echo 'CONTRACT_FAIL: {name}'"
+                        )
+                except Exception as _e:
+                    print(f"  ⚠️  Contract-test emit failed: {_e}")
+
+        if not check_cmds and not contract_test_cmds:
             return {"success": True, "failed": 0, "summary": "no .py/.js files to check"}
 
-        all_cmds = install_cmds + check_cmds
+        all_cmds = install_cmds + check_cmds + contract_test_cmds
         tester_instruction = (
-            f"Run dependency install then syntax checks for files created in phase {subtask_index}.\n"
-            "Run each command in order and report PASS or FAIL for each syntax check:\n"
+            f"Run dependency install, syntax checks, and contract tests for phase {subtask_index}.\n"
+            "Run each command in order and report PASS or FAIL for each check:\n"
             + "\n".join(f"  {cmd}" for cmd in all_cmds)
-            + "\n\nfinish() with test_results summary. Set success=false if any syntax check FAILs."
+            + "\n\nfinish() with test_results summary. Set success=false if any syntax "
+              "check FAILs or CONTRACT_FAIL appears."
         )
 
         tester_role_cfg = ROLES["tester"]
@@ -959,21 +1330,165 @@ class SubtaskOrchestrator:
         )
 
         summary = result.get("finish_summary", "")
-        failed_count = summary.lower().count("fail") if summary else 0
+        low = (summary or "").lower()
+        # Per-suite parsing: CONTRACT_FAIL/OK markers, plus "FAIL:" for syntax checks
+        contract_failed = [m for m in ("routes", "models", "happy_path")
+                           if f"contract_fail: {m}" in low]
+        contract_passed = [m for m in ("routes", "models", "happy_path")
+                           if f"contract_ok: {m}" in low]
+        syntax_fails = low.count("fail:")
+        # Integration-shaped failures (import/attribute errors) warrant reconciler follow-up
+        needs_reconciler = bool(_re.search(
+            r"(importerror|modulenotfounderror|attributeerror|cannot import)",
+            low,
+        ))
+        total_failed = syntax_fails + len(contract_failed)
         return {
-            "success": result.get("success", False),
-            "failed": failed_count,
-            "summary": summary[:300],
+            "success": result.get("success", False) and total_failed == 0,
+            "failed": total_failed,
+            "summary": summary[:400],
+            "contract_failed": contract_failed,
+            "contract_passed": contract_passed,
+            "syntax_fails": syntax_fails,
+            "needs_reconciler": needs_reconciler,
         }
 
-    def _write_sidechain(self, subtask_index: int, role: str) -> None:
+    def _run_inline_reconciler(
+        self,
+        artifact: "ImplementationArtifact",
+        chain_context: Dict,
+        subtask_index: int,
+        budget: int = 12,
+        scope: str = "phase",
+        files_override: Optional[List[str]] = None,
+    ) -> Dict:
+        """Run a deterministic static-check sweep, then a reconciler minion if issues found.
+
+        Returns {"patched_count": int, "arch_updated": bool, "summary": str,
+                 "found_issues": bool}.
+        """
+        try:
+            import reconciler_checks as rc
+        except ImportError as e:
+            return {"patched_count": 0, "arch_updated": False,
+                    "summary": f"reconciler_checks unavailable: {e}",
+                    "found_issues": False}
+
+        # Files to analyse
+        if files_override is not None:
+            files = list(files_override)
+        else:
+            files = list(artifact.files_created) + list(artifact.files_modified)
+
+        # Load ARCH.json from workspace if available
+        arch: Optional[Dict] = None
+        arch_path = self._guess_arch_path(chain_context)
+        if arch_path and os.path.exists(arch_path):
+            try:
+                import arch_schema
+                arch = arch_schema.load_arch(arch_path)
+            except Exception:
+                arch = None
+
+        findings = rc.run_all(files, arch)
+        if not rc.has_any_issue(findings):
+            return {"patched_count": 0, "arch_updated": False,
+                    "summary": "no drift detected", "found_issues": False}
+
+        classification = rc.classify_violations(findings)
+        findings_prompt = rc.format_findings_for_prompt(findings, classification, max_items=10)
+
+        direction_hint = []
+        if classification.get("patch_code"):
+            direction_hint.append(
+                f"PATCH CODE: {len(classification['patch_code'])} code-side fixes needed."
+            )
+        if classification.get("update_arch"):
+            direction_hint.append(
+                f"UPDATE ARCH: {len(classification['update_arch'])} ARCH.json entries to update "
+                f"(code has evolved past contract)."
+            )
+        if classification.get("report_only"):
+            direction_hint.append(
+                f"REPORT: {len(classification['report_only'])} ambiguous items — do not auto-fix."
+            )
+        direction = "\n".join(direction_hint) or "Minor drift only."
+
+        rec_role_cfg = ROLES["reconciler"]
+        arch_hint = f"ARCH.json path: {arch_path}\n" if arch_path else ""
+        work_order = (
+            f"Reconcile drift between ARCH and code for phase {subtask_index} [{scope}].\n"
+            f"{arch_hint}"
+            f"DIRECTION:\n{direction}\n\n"
+            f"FINDINGS:\n{findings_prompt}\n\n"
+            f"Resolve each item. Use patch_file or create_file on code for patch_code items;\n"
+            f"rewrite ARCH.json via create_file for update_arch items. For report_only, just note.\n"
+            f"Call validate_arch after any ARCH.json rewrite. finish() with:\n"
+            f"  'PATCHED: N | ARCH_UPDATED: True/False | <summary>'"
+        )
+        base_prompt = self._build_minion_prompt(
+            work_order=work_order,
+            chain_context=chain_context,
+            previous_reports=[],
+            file_scope=files[:10],
+            mt_type="code",
+        )
+        full_prompt = f"{rec_role_cfg['system_prefix']}\n\n{base_prompt}"
+
+        print(f"\n  🔧 Reconciler gate [{scope}]: {sum(len(v) for v in classification.values())} "
+              f"findings, budget={budget}")
+        self.agent.react_trace = []
+        self.agent.tool_registry.reset_phase_state()
+        result = self.agent.run_react(
+            instruction=full_prompt,
+            tool_whitelist=rec_role_cfg["tools"],
+            max_iterations=budget,
+        )
+        summary = result.get("finish_summary", "")
+        # Parse "PATCHED: N" / "ARCH_UPDATED: True" from the summary
+        patched_count = 0
+        m = _re.search(r'PATCHED:\s*(\d+)', summary or "")
+        if m:
+            try:
+                patched_count = int(m.group(1))
+            except ValueError:
+                patched_count = 0
+        arch_updated = bool(_re.search(r'ARCH_UPDATED:\s*True', summary or "", _re.IGNORECASE))
+        return {
+            "patched_count": patched_count,
+            "arch_updated": arch_updated,
+            "summary": summary[:400],
+            "found_issues": True,
+        }
+
+    def _extract_workspace(self, chain_context: Dict) -> str:
+        """Extract workspace dir from chain goal (e.g. 'Deploy to /path/' → /path)."""
+        goal = chain_context.get("goal", "")
+        m = _re.search(r'workspace[:\s]+(/[^\s,."\']+)', goal, _re.IGNORECASE)
+        if not m:
+            m = _re.search(r'(?:deploy to|in|at)\s+(/[^\s,."\']+)', goal, _re.IGNORECASE)
+        return m.group(1).rstrip('/') if m else ""
+
+    def _guess_arch_path(self, chain_context: Dict) -> Optional[str]:
+        """Infer ARCH.json location from goal workspace (same logic as decomposer)."""
+        ws = self._extract_workspace(chain_context)
+        fname = "ARCH.json" if os.getenv("AGENT_ARCH_JSON", "1") != "0" else "ARCH.md"
+        if ws:
+            return f"{ws}/DOCS/{fname}"
+        # Fall back to cwd-relative
+        return f"DOCS/{fname}"
+
+    def _write_sidechain(self, subtask_index: int, role_label: str) -> None:
         """Write the agent's react_trace to a sidechain jsonl file and zero it out.
         This keeps the chain parent context free of full minion traces.
+
+        role_label differentiates builder/tester/reconciler traces within one phase
+        so they don't overwrite each other (was a pre-existing bug).
         """
         try:
             os.makedirs(SIDECHAIN_DIR, exist_ok=True)
             ts = int(time.time())
-            fname = f"subtask_{subtask_index:02d}_{role}_{ts}.jsonl"
+            fname = f"subtask_{subtask_index:02d}_{role_label}_{ts}.jsonl"
             fpath = os.path.join(SIDECHAIN_DIR, fname)
             with open(fpath, "w") as f:
                 for entry in self.agent.react_trace:
@@ -1097,11 +1612,27 @@ Rules:
 Return ONLY the JSON array, no prose."""
 
         system = "You are a micro-task decomposer. Return only a JSON array. No prose."
+        DECOMP_MODEL = "qwen3-coder:30b"
         try:
             raw = self.agent._call_model_oneshot(
-                self.agent.fast_model, prompt, system, timeout=120
+                DECOMP_MODEL, prompt, system, timeout=180
             )
-            micro_tasks = self.agent.extract_json(raw)
+            micro_tasks = None
+            try:
+                parsed = json.loads(raw.strip())
+                if isinstance(parsed, list):
+                    micro_tasks = parsed
+            except Exception:
+                pass
+            if micro_tasks is None:
+                m = _re.search(r'\[\s*\{.*\}\s*\]', raw, _re.DOTALL)
+                if m:
+                    try:
+                        micro_tasks = json.loads(m.group(0))
+                    except Exception:
+                        pass
+            if micro_tasks is None:
+                micro_tasks = self.agent.extract_json(raw)
             if micro_tasks and isinstance(micro_tasks, list) and len(micro_tasks) >= 1:
                 for i, mt in enumerate(micro_tasks):
                     mt.setdefault("index", i)
@@ -1172,6 +1703,21 @@ Return ONLY the JSON array, no prose."""
             if file_scope else "No specific file scope restriction"
         )
 
+        # PR2 — soft cross-role nudge: list files owned by prior phases (code tasks only)
+        ownership_nudge = ""
+        if mt_type == "code" and os.getenv("AGENT_FILE_OWNERSHIP", "1") != "0":
+            other_owned = list((self._file_ownership or {}).items())[:8]
+            if other_owned:
+                pairs = [
+                    f"{p} (owned by {meta.get('owner_role')} phase {meta.get('phase_created')})"
+                    for p, meta in other_owned
+                ]
+                ownership_nudge = (
+                    "  - Prefer NOT to edit these files (owned by other phases/roles); "
+                    "if you must, explain why in your finish summary:\n"
+                    + "\n".join(f"      • {x}" for x in pairs) + "\n"
+                )
+
         if mt_type == "code":
             tool_block = (
                 "YOUR ONLY TOOLS (others are HARD-BLOCKED and will error):\n"
@@ -1215,6 +1761,7 @@ Return ONLY the JSON array, no prose."""
             f"CONSTRAINTS:\n"
             f"  - {file_scope_text}\n"
             f"{workspace_constraint}"
+            f"{ownership_nudge}"
             f"  - Budget: 15 iterations — use them efficiently\n"
             f"  - DO NOT start servers or background processes (unless type=command)\n"
             f"  - Call finish() with a clear summary of exactly what you did and any key\n"
@@ -1394,6 +1941,9 @@ class TaskChain:
                 "instruction": st["instruction"],
                 "acceptance_criteria": st.get("acceptance_criteria"),
                 "max_iterations": st.get("max_iterations", 25),
+                "original_max_iterations": st.get(
+                    "original_max_iterations", st.get("max_iterations", 25)
+                ),
                 "estimated_complexity": st.get("estimated_complexity", "medium"),
                 "role": st.get("role", "builder"),
                 "status": "pending",
@@ -1405,6 +1955,11 @@ class TaskChain:
                 "handoff": None,
                 "replan_applied": False,
                 "replan_reason": None,
+                # PR1 — budget rebalancer + convergence bookkeeping
+                "iterations_used": 0,
+                "iterations_donated": 0,
+                "iterations_remaining_after": None,
+                "failure_count": 0,
             })
 
         chain._data = {
@@ -1446,6 +2001,75 @@ class TaskChain:
         """Merge updates into sub-task record and save atomically."""
         self._data["subtasks"][index].update(updates)
         self.save()
+
+    # ---------------------------------------------------------- PR1 budget --
+    _COMPLEXITY_RANK = {"small": 1, "medium": 2, "large": 3}
+
+    def rebalance_budget(self, completed_index: int) -> Dict:
+        """Donate slack iterations from completed tasks to a pending task with highest
+        need. Bias strongly toward tasks with recorded failures so repeat offenders get
+        the help they need (not just the naturally-complex phases).
+
+        Returns a small audit dict for logging.
+        """
+        if os.getenv("AGENT_BUDGET_REBALANCE", "1") == "0":
+            return {"skipped": True, "reason": "flag off"}
+
+        subtasks = self._data.get("subtasks") or []
+        if completed_index >= len(subtasks):
+            return {"skipped": True, "reason": "bad index"}
+
+        # Slack = sum(original - used) for completed successful tasks only
+        completed_ok = [
+            t for t in subtasks[: completed_index + 1]
+            if t.get("status") in ("passed", "completed")
+            and t.get("original_max_iterations") is not None
+        ]
+        slack = 0
+        for t in completed_ok:
+            orig = int(t.get("original_max_iterations") or t.get("max_iterations") or 0)
+            used = int(t.get("iterations_used") or 0)
+            slack += max(0, orig - used)
+        donation = int(slack * 0.5)
+        if donation <= 0:
+            return {"skipped": True, "reason": "no slack"}
+
+        pending = [t for t in subtasks[completed_index + 1:]
+                   if t.get("status") in ("pending", None)]
+        if not pending:
+            return {"skipped": True, "reason": "no pending tasks"}
+
+        def need_score(t: Dict) -> float:
+            complexity = self._COMPLEXITY_RANK.get(
+                t.get("estimated_complexity", "medium"), 2
+            )
+            instr = (t.get("instruction") or "").lower()
+            # Rough proxy for how many files this phase will touch — count path-shaped tokens
+            file_factor = max(1, len(_re.findall(r'/[\w./-]+\.\w{1,5}', instr)))
+            integration = any(k in instr for k in
+                              ("server", "migration", "integration", "deploy"))
+            integration_factor = 1.0 if integration else 0.7
+            failures = int(t.get("failure_count") or 0)
+            # 1.5× multiplier per failure (capped at 6 so it can't explode).
+            # Rationale: we want failing phases to dominate over merely-complex ones.
+            failure_multiplier = 1.5 ** min(failures, 6)
+            return complexity * file_factor * integration_factor * failure_multiplier
+
+        target = max(pending, key=need_score)
+        cap = 2 * int(target.get("original_max_iterations") or target.get("max_iterations", 25))
+        headroom = max(0, cap - int(target.get("max_iterations", 0)))
+        actual_donation = min(donation, headroom)
+        if actual_donation <= 0:
+            return {"skipped": True, "reason": "target at cap"}
+        target["max_iterations"] = int(target.get("max_iterations", 0)) + actual_donation
+        target["iterations_donated"] = int(target.get("iterations_donated", 0)) + actual_donation
+        self.save()
+        return {
+            "donation": actual_donation,
+            "to_index": target.get("index"),
+            "target_score": need_score(target),
+            "slack": slack,
+        }
 
     def update_chain(self, updates: Dict):
         """Merge updates into top-level chain record and save atomically."""
