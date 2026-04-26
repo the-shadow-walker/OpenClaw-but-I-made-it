@@ -44,3 +44,12 @@ Stanza format:
 - need from cmd: nothing — _meta table appears on first swarm import; uses CREATE IF NOT EXISTS so harmless
 - blocking: nothing
 - next: Chunk 2 — sidechain.py + base_agent save_context/restore_context hooks
+
+## 2026-04-26T22:08 — Swarm Claude
+- shipped: sidechain.py + base_agent save/restore/sidechain hooks (commit pending push)
+  - SidechainWriter line-buffered JSONL, gated on SWARM_AS_SUBAGENT=1
+  - BaseAgent.save_context / restore_context land in ~/.agent_bin/sessions/
+  - base_agent timeout 120s → 300s for bigger models
+- need from cmd: nothing
+- blocking: nothing
+- next: Chunk 3 — SubAgentInvoker + /subagent/<role> route (will need service restart)
