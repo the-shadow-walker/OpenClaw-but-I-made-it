@@ -59,6 +59,14 @@ except ImportError:
     _HAS_REACT = False
     print("⚠️  OrchestratorV3: react_solver not available")
 
+# ── Sidechain JSONL (Chunk 6) — only writes when SWARM_AS_SUBAGENT=1 ────────
+try:
+    from sidechain import make_sidechain as _make_sidechain  # type: ignore
+    _HAS_SIDECHAIN = True
+except ImportError:
+    _HAS_SIDECHAIN = False
+    _make_sidechain = None  # type: ignore
+
 # ── Search (for targeted HYBRID research) ────────────────────────────────────
 try:
     from flexible_search_agent import FlexibleSearchAgent
@@ -239,6 +247,17 @@ class OrchestratorV3:
 
         def _elapsed() -> str:
             return f"{time.time() - t0:.1f}s"
+
+        # Chunk 6 — open one sidechain JSONL for this whole solve.
+        # make_sidechain() returns None unless SWARM_AS_SUBAGENT=1, so direct
+        # /query callers don't pay the disk cost.
+        _sc = None
+        if _HAS_SIDECHAIN and _make_sidechain is not None:
+            try:
+                _sc = _make_sidechain(role="react", job_id=job_id or "no_job")
+            except Exception as _e:
+                _sc = None
+                print(f"⚠️  sidechain make failed: {_e}")
 
         # ── Phase 0B: Generate SolvePlan ─────────────────────────────────
         print(f"\n{_sep}")
@@ -455,6 +474,7 @@ class OrchestratorV3:
                         research_context=ctx_with_manifest,
                         searxng_url=self.searxng_url,
                         manifest_values=global_manifest_float,
+                        sidechain=_sc,
                     )
                     tasks.append(solver.solve())
                 else:
@@ -677,6 +697,7 @@ class OrchestratorV3:
                         research_context=manifest_block + research_contexts.get(sp_id, ""),
                         searxng_url=self.searxng_url,
                         manifest_values=global_manifest_float,
+                        sidechain=_sc,
                     )
                     retry_solver._history.append({
                         "role": "user",
@@ -755,6 +776,7 @@ class OrchestratorV3:
                     research_context=audit_block + (ctx or ""),
                     searxng_url=self.searxng_url,
                     manifest_values=audit_manifest_float,
+                    sidechain=_sc,
                 )
                 audit_solver._history.append({
                     "role": "user",
@@ -842,6 +864,7 @@ class OrchestratorV3:
                     research_context=gate_block + (_ctx or ""),
                     searxng_url=self.searxng_url,
                     manifest_values=gate_manifest_float,
+                    sidechain=_sc,
                 )
                 _gs._history.append({"role": "user", "content": (
                     f"⛔ DOMAIN GATE: This {_cat} sub-problem was NOT solved in the "

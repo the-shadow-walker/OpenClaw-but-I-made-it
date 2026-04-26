@@ -438,12 +438,15 @@ class ReactSolver:
         research_context: str = "",
         searxng_url: Optional[str] = None,
         manifest_values: Optional[Dict[str, Any]] = None,
+        sidechain: Optional[Any] = None,
     ):
         self.sub_problem = sub_problem
         self.plan = plan
         self.research_context = research_context
         self.searxng_url = searxng_url or os.getenv("SEARXNG_URL", "http://localhost:8080")
         self._manifest_values: Dict[str, Any] = manifest_values or {}  # keys that are locked from prior SPs
+        # Chunk 6 — sidechain JSONL writer (only set when SWARM_AS_SUBAGENT=1)
+        self._sidechain = sidechain
 
         # Build conversation history: system + alternating user/assistant
         self._system = self._build_system_prompt()
@@ -509,6 +512,7 @@ class ReactSolver:
         for turn in range(1, self.MAX_TURNS + 1):
             self._turn = turn
             print(f"  [{sp.id}] Turn {turn}/{self.MAX_TURNS}", end=" ", flush=True)
+            self._sc_event("turn_start", turn=turn, history_len=len(self._history))
 
             # Check timeout — 30 min hard cap per sub-problem
             # (deepseek-r1:14b takes ~3-4 min per turn on this hardware)
@@ -536,13 +540,25 @@ class ReactSolver:
                 pruned_chars  = sum(len(m["content"]) for m in middle)
 
                 if SUMMARY_PRUNE_ENABLED and middle:
+                    # Stage 2.5 — verbatim extractor: pull code blocks / abs
+                    # paths / URLs out of the middle messages so they survive
+                    # the LLM summarisation byte-identical (contract §6).
+                    verbatim_block, residual_middle = self._extract_verbatim(middle)
                     try:
-                        summary = await self._summarize_failed_attempts(middle, sp)
+                        summary = await self._summarize_failed_attempts(
+                            residual_middle if residual_middle else middle, sp
+                        )
                     except Exception as _e:
                         summary = ""
                         print(f"  ✂️  [{sp.id}] T{turn} blind-prune (summary failed: {_e})")
                     if summary:
-                        synthetic = [{
+                        synthetic: List[Dict[str, str]] = []
+                        if verbatim_block:
+                            synthetic.append({
+                                "role": "user",
+                                "content": verbatim_block[:8000],   # cap to avoid runaway
+                            })
+                        synthetic.append({
                             "role": "user",
                             "content": (
                                 f"📝 PRIOR ATTEMPTS RECAP (dropped {pruned_count} turns):\n"
@@ -550,17 +566,41 @@ class ReactSolver:
                                 f"🎯 DIRECTIVE: Try a fundamentally different approach. "
                                 f"Do NOT repeat patterns listed above."
                             ),
-                        }]
+                        })
                         self._history = seed_msg_list + synthetic + last_four
+                        _vb_n = len(verbatim_block) if verbatim_block else 0
                         print(f"  \u2702\ufe0f  [{sp.id}] T{turn} summary-prune: "
-                              f"{pruned_count} turns → 1 summary ({len(summary)} chars)")
+                              f"{pruned_count} turns → 1 summary ({len(summary)} chars) "
+                              f"+ verbatim ({_vb_n} chars preserved)")
                         self._log(f"[SUMMARY PRUNE at T{turn}: {pruned_count} turns compressed]\n{summary}")
+                        self._sc_event(
+                            "history_compress",
+                            turn=turn,
+                            dropped_turns=pruned_count,
+                            summary_chars=len(summary),
+                            verbatim_chars=_vb_n,
+                        )
                     else:
-                        # Summariser failed — fall back to blind prune
-                        self._history = seed_msg_list + last_four
+                        # Summariser failed — fall back to blind prune (still
+                        # try to keep the verbatim block so URLs/paths/code
+                        # survive even when the LLM is down).
+                        if verbatim_block:
+                            self._history = seed_msg_list + [{
+                                "role": "user",
+                                "content": verbatim_block[:8000],
+                            }] + last_four
+                        else:
+                            self._history = seed_msg_list + last_four
                         print(f"  \u2702\ufe0f  [{sp.id}] T{turn} blind-prune (no summary): "
                               f"dropped {pruned_count} turns ({pruned_chars//1000}k chars)")
                         self._log(f"[BLIND PRUNE at T{turn}: dropped {pruned_count} turns / {pruned_chars} chars]")
+                        self._sc_event(
+                            "history_compress",
+                            turn=turn,
+                            dropped_turns=pruned_count,
+                            mode="blind",
+                            verbatim_chars=len(verbatim_block) if verbatim_block else 0,
+                        )
                 else:
                     # Kill-switch disabled OR no middle to summarise — original behaviour
                     self._history = seed_msg_list + last_four
@@ -676,6 +716,12 @@ class ReactSolver:
                 # If no RESULT: lines found, try extracting from think block
                 if not result.results:
                     result = self._extract_from_think(response, result, turn)
+                self._sc_event(
+                    "final_answer",
+                    turn=turn,
+                    status=result.status,
+                    n_results=len(result.results) if result.results else 0,
+                )
 
                 # Swarm 3.13 — Pydantic Residual Lock (solver-side)
                 # Re-execute CHECK expressions in an isolated subprocess to
@@ -999,6 +1045,7 @@ class ReactSolver:
         # Extract code from markdown fences if present
         m = re.search(r"```(?:python)?\s*\n(.*?)\n```", code_text, re.DOTALL)
         code = m.group(1) if m else code_text.strip()
+        self._sc_event("run_code_start", turn=self._turn, code_len=len(code))
 
         # Force-inject SP given values as constants so model can't assume wrong params
         if self.sub_problem.inputs:
@@ -1298,6 +1345,93 @@ class ReactSolver:
             plan_notes=_safe(self.plan.notes[:500] if self.plan else ""),
             research_context_block=_safe(ctx_block),
         )
+
+    # ── Sidechain helper (Chunk 6) ────────────────────────────────────────────
+
+    def _sc_event(self, event_type: str, **fields: Any) -> None:
+        """Emit one event to the attached sidechain (no-op if absent)."""
+        sc = getattr(self, "_sidechain", None)
+        if sc is None:
+            return
+        try:
+            sc.write_event(event_type, sp_id=self.sub_problem.id, **fields)
+        except Exception:
+            pass
+
+    # ── Verbatim extractor for compression (Chunk 6 — Stage 2.5) ──────────────
+
+    @staticmethod
+    def _extract_verbatim(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, str]]]:
+        """Pull fenced code blocks, absolute paths, and URLs out of `messages`.
+
+        Returns (verbatim_block, residual_messages):
+          - verbatim_block: a single string with deduped, in-order extractions
+            wrapped in a [VERBATIM PRESERVED] header. Empty string when nothing
+            was extracted.
+          - residual_messages: copies of the inputs with extracted spans
+            replaced by `[…code…]` / `[…path…]` / `[…url…]` placeholders so
+            the LLM summariser sees a much smaller residue but still knows
+            those spans existed.
+
+        Pure / deterministic. Runs in a few ms on typical ReAct histories.
+        """
+        if not messages:
+            return "", []
+
+        code_pat = re.compile(r"```[\s\S]+?```")
+        # Absolute paths: must start with / and continue through allowed chars
+        path_pat = re.compile(r"(?:(?<=^)|(?<=[\s'\"(]))(/[A-Za-z0-9_./~-]+)")
+        url_pat  = re.compile(r"https?://[^\s'\"<>)\]]+")
+
+        seen: set = set()
+        ordered: List[Tuple[str, str]] = []   # (kind, text)
+
+        residual_msgs: List[Dict[str, str]] = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if not content:
+                residual_msgs.append(dict(msg))
+                continue
+
+            # Code blocks first (so paths/URLs inside code aren't double-counted)
+            def _grab_code(m: "re.Match") -> str:
+                blk = m.group(0)
+                if blk not in seen:
+                    seen.add(blk)
+                    ordered.append(("code", blk))
+                return "[…code…]"
+            stripped = code_pat.sub(_grab_code, content)
+
+            def _grab_path(m: "re.Match") -> str:
+                p = m.group(1)
+                if p not in seen and len(p) >= 4:
+                    seen.add(p)
+                    ordered.append(("path", p))
+                return "[…path…]"
+            stripped = path_pat.sub(_grab_path, stripped)
+
+            def _grab_url(m: "re.Match") -> str:
+                u = m.group(0)
+                if u not in seen:
+                    seen.add(u)
+                    ordered.append(("url", u))
+                return "[…url…]"
+            stripped = url_pat.sub(_grab_url, stripped)
+
+            residual_msgs.append({"role": msg.get("role", "user"), "content": stripped})
+
+        if not ordered:
+            return "", residual_msgs
+
+        out_parts: List[str] = ["[VERBATIM PRESERVED — byte-identical to original]"]
+        for kind, text in ordered:
+            if kind == "code":
+                out_parts.append(text)
+            elif kind == "path":
+                out_parts.append(f"PATH: {text}")
+            else:
+                out_parts.append(f"URL: {text}")
+        return "\n".join(out_parts), residual_msgs
 
     def _parse_action(self, text: str) -> Optional[Tuple[str, str]]:
         """
