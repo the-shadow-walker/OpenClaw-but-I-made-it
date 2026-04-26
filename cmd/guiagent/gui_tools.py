@@ -48,6 +48,14 @@ GUI_TOOL_SCHEMAS = {
     "save_profile": '  save_profile  — {"name": str, "site": str, "task": str, "steps": str, "notes": str}  # document a repeatable task flow for future runs',
     "sequence":     '  sequence      — {"steps": [{"tool":"click","args":{"x":3.1,"y":5.2}}, ...]} or {"macro": "NAME"}  # execute multiple tools in ONE turn',
     "save_macro":   '  save_macro    — {"name": str, "description": str, "steps": [...]}  # cache an action sequence for instant replay next run',
+    # ---- session continuity / cross-agent delegation ----
+    "code_task":    '  code_task     — {"task": str, "max_iterations": int (default 25), "context_keys": [str] (optional)}\n'
+                    '                  # Delegate a code/file/shell task to the CMD agent (subordinate). Snapshots GUI state,\n'
+                    '                  # runs CMD ReAct in isolation, merges files-created back, pins ONE clean result.',
+    "publish_context": '  publish_context — {"key": str, "value": str, "ttl_hours": int (default 24)}\n'
+                       '                  # Write to the central shared_context board so cmd/swarm agents can read it.',
+    "read_context": '  read_context  — {"key": str} OR {"prefix": str, "limit": int (default 10)}\n'
+                    '                  # Read from the central shared_context board.',
     "finish":       '  finish        — {"summary": str, "success": bool}',
 }
 
@@ -65,6 +73,8 @@ class GUIToolRegistry(ToolRegistry):
         "plan", "cmd", "screenshot", "zoom", "click", "double_click", "right_click",
         "type", "key", "scroll", "drag", "wait", "note", "save_profile",
         "sequence", "save_macro", "rescan", "finish",
+        # Cross-agent delegation + central context
+        "code_task", "publish_context", "read_context",
     }
 
     NOTES_FILE = os.path.expanduser("~/.agent_bin/gui_agent_notes.md")
@@ -216,6 +226,10 @@ class GUIToolRegistry(ToolRegistry):
             "save_macro":   self._handle_save_macro,
             "rescan":       self._handle_rescan,
             "finish":       self._handle_finish,  # inherited from ToolRegistry
+            # Cross-agent delegation + central context
+            "code_task":       self._handle_code_task,
+            "publish_context": self._handle_gui_publish_context,
+            "read_context":    self._handle_gui_read_context,
         }
         result = handlers[tool](args)
         self._last_tool_called = tool  # track for consecutive-screenshot guard
@@ -887,3 +901,144 @@ class GUIToolRegistry(ToolRegistry):
                 "", {"macro": saved})
         except Exception as e:
             return ToolResult(False, "", f"save_macro failed: {e}", {})
+
+    # ── Cross-agent delegation + central context (GUI side) ──────────────────
+
+    def _handle_code_task(self, args):
+        """Delegate a code/file/shell task to the CMD agent (GUI is parent here).
+
+        Mirrors gui_task in CMD: snapshots GUI parent state, runs CMD ReAct in
+        isolation, merges files-created back, returns ONE clean ToolResult.
+        Sidechain trace is dumped to ~/.agent_bin/sidechains/ — never leaks
+        into GUI conversation history.
+        """
+        try:
+            task = str(args.get("task", "")).strip()
+            if not task:
+                return ToolResult(False, "", "code_task requires 'task'", {})
+            max_iter = int(args.get("max_iterations", 25))
+            context_keys = args.get("context_keys") or []
+
+            # Lazy import to avoid circular dep at module load
+            try:
+                from subagent import SubAgentInvoker
+            except ImportError as e:
+                return ToolResult(False, "",
+                    f"code_task unavailable — SubAgentInvoker missing: {e}", {})
+
+            # GUIToolRegistry has no OllamaCommandAgent parent — build a minimal
+            # one for snapshot/file-merge bookkeeping (degraded parent ok).
+            class _ParentShim:
+                _files_created: list = []
+                _pinned_slot_keys: dict = {}
+                pinned_messages: list = []
+                _current_instruction: str = ""
+                def _update_pinned(self, key, msg):
+                    self._pinned_slot_keys[key] = msg
+                def _refresh_file_manifest_pin(self):
+                    pass
+                def save_context(self, label):
+                    return ""
+
+            shim = _ParentShim()
+            shim._current_instruction = f"GUI-delegated code_task: {task[:200]}"
+
+            invoker = SubAgentInvoker(parent_agent=shim, memory=self.memory)
+            sub_result = invoker.run(
+                target="cmd",
+                task=task,
+                max_iterations=max_iter,
+                context_keys=context_keys,
+            )
+
+            # Track files in GUI notes (so subsequent GUI screenshots can reference them)
+            files = sub_result.files_created or []
+            if files:
+                try:
+                    notes_dir = os.path.dirname(self.NOTES_FILE)
+                    os.makedirs(notes_dir, exist_ok=True)
+                    ts = time.strftime("%Y-%m-%d %H:%M")
+                    with open(self.NOTES_FILE, "a", encoding="utf-8") as f:
+                        f.write(f"\n- [{ts}] code_task delegated → CMD; files: {files}\n")
+                except Exception:
+                    pass
+
+            summary = sub_result.parent_summary or "(no summary)"
+            output = (
+                f"[code_task → CMD] {summary}\n"
+                f"Files created: {files if files else '(none)'}\n"
+                f"Iterations: {sub_result.iterations_used}  Elapsed: {sub_result.elapsed_ms}ms"
+            )
+            return ToolResult(
+                sub_result.success, output,
+                "" if sub_result.success else (sub_result.error or "code_task failed"),
+                {
+                    "delegated_to": "cmd",
+                    "files_created": files,
+                    "sidechain_path": sub_result.sidechain_path,
+                    "snapshot_path": sub_result.snapshot_path,
+                },
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"code_task failed: {e}", {})
+
+    def _handle_gui_publish_context(self, args):
+        """Write a key/value to the central shared_context board (TTL'd)."""
+        try:
+            key = str(args.get("key", "")).strip()
+            value = args.get("value", "")
+            ttl_hours = int(args.get("ttl_hours", 24))
+            if not key:
+                return ToolResult(False, "", "publish_context requires 'key'", {})
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value)
+            else:
+                value = str(value)
+            ttl_seconds = ttl_hours * 3600
+            self.memory.set_context(key, value, agent_id="gui", ttl=ttl_seconds)
+            return ToolResult(
+                True,
+                f"Published context[{key}] (ttl={ttl_hours}h, agent=gui, len={len(value)})",
+                "",
+                {"key": key, "ttl_hours": ttl_hours},
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"publish_context failed: {e}", {})
+
+    def _handle_gui_read_context(self, args):
+        """Read from the central shared_context board (single key OR prefix listing)."""
+        try:
+            key = args.get("key")
+            prefix = args.get("prefix")
+            limit = int(args.get("limit", 10))
+            if key:
+                value = self.memory.get_context(str(key))
+                if value is None:
+                    return ToolResult(False, "", f"no context entry for key '{key}'", {})
+                return ToolResult(
+                    True, f"context[{key}] = {value}", "",
+                    {"key": str(key), "value": value},
+                )
+            if prefix is not None:
+                entries = self.memory.list_context(str(prefix))
+                if not entries:
+                    return ToolResult(
+                        True, f"(no entries with prefix '{prefix}')", "",
+                        {"prefix": str(prefix), "entries": []},
+                    )
+                lines = []
+                for e in entries[:limit]:
+                    val = e.get("value", "")
+                    if len(val) > 200:
+                        val = val[:200] + "…"
+                    lines.append(f"  {e.get('key','?')} [{e.get('agent_id','?')}] = {val}")
+                return ToolResult(
+                    True,
+                    f"context entries with prefix '{prefix}' (showing {len(lines)}/{len(entries)}):\n"
+                    + "\n".join(lines),
+                    "",
+                    {"prefix": str(prefix), "count": len(entries)},
+                )
+            return ToolResult(False, "", "read_context requires 'key' or 'prefix'", {})
+        except Exception as e:
+            return ToolResult(False, "", f"read_context failed: {e}", {})

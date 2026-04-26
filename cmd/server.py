@@ -1923,6 +1923,62 @@ def get_shared_context():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/v1/context', methods=['POST'])
+def post_shared_context():
+    """Publish to the central shared_context board.
+
+    Body: {"key": str, "value": str|json, "agent_id": str (default "external"),
+           "ttl_hours": int (default 24)}
+
+    Used by external services (swarm, blueteam, scripts) that don't go through
+    the tool registry.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        key = data.get('key', '').strip()
+        if not key:
+            return jsonify({'error': "'key' is required"}), 400
+        value = data.get('value')
+        if value is None:
+            return jsonify({'error': "'value' is required"}), 400
+        if not isinstance(value, str):
+            try:
+                value = json.dumps(value)
+            except Exception:
+                value = str(value)
+        agent_id = str(data.get('agent_id', 'external'))[:40] or 'external'
+        ttl_hours = int(data.get('ttl_hours', 24))
+        ttl = max(60, ttl_hours * 3600)
+
+        agent = _get_quick_agent()
+        agent.memory.set_context(key, value, agent_id=agent_id, ttl=ttl)
+        return jsonify({
+            'ok': True,
+            'key': key,
+            'agent_id': agent_id,
+            'ttl_hours': ttl_hours,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/v1/context/<path:key>', methods=['DELETE'])
+def delete_shared_context(key):
+    """Delete a single shared_context entry by key. Useful for clearing stale state."""
+    try:
+        import sqlite3
+        agent = _get_quick_agent()
+        with sqlite3.connect(agent.memory.DB_PATH) as conn:
+            cur = conn.execute(
+                "DELETE FROM shared_context WHERE key = ?", (key,)
+            )
+            conn.commit()
+            deleted = cur.rowcount
+        return jsonify({'ok': True, 'key': key, 'deleted': deleted})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print("=" * 70)
     print(f"🚀 Ollama Command Agent Service  [{SERVICE_VERSION}]")

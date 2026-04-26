@@ -32,6 +32,13 @@ class ToolRegistry:
         "validate_arch",   # PR0: ARCH.json validator (pure, no LLM)
         "get_deps",        # PR2: import dependency graph (pure, no LLM)
         "write_plan",      # Hardening: persists planner/builder task plan markdown
+        # ---- session continuity / cross-agent delegation ----
+        "save_context",    # Snapshot pinned state to ~/.agent_bin/sessions/
+        "restore_context", # Reload a prior snapshot (counterpart to save_context)
+        "publish_context", # Write to central shared_context board
+        "read_context",    # Read from central shared_context board
+        "gui_task",        # Delegate to GUIAgent via SubAgentInvoker
+        "swarm_task",      # Delegate to swarm engineer/math/search via SubAgentInvoker
     }
 
     def __init__(self, safety_validator, search_agent, memory, explain_cb=None,
@@ -61,9 +68,17 @@ class ToolRegistry:
         # write_plan invocations can refresh a pinned "📋 PLAN" slot in the agent's
         # message history. None when running without an agent (tests, etc).
         self._save_plan_cb: Optional[Callable[[str], None]] = None
-        # Optional callback(label: str) -> str — mirrors flat react_tools.py. Used by
-        # gui_task / save_context tools when those are wired in. Safe to leave None.
+        # Optional callback(label: str) -> str — used by save_context tool to
+        # serialize the parent agent's pinned state to disk. Wired by
+        # OllamaCommandAgent. Safe to leave None for unit tests.
         self._save_context_cb: Optional[Callable[[str], str]] = None
+        # Optional callback(path: str) -> bool — counterpart to save_context.
+        # Reloads pinned slots, files manifest, and instruction from a snapshot
+        # file produced by _save_context_cb. Returns success.
+        self._restore_context_cb: Optional[Callable[[str], bool]] = None
+        # Optional SubAgentInvoker instance — drives gui_task / swarm_task and
+        # handles the snapshot+merge pattern uniformly. Wired by the agent.
+        self._subagent_invoker: Optional[Any] = None
 
     def reset_phase_state(self) -> None:
         """Reset per-phase state. Call between chain phases."""
@@ -89,7 +104,11 @@ class ToolRegistry:
 
         # Stuck-loop guard: if the last 4 calls are identical, warn first then terminate.
         # Exempt idempotent read-only tools — re-calling them is harmless and often useful.
-        _STUCK_EXEMPT = {"read_file", "validate_arch", "get_deps", "write_plan"}
+        _STUCK_EXEMPT = {
+            "read_file", "validate_arch", "get_deps", "write_plan",
+            "read_context",   # board lookups are read-only/cheap
+            "save_context",   # idempotent snapshot
+        }
         call_key = (tool, json.dumps(args, sort_keys=True))
         if tool not in _STUCK_EXEMPT:
             self._recent_calls.append(call_key)
@@ -216,17 +235,23 @@ class ToolRegistry:
                     return ToolResult(False, "", "Requires confirmation but no confirm_cb", {"risk": risk})
 
         handler_map = {
-            "execute_command": self._handle_execute_command,
-            "create_file":     self._handle_create_file,
-            "patch_file":      self._handle_patch_file,
-            "web_search":      self._handle_web_search,
-            "read_file":       self._handle_read_file,
-            "memory_lookup":   self._handle_memory_lookup,
-            "finish":          self._handle_finish,
-            "manage_server":   self._handle_manage_server,
-            "validate_arch":   self._handle_validate_arch,
-            "get_deps":        self._handle_get_deps,
-            "write_plan":      self._handle_write_plan,
+            "execute_command":  self._handle_execute_command,
+            "create_file":      self._handle_create_file,
+            "patch_file":       self._handle_patch_file,
+            "web_search":       self._handle_web_search,
+            "read_file":        self._handle_read_file,
+            "memory_lookup":    self._handle_memory_lookup,
+            "finish":           self._handle_finish,
+            "manage_server":    self._handle_manage_server,
+            "validate_arch":    self._handle_validate_arch,
+            "get_deps":         self._handle_get_deps,
+            "write_plan":       self._handle_write_plan,
+            "save_context":     self._handle_save_context,
+            "restore_context":  self._handle_restore_context,
+            "publish_context":  self._handle_publish_context,
+            "read_context":     self._handle_read_context,
+            "gui_task":         self._handle_gui_task,
+            "swarm_task":       self._handle_swarm_task,
         }
         return handler_map[tool](args)
 
@@ -801,6 +826,236 @@ class ToolRegistry:
             True, summary, "",
             {"plan_path": path, "checked": checked, "total": total},
         )
+
+    # ----------------------- session continuity & delegation handlers -------
+
+    def _handle_save_context(self, args: dict) -> ToolResult:
+        """Snapshot the parent agent's pinned state. Returns the snapshot path."""
+        label = args.get("label", "manual")
+        if not callable(self._save_context_cb):
+            return ToolResult(
+                False, "",
+                "save_context not wired (parent agent missing _save_context_cb).",
+                {},
+            )
+        try:
+            path = self._save_context_cb(str(label))
+            return ToolResult(
+                True, f"Context saved → {path}", "",
+                {"path": path, "label": label},
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"Save failed: {e}", {})
+
+    def _handle_restore_context(self, args: dict) -> ToolResult:
+        """Reload a saved snapshot back into the parent agent."""
+        path = os.path.expanduser(args.get("path", ""))
+        if not path:
+            return ToolResult(False, "", "restore_context requires 'path'", {})
+        if not os.path.exists(path):
+            return ToolResult(False, "", f"Snapshot not found: {path}", {})
+        if not callable(self._restore_context_cb):
+            return ToolResult(
+                False, "",
+                "restore_context not wired (parent agent missing _restore_context_cb).",
+                {},
+            )
+        try:
+            ok = bool(self._restore_context_cb(path))
+            if ok:
+                return ToolResult(
+                    True, f"Context restored from {path}", "", {"path": path},
+                )
+            return ToolResult(False, "", f"Restore returned False for {path}", {})
+        except Exception as e:
+            return ToolResult(False, "", f"Restore failed: {e}", {})
+
+    def _handle_publish_context(self, args: dict) -> ToolResult:
+        """Write to the central shared_context board (visible to all agents)."""
+        key = args.get("key", "")
+        value = args.get("value", "")
+        ttl_hours = int(args.get("ttl_hours", 24))
+        agent_id = args.get("agent_id", "cmd")
+        if not key or not isinstance(key, str):
+            return ToolResult(False, "", "publish_context requires non-empty 'key'", {})
+        if value is None:
+            return ToolResult(False, "", "publish_context requires 'value'", {})
+        if not isinstance(value, str):
+            try:
+                value = json.dumps(value)
+            except Exception:
+                value = str(value)
+        if self.memory is None:
+            return ToolResult(False, "", "publish_context: no memory backend", {})
+        try:
+            self.memory.set_context(
+                key, value, agent_id=str(agent_id), ttl=max(60, ttl_hours * 3600),
+            )
+            return ToolResult(
+                True, f"Published: {key}", "",
+                {"key": key, "agent_id": agent_id, "ttl_hours": ttl_hours},
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"publish_context failed: {e}", {})
+
+    def _handle_read_context(self, args: dict) -> ToolResult:
+        """Read from the central shared_context board.
+
+        With 'key': returns the single value (None if missing/expired).
+        With 'prefix': returns up to 'limit' (default 20) entries matching prefix.
+        """
+        if self.memory is None:
+            return ToolResult(False, "", "read_context: no memory backend", {})
+        key = args.get("key", "")
+        prefix = args.get("prefix", "")
+        limit = int(args.get("limit", 20))
+
+        try:
+            if key:
+                value = self.memory.get_context(key)
+                if value is None:
+                    return ToolResult(
+                        False, "", f"Key '{key}' not found or expired",
+                        {"key": key},
+                    )
+                return ToolResult(
+                    True, f"{key} = {value}", "",
+                    {"key": key, "value": value},
+                )
+            # Prefix listing (empty prefix returns everything, capped by limit)
+            entries = self.memory.list_context(prefix)
+            if not entries:
+                return ToolResult(
+                    True, f"(no entries matching prefix '{prefix}')", "",
+                    {"prefix": prefix, "count": 0, "entries": []},
+                )
+            entries = entries[:limit]
+            lines = [
+                f"  {e['key']} = {(e['value'] or '')[:200]}  "
+                f"(by {e.get('agent', '?')} @ {e.get('updated_at', '')[:19]})"
+                for e in entries
+            ]
+            output = (
+                f"Found {len(entries)} entries matching prefix '{prefix}':\n"
+                + "\n".join(lines)
+            )
+            return ToolResult(
+                True, output, "",
+                {"prefix": prefix, "count": len(entries), "entries": entries},
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"read_context failed: {e}", {})
+
+    def _handle_gui_task(self, args: dict) -> ToolResult:
+        """Delegate a desktop GUI automation task to GUIAgent.
+
+        Routes through SubAgentInvoker — snapshots parent state, runs GUI agent
+        in isolation, merges files back into parent manifest, and pins ONE
+        clean result message instead of dumping GUI's full ReAct trace.
+        """
+        task = args.get("task", "")
+        max_iter = int(args.get("max_iterations", 20))
+        context_keys = args.get("context_keys") or []
+        if not task or not isinstance(task, str):
+            return ToolResult(False, "", "gui_task requires non-empty 'task'", {})
+        if isinstance(context_keys, str):
+            context_keys = [context_keys]
+        if self._subagent_invoker is None:
+            return ToolResult(
+                False, "",
+                "gui_task: SubAgentInvoker not wired (parent agent missing _subagent_invoker).",
+                {},
+            )
+        try:
+            r = self._subagent_invoker.run(
+                target="gui",
+                task=task,
+                max_iterations=max_iter,
+                context_keys=context_keys,
+                merge_files=True,
+                merge_pin=True,
+            )
+            output = (
+                f"GUI {'succeeded' if r.success else 'failed'}: {r.parent_summary}"
+            )
+            if r.files_created:
+                output += f"\nFiles: {', '.join(r.files_created[:6])}"
+            return ToolResult(
+                r.success, output, "" if r.success else r.error,
+                {
+                    "files_created": r.files_created,
+                    "iterations_used": r.iterations_used,
+                    "elapsed_ms": r.elapsed_ms,
+                    "sidechain": r.sidechain_path,
+                    "snapshot": r.snapshot_path,
+                },
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"gui_task crashed: {e}", {})
+
+    def _handle_swarm_task(self, args: dict) -> ToolResult:
+        """Delegate to the swarm (engineer/math/search) via SubAgentInvoker.
+
+        args:
+          mode      : 'engineer' | 'math' | 'search'
+          task      : the prompt/question/query
+          context_keys : optional list of shared_context keys to forward
+          max_iterations : optional, defaults vary per mode
+          timeout   : optional override (default 300s)
+        """
+        mode = (args.get("mode") or "search").lower().strip()
+        if mode not in ("engineer", "math", "search"):
+            return ToolResult(
+                False, "",
+                f"swarm_task mode must be one of engineer|math|search (got '{mode}')",
+                {},
+            )
+        task = args.get("task", "")
+        if not task or not isinstance(task, str):
+            return ToolResult(False, "", "swarm_task requires non-empty 'task'", {})
+        context_keys = args.get("context_keys") or []
+        if isinstance(context_keys, str):
+            context_keys = [context_keys]
+        if self._subagent_invoker is None:
+            return ToolResult(
+                False, "",
+                "swarm_task: SubAgentInvoker not wired.",
+                {},
+            )
+        extra = {
+            "max_iterations": int(args.get("max_iterations", 30)),
+            "timeout": int(args.get("timeout", 300)),
+            "max_results": int(args.get("max_results", 8)),
+        }
+        try:
+            r = self._subagent_invoker.run(
+                target=f"swarm:{mode}",
+                task=task,
+                max_iterations=extra["max_iterations"],
+                context_keys=context_keys,
+                merge_files=True,
+                merge_pin=True,
+                extra=extra,
+            )
+            output = (
+                f"Swarm {mode} {'OK' if r.success else 'FAILED'}: "
+                f"{r.parent_summary[:1200]}"
+            )
+            if r.files_created:
+                output += f"\nFiles/Artifacts: {', '.join(r.files_created[:6])}"
+            return ToolResult(
+                r.success, output, "" if r.success else r.error,
+                {
+                    "mode": mode,
+                    "files_created": r.files_created,
+                    "iterations_used": r.iterations_used,
+                    "elapsed_ms": r.elapsed_ms,
+                    "sidechain": r.sidechain_path,
+                    "snapshot": r.snapshot_path,
+                },
+            )
+        except Exception as e:
+            return ToolResult(False, "", f"swarm_task crashed: {e}", {})
 
     def _handle_finish(self, args: dict) -> ToolResult:
         summary  = args.get("summary", "Task completed.")

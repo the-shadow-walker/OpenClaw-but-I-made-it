@@ -209,6 +209,25 @@ TOOL_SCHEMAS: dict = {
     "write_plan":       '  write_plan       — {{"plan": str (markdown with ## Architecture, ## Files - [ ], ## Dependencies)}}\n'
                        '    # Persists your task plan. Idempotent — call again to update checkboxes.\n'
                        '    # Returns {checked, total, plan_path}. Required first action for planner/builder roles.',
+    "save_context":     '  save_context     — {{"label": str (optional)}}\n'
+                       '    # Snapshots your pinned slots + files manifest to disk. Returns {path}.\n'
+                       '    # Use BEFORE delegating to a sub-agent so you can restore_context if it fails.',
+    "restore_context":  '  restore_context  — {{"path": str}}\n'
+                       '    # Reloads a prior snapshot back into your pinned state.\n'
+                       '    # Use after a sub-agent run if you need to recover from its side effects.',
+    "publish_context":  '  publish_context  — {{"key": str, "value": str, "ttl_hours": int (default 24), "agent_id": str (default "cmd")}}\n'
+                       '    # Writes to the central shared_context board (visible to all agents — cmd/gui/swarm).\n'
+                       '    # Keys should be namespaced like "project.api_url" or "session.recipevault.workspace".',
+    "read_context":     '  read_context     — {{"key": str}} OR {{"prefix": str, "limit": int (default 20)}}\n'
+                       '    # Reads from the central shared_context board.\n'
+                       '    # Use prefix-mode to discover all entries with a namespace.',
+    "gui_task":         '  gui_task         — {{"task": str, "max_iterations": int (default 20), "context_keys": [str] (optional)}}\n'
+                       '    # Delegates a desktop GUI task (screenshot/click/type) to the GUI agent.\n'
+                       '    # Snapshots your context first; merges files-created back; pins ONE clean result.\n'
+                       '    # context_keys: shared_context keys to pass through (e.g. ["project.workspace"]).',
+    "swarm_task":       '  swarm_task       — {{"mode": "engineer|math|search", "task": str, "max_iterations": int (default 30), "timeout": int (default 300), "context_keys": [str] (optional)}}\n'
+                       '    # Delegates to the swarm: engineer (build projects), math (heavy compute), search (deep research).\n'
+                       '    # Returns clean answer/files; full sub-agent ReAct trace goes to sidechain (not your context).',
 }
 _ALL_TOOLS_TEXT = "\n".join(TOOL_SCHEMAS.values())
 
@@ -381,6 +400,12 @@ class OllamaCommandAgent:
     # 8192 tokens ≈ 30KB output — plenty for any single-file artifact or patch.
     FILE_GEN_NUM_PREDICT = 8192
     PATCH_NUM_PREDICT = 4096
+    # Session continuity: snapshots and sidechain transcripts live here. Created on demand.
+    SESSIONS_DIR  = os.path.expanduser("~/.agent_bin/sessions")
+    SIDECHAIN_DIR = os.path.expanduser("~/.agent_bin/sidechains")
+    # Central context mirror — human-readable rolling file written after every set_context
+    CENTRAL_CONTEXT_PATH = os.path.expanduser("~/.agent_bin/central_context.md")
+    CENTRAL_CONTEXT_MAX_ENTRIES = 200
 
     def __init__(
         self,
@@ -420,6 +445,8 @@ class OllamaCommandAgent:
         self._pinned_slot_keys: Dict[str, int] = {}
         # Running list of files created/patched this session — survives compaction via pin
         self._files_created: List[str] = []
+        # Tracks the current top-level instruction so save_context can persist it
+        self._current_instruction: str = ""
         # Wire the write_plan tool's pinned-slot callback so plan updates show up
         # in the agent's context window even after history compaction.
         try:
@@ -427,6 +454,25 @@ class OllamaCommandAgent:
         except AttributeError:
             # Older ToolRegistry without the attribute — non-fatal
             pass
+        # Wire session continuity callbacks so save_context / restore_context tools
+        # operate on this agent's pinned state.
+        try:
+            self.tool_registry._save_context_cb = self.save_context
+            self.tool_registry._restore_context_cb = self.restore_context
+        except AttributeError:
+            pass
+        # Lazy SubAgentInvoker — wired here so gui_task / swarm_task tools can route
+        # through the uniform snapshot+merge pattern. Imported at the end of this file.
+        try:
+            from subagent import SubAgentInvoker  # type: ignore
+            self.subagent_invoker = SubAgentInvoker(self, self.memory)
+            self.tool_registry._subagent_invoker = self.subagent_invoker
+        except Exception as e:
+            print(f"⚠️  SubAgentInvoker not wired (gui_task/swarm_task disabled): {e}")
+            self.subagent_invoker = None
+        # Mirror central context to disk on every set_context call so external
+        # processes (and humans) can read it without touching SQLite.
+        self._wire_central_context_mirror()
 
     # ---------------------------------------------------------------- LLM --
 
@@ -1526,6 +1572,129 @@ Return JSON only:
         }
         self._update_pinned("file_manifest", manifest_msg)
 
+    # ── Session continuity ──────────────────────────────────────────────────
+
+    def save_context(self, label: str = "") -> str:
+        """Snapshot pinned state + files manifest + current instruction to disk.
+
+        Returns the absolute path of the snapshot. Safe to call from anywhere;
+        non-fatal on failure (returns empty string).
+        """
+        try:
+            os.makedirs(self.SESSIONS_DIR, exist_ok=True)
+        except Exception:
+            pass
+        ts = int(time.time())
+        slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(label or "session"))[:40]
+        path = os.path.join(self.SESSIONS_DIR, f"{ts}_{slug}.json")
+        data = {
+            "saved_at": datetime.now().isoformat(),
+            "label": label,
+            "pinned_messages": self.pinned_messages,
+            "pinned_slot_keys": self._pinned_slot_keys,
+            "files_created": list(self._files_created),
+            "instruction": self._current_instruction,
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+            print(f"📦 Context saved → {path}")
+            return path
+        except Exception as e:
+            print(f"⚠️  Context save failed: {e}")
+            return ""
+
+    def restore_context(self, path: str) -> bool:
+        """Reload a saved snapshot. Replaces pinned state, files, instruction.
+
+        Returns True on success. Non-fatal on any failure.
+        """
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            self.pinned_messages = list(data.get("pinned_messages") or [])
+            self._pinned_slot_keys = dict(data.get("pinned_slot_keys") or {})
+            self._files_created = list(data.get("files_created") or [])
+            instr = data.get("instruction")
+            if isinstance(instr, str) and instr:
+                self._current_instruction = instr
+            print(f"📦 Context restored from {path} "
+                  f"({len(self.pinned_messages)} pins, {len(self._files_created)} files)")
+            return True
+        except Exception as e:
+            print(f"⚠️  Context restore failed: {e}")
+            return False
+
+    def _wire_central_context_mirror(self) -> None:
+        """Monkey-patch self.memory.set_context so it also writes a human-readable
+        rolling mirror file at ~/.agent_bin/central_context.md.
+
+        The SQLite board remains the source of truth; the .md file is a
+        convenience for humans (and agents that want to grep without SQL).
+        Idempotent — only wraps once per memory instance.
+        """
+        if self.memory is None:
+            return
+        if getattr(self.memory, "_central_mirror_wired", False):
+            return
+        original = self.memory.set_context
+        mirror_path = self.CENTRAL_CONTEXT_PATH
+        max_entries = self.CENTRAL_CONTEXT_MAX_ENTRIES
+
+        def _patched_set_context(key, value, agent_id="cmd", ttl=86400):
+            original(key, value, agent_id=agent_id, ttl=ttl)
+            try:
+                self._refresh_central_context_md(mirror_path, max_entries)
+            except Exception:
+                pass
+
+        self.memory.set_context = _patched_set_context  # type: ignore[assignment]
+        self.memory._central_mirror_wired = True
+        # Initial write on first wire
+        try:
+            self._refresh_central_context_md(mirror_path, max_entries)
+        except Exception:
+            pass
+
+    def _refresh_central_context_md(self, path: str, max_entries: int) -> None:
+        """Re-render the central_context.md mirror from the live SQLite board."""
+        if self.memory is None:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        entries = self.memory.list_context("")[:max_entries]
+        lines = [
+            "# Central Context Board",
+            f"_Last refreshed: {datetime.now().isoformat(timespec='seconds')} | "
+            f"{len(entries)} entries (mirror of SQLite shared_context table)_",
+            "",
+            "All entries here are visible to ALL agents (cmd, gui, swarm, blueteam) ",
+            "via the publish_context / read_context tools or AgentMemory API.",
+            "",
+        ]
+        if not entries:
+            lines.append("_(no entries)_")
+        else:
+            # Group by agent_id for readability
+            by_agent: Dict[str, List[Dict]] = {}
+            for e in entries:
+                by_agent.setdefault(e.get("agent") or "?", []).append(e)
+            for agent_id in sorted(by_agent):
+                lines.append(f"## {agent_id}")
+                for e in by_agent[agent_id]:
+                    val = (e.get("value") or "")
+                    if len(val) > 400:
+                        val = val[:400] + "…"
+                    lines.append(
+                        f"- **{e['key']}** _({e.get('updated_at', '')[:19]})_  \n"
+                        f"  {val}"
+                    )
+                lines.append("")
+        try:
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+        except Exception:
+            pass
+
     def _save_plan_pin(self, plan_text: str) -> None:
         """Refresh the pinned 📋 PLAN slot. Called by ToolRegistry on write_plan.
 
@@ -1667,6 +1836,126 @@ Return JSON only:
                 "iteration": iteration,
                 "messages_before": msg_count,
                 "tokens_saved": saved_tokens,
+            })
+        return new_history
+
+    # ── High-fidelity compression (90% tier) ─────────────────────────────────
+
+    # Regexes used to extract high-fidelity content blocks worth preserving verbatim.
+    _HIFI_FENCED_RE  = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+    # Absolute file paths only — must start with `/`, contain ≥2 segments, end with extension.
+    # Negative lookbehind `(?<![:/])` blocks matching inside URLs (https://...).
+    _HIFI_FILEPATH_RE = re.compile(r"(?<![:/\w])/(?:[\w.-]+/){1,}[\w.-]+\.[A-Za-z0-9_]{1,8}")
+    _HIFI_URL_RE     = re.compile(r"https?://[^\s)`'\"]+")
+
+    def _hifi_extract_blocks(self, text: str) -> List[str]:
+        """Pull all fenced code blocks + standalone full file paths + URLs from text.
+        Returns deduped list preserving order.
+        """
+        seen = set()
+        out: List[str] = []
+        for m in self._HIFI_FENCED_RE.finditer(text):
+            blk = m.group(0).strip()
+            if blk and blk not in seen:
+                seen.add(blk); out.append(blk)
+        # File paths and URLs as bare tokens (one line each, deduped)
+        for rx in (self._HIFI_FILEPATH_RE, self._HIFI_URL_RE):
+            for m in rx.finditer(text):
+                tok = m.group(0).strip().rstrip(".,;:")
+                if tok and tok not in seen and len(tok) >= 4:
+                    seen.add(tok); out.append(tok)
+        return out
+
+    def _compress_high_fidelity(
+        self,
+        react_history: List[Dict],
+        system_prompt: str,
+        instruction: str,
+        iteration: int,
+        max_iter: int,
+    ) -> List[Dict]:
+        """Stage 2.5 — high-fidelity preservation tier (no LLM call).
+
+        Fires between Stage 2 (70%) and Stage 3 (~95%). Preserves verbatim:
+          - The original instruction (react_history[0])
+          - Every ```fenced code block``` from the entire history
+          - Every absolute file path / URL mentioned anywhere
+          - The last 3 messages (immediate continuity)
+
+        Compresses everything else by collapsing each middle message to a one-line
+        role-tagged synopsis. Deterministic, fast (~5 ms vs ~20 s for an LLM call),
+        and idempotent — running it twice yields the same result.
+        """
+        if len(react_history) < 6:
+            return react_history
+
+        msg_count = len(react_history)
+        est_before = self._estimate_react_tokens(react_history, system_prompt)
+        print(
+            f"\n🔍  HIFI-COMPRESS (Stage 2.5): {msg_count} messages, "
+            f"~{est_before} tokens — preserving code/paths verbatim"
+        )
+
+        # Aggregate code blocks + paths from the middle (everything except first + last 3)
+        head = react_history[:1]
+        tail = react_history[-3:]
+        middle = react_history[1:-3] if msg_count > 4 else []
+
+        all_blocks: List[str] = []
+        synopsis_lines: List[str] = []
+        for i, msg in enumerate(middle):
+            role = msg.get("role", "?")
+            content = str(msg.get("content", ""))
+            blocks = self._hifi_extract_blocks(content)
+            all_blocks.extend(blocks)
+            # One-line synopsis: first 140 chars, single-line, role tag
+            synop = re.sub(r"\s+", " ", content[:200]).strip()[:140]
+            if synop:
+                synopsis_lines.append(f"  [{role}] {synop}")
+
+        # Dedupe all_blocks while preserving order
+        seen = set()
+        deduped_blocks: List[str] = []
+        for b in all_blocks:
+            if b not in seen:
+                seen.add(b); deduped_blocks.append(b)
+
+        # Hard cap on preserved blocks to bound size (most recent 40 win)
+        BLOCK_CAP = 40
+        if len(deduped_blocks) > BLOCK_CAP:
+            deduped_blocks = deduped_blocks[-BLOCK_CAP:]
+
+        synopsis_text = "\n".join(synopsis_lines[-30:])  # cap synopsis lines too
+        blocks_text = "\n\n".join(deduped_blocks) if deduped_blocks else "(none)"
+
+        compressed = {
+            "role": "user",
+            "content": (
+                f"[HIFI-COMPRESSED — {len(middle)} middle messages collapsed at iter "
+                f"{iteration}/{max_iter}; head + last 3 turns kept verbatim]\n\n"
+                f"## ROLE-TAGGED SYNOPSIS (one line per compressed message)\n"
+                f"{synopsis_text}\n\n"
+                f"## PRESERVED CODE BLOCKS / FILE PATHS / URLS (verbatim)\n"
+                f"{blocks_text}\n\n"
+                f"Continue using the preserved blocks above as ground truth. "
+                f"The last 3 messages below are uncompressed for continuity."
+            ),
+        }
+
+        new_history = head + [compressed] + tail
+        est_after = self._estimate_react_tokens(new_history, system_prompt)
+        print(
+            f"✅ HIFI-COMPRESS done — saved ~{est_before - est_after} tokens, "
+            f"new history: {len(new_history)} messages, "
+            f"{len(deduped_blocks)} code/path blocks preserved"
+        )
+        if _debug_logger:
+            _debug_logger.log("hifi_compressed", {
+                "iteration": iteration,
+                "messages_before": msg_count,
+                "messages_after": len(new_history),
+                "tokens_saved": est_before - est_after,
+                "blocks_preserved": len(deduped_blocks),
             })
         return new_history
 
@@ -1926,6 +2215,8 @@ Return JSON only:
         _finish_threshold = max(20, min(max_iter // 4, 100))
         # Expose budget to tool registry so _handle_finish can check early-exit guard
         self.tool_registry._max_iterations = max_iter
+        # Track instruction so save_context can persist it
+        self._current_instruction = str(instruction or "")
 
         # System survey + runbook
         survey = self.memory.get_system_survey()
@@ -2135,6 +2426,7 @@ Return JSON only:
             # Simple tail-trim for normal operation (keeps first + last 9).
             _est = self._estimate_react_tokens(react_history, system_prompt)
             _SNIP_THRESHOLD   = int(self.NUM_CTX * 0.70)
+            _HIFI_THRESHOLD   = int(self.NUM_CTX * 0.90)   # Stage 2.5 — high fidelity, no LLM
             _COMPRESS_THRESHOLD = self.NUM_CTX - 1500  # ~95% (original behaviour)
 
             if _est > _SNIP_THRESHOLD and len(react_history) > 6:
@@ -2152,6 +2444,16 @@ Return JSON only:
                     })
                     _est = self._estimate_react_tokens(react_history, system_prompt)
                     print(f"\n✂️  Stage-2 snip: removed {_snip_count} messages, ~{_est} tokens remaining")
+
+            # Stage 2.5: High-fidelity compress — preserves verbatim code/paths,
+            # collapses chatter to one-liner synopses. Fires between Stage 2 and Stage 3.
+            # Cheap (no LLM call). Skipped if Stage 3 will fire this iteration anyway.
+            if (_HIFI_THRESHOLD < _est <= _COMPRESS_THRESHOLD) and len(react_history) > 6:
+                react_history = self._compress_high_fidelity(
+                    react_history, system_prompt, instruction,
+                    iteration, max_iter,
+                )
+                _est = self._estimate_react_tokens(react_history, system_prompt)
 
             if _est > _COMPRESS_THRESHOLD:
                 # Stage 3: Full LLM summarization (expensive — last resort)
