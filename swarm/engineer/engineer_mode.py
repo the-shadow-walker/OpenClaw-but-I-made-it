@@ -23,7 +23,7 @@ import os
 import tempfile
 import subprocess
 import requests as _requests
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -355,10 +355,14 @@ class EngineerModeOrchestrator:
         searxng_url: Optional[str] = None,
         debug: bool = False,
         save_markdown: bool = False,
+        sidechain: Optional[Any] = None,
+        job_id: str = "",
     ):
         self.searxng_url = searxng_url or os.getenv("SEARXNG_URL", "http://localhost:8080")
         self.debug = debug
         self.save_markdown = save_markdown
+        self.sidechain = sidechain     # Swarm 3.15 / Chunk 8: optional JSONL trace
+        self.job_id = job_id
 
         # State set during phases
         self.problem: str = ""
@@ -375,6 +379,28 @@ class EngineerModeOrchestrator:
         self.markdown_path: Optional[str] = None
 
         self._phase_times: Dict[str, float] = {}
+
+    # ── Sidechain ────────────────────────────────────────────────────────────
+
+    def _emit_phase(self, phase: str, status: str = "start", **fields: Any) -> None:
+        """
+        Swarm 3.15 / Chunk 8: write a JSONL event for the active phase.
+        No-op when sidechain is None (i.e. not invoked as subagent).
+        """
+        sc = self.sidechain
+        if sc is None:
+            return
+        try:
+            sc.write_event(
+                "engineer_phase",
+                phase=phase,
+                status=status,
+                job_id=self.job_id,
+                **fields,
+            )
+        except Exception:
+            # Sidechain failures must never break the run
+            pass
 
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
@@ -452,6 +478,8 @@ class EngineerModeOrchestrator:
         print(f"Problem: {problem[:80]}...")
         print("=" * 70)
 
+        self._emit_phase("run", "start", problem=problem[:200])
+
         await self._phase_e1_classify_and_graph()
         await self._phase_e2_extract_and_hunt()
         await self._phase_e3_assumption_engine()
@@ -465,7 +493,49 @@ class EngineerModeOrchestrator:
         if self.save_markdown and self.tds_markdown:
             await self._save_markdown()
 
+        # Swarm 3.15 / Chunk 8: write agent-bin deliverable for subagent dispatch
+        if self.tds_markdown:
+            self._write_agent_bin_deliverable()
+
+        self._emit_phase(
+            "run", "done",
+            elapsed_s=elapsed,
+            tds_chars=len(self.tds_markdown),
+            deliverable=self.markdown_path or "",
+        )
+
         return self.tds_markdown
+
+    def _write_agent_bin_deliverable(self) -> None:
+        """
+        Write the TDS to ~/.agent_bin/results/<topic>_engineer_<job_id>.md
+        so the /subagent/engineer endpoint can return a path-based deliverable.
+        """
+        try:
+            base = os.path.expanduser(
+                os.getenv("AGENT_BIN_RESULTS", "~/.agent_bin/results")
+            )
+            os.makedirs(base, exist_ok=True)
+            slug_src = re.sub(r"[^a-z0-9]+", "_", self.problem[:60].lower()).strip("_") or "engineer"
+            jid = self.job_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(base, f"{slug_src}_engineer_{jid}.md")
+            with open(path, "w") as f:
+                f.write(f"# Engineer Mode Deliverable\n\n")
+                f.write(f"**Problem:** {self.problem}\n\n")
+                f.write(f"**Generated:** {datetime.now().isoformat()}\n\n")
+                f.write(f"**Domain:** {self.domain}\n\n")
+                f.write("---\n\n")
+                f.write(self.tds_markdown)
+                if self.generated_code:
+                    f.write("\n\n---\n\n## Generated Simulation Code\n\n")
+                    f.write(f"```python\n{self.generated_code}\n```\n")
+            # If the user didn't already populate markdown_path via _save_markdown,
+            # surface this path as the canonical deliverable.
+            if not self.markdown_path:
+                self.markdown_path = path
+            print(f"📄 Engineer deliverable: {path}")
+        except Exception as e:
+            print(f"⚠️  Could not write agent-bin deliverable: {e}")
 
     # ── Phase E1 ──────────────────────────────────────────────────────────────
 
@@ -473,6 +543,7 @@ class EngineerModeOrchestrator:
         """Classify domain and build dependency graph via phi4."""
         t0 = datetime.now()
         print("\n── Phase E1: Dependency Graph ──")
+        self._emit_phase("E1", "start")
 
         prompt = E1_GRAPH_PROMPT.format(problem=self.problem)
         response = await self._llm_query(
@@ -509,6 +580,7 @@ class EngineerModeOrchestrator:
             self.domain = "rocket"
 
         self._phase_times["E1"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase("E1", "done", elapsed_s=self._phase_times["E1"], domain=self.domain, n_nodes=len(self.dep_graph.nodes))
 
     # ── Phase E2 ──────────────────────────────────────────────────────────────
 
@@ -516,6 +588,7 @@ class EngineerModeOrchestrator:
         """Extract given values from problem, then hunt for missing params."""
         t0 = datetime.now()
         print("\n── Phase E2: Value Extraction + Search ──")
+        self._emit_phase("E2", "start")
 
         # Extract explicit values
         if _HAS_EXTRACTOR:
@@ -588,6 +661,7 @@ class EngineerModeOrchestrator:
             self.search_context = "(search unavailable)"
 
         self._phase_times["E2"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase("E2", "done", elapsed_s=self._phase_times["E2"], n_given=len(self.given_values), search_chars=len(self.search_context))
 
     # ── Phase E3 ──────────────────────────────────────────────────────────────
 
@@ -595,6 +669,7 @@ class EngineerModeOrchestrator:
         """Fill missing parameters from engineering_defaults (or search results)."""
         t0 = datetime.now()
         print("\n── Phase E3: Assumption Engine ──")
+        self._emit_phase("E3", "start")
 
         if not _HAS_DEFAULTS:
             print("   ⚠️  engineering_defaults.py not found; skipping")
@@ -636,6 +711,7 @@ class EngineerModeOrchestrator:
                 print(f"     {a.parameter} = {a.value} {a.unit}  [{a.basis}]")
 
         self._phase_times["E3"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase("E3", "done", elapsed_s=self._phase_times["E3"], n_assumptions=len(self.assumptions))
 
     def _extract_from_search_context(self, param_name: str) -> Optional[float]:
         """Very simple numeric extraction for a named parameter from search snippets."""
@@ -657,6 +733,7 @@ class EngineerModeOrchestrator:
         """Generate a complete iterative Python simulation via qwen2.5."""
         t0 = datetime.now()
         print("\n── Phase E4: Code Generation ──")
+        self._emit_phase("E4", "start")
 
         given_vars_block = "\n".join(
             f"  {k} = {v}  # from problem statement"
@@ -719,6 +796,7 @@ class EngineerModeOrchestrator:
 
         self.generated_code = code
         self._phase_times["E4"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase("E4", "done", elapsed_s=self._phase_times["E4"], code_lines=len(code.splitlines()) if code else 0)
 
     # ── Phase E5 ──────────────────────────────────────────────────────────────
 
@@ -726,6 +804,7 @@ class EngineerModeOrchestrator:
         """Execute the generated script, check bounds, self-correct up to 2 rounds."""
         t0 = datetime.now()
         print("\n── Phase E5: Execute + Validate ──")
+        self._emit_phase("E5", "start")
 
         if not self.generated_code:
             print("   ⚠️  No code to execute")
@@ -772,6 +851,12 @@ class EngineerModeOrchestrator:
                 break  # give up
 
         self._phase_times["E5"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase(
+            "E5", "done",
+            elapsed_s=self._phase_times["E5"],
+            success=self.execution_success,
+            n_violations=len(self.bounds_violations),
+        )
 
     async def _execute_code(self, code: str, timeout: int = 60) -> Dict:
         """Execute Python code in a subprocess and return output."""
@@ -861,6 +946,7 @@ class EngineerModeOrchestrator:
         """Synthesize the 6-section Technical Data Sheet via qwen2.5."""
         t0 = datetime.now()
         print("\n── Phase E6: TDS Synthesis ──")
+        self._emit_phase("E6", "start")
 
         assumptions_table = self._format_assumptions_table()
 
@@ -888,6 +974,7 @@ class EngineerModeOrchestrator:
         self.tds_markdown = tds.strip()
         print(f"   TDS length: {len(self.tds_markdown)} chars")
         self._phase_times["E6"] = (datetime.now() - t0).total_seconds()
+        self._emit_phase("E6", "done", elapsed_s=self._phase_times["E6"], tds_chars=len(self.tds_markdown))
 
     def _format_assumptions_table(self) -> str:
         """Format assumptions as a Markdown table string."""
@@ -930,6 +1017,8 @@ async def run_engineer_mode(
     searxng_url: Optional[str] = None,
     debug: bool = False,
     save_markdown: bool = False,
+    sidechain: Optional[Any] = None,
+    job_id: str = "",
 ) -> str:
     """
     Run Engineer Mode for the given design problem.
@@ -940,6 +1029,8 @@ async def run_engineer_mode(
         searxng_url=searxng_url,
         debug=debug,
         save_markdown=save_markdown,
+        sidechain=sidechain,
+        job_id=job_id,
     )
     return await emo.run(problem)
 

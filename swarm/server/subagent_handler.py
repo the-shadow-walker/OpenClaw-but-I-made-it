@@ -144,6 +144,13 @@ def _run_engineer(task: str, job_id: str, timeout_s: int) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "failed", "answer": None, "error": f"engineer_mode unavailable: {e}"}
 
+    # Optional sidechain (gated on SWARM_AS_SUBAGENT=1)
+    try:
+        from sidechain import make_sidechain  # type: ignore
+        _sc = make_sidechain("engineer", job_id)
+    except Exception:
+        _sc = None
+
     import asyncio
 
     result_holder: Dict[str, Any] = {}
@@ -153,8 +160,13 @@ def _run_engineer(task: str, job_id: str, timeout_s: int) -> Dict[str, Any]:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                # run_engineer_mode signature varies — call as kwargs for safety
-                ans = loop.run_until_complete(run_engineer_mode(problem=task))
+                ans = loop.run_until_complete(
+                    run_engineer_mode(
+                        problem=task,
+                        sidechain=_sc,
+                        job_id=job_id,
+                    )
+                )
                 result_holder["answer"] = ans
                 result_holder["status"] = "completed"
             finally:
@@ -178,6 +190,13 @@ def _run_deep_search(task: str, job_id: str, timeout_s: int) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "failed", "answer": None, "error": f"deep_search_agent unavailable: {e}"}
 
+    # Optional sidechain (gated on SWARM_AS_SUBAGENT=1)
+    try:
+        from sidechain import make_sidechain  # type: ignore
+        _sc = make_sidechain("deep_search", job_id)
+    except Exception:
+        _sc = None
+
     import asyncio
 
     result_holder: Dict[str, Any] = {}
@@ -187,7 +206,7 @@ def _run_deep_search(task: str, job_id: str, timeout_s: int) -> Dict[str, Any]:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                agent = DeepSearchAgent()
+                agent = DeepSearchAgent(sidechain=_sc)
                 ans = loop.run_until_complete(agent.run(query=task, job_id=job_id))
                 result_holder["answer"] = ans.get("answer", "") if isinstance(ans, dict) else str(ans)
                 result_holder["deliverables"] = ans.get("deliverables", []) if isinstance(ans, dict) else []
