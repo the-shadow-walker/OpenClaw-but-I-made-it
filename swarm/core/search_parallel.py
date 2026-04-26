@@ -495,7 +495,7 @@ Output JSON only:
             agent = BaseAgent(
                 agent_id="deep_think",
                 agent_type=AgentType.WORKER,
-                model_name="phi4:14b",
+                model_name=os.getenv("SWARM_MODEL_RESEARCH", os.getenv("SWARM_MODEL_DEFAULT", "qwen3-coder:30b")),
                 system_prompt="You are a research coordinator. Output JSON only when asked.",
             )
             return await agent.query_llm(prompt, stream=False)

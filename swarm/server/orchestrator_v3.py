@@ -92,11 +92,17 @@ except ImportError:
 
 # ── Ollama constants ─────────────────────────────────────────────────────────
 _OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-_MODEL_REASONER      = "qwq:32b"
-_MODEL_FALLBACK      = "deepseek-r1:32b"
-_MODEL_CODER         = "qwen2.5:14b"
-_MODEL_PLANNER       = "phi4:14b"          # lightweight tasks (classify, etc.)
-_MODEL_SMART_PLANNER = "phi4:14b"          # Planner — fast structured JSON (was qwq:32b, reverted 3.11)
+# Swarm 3.15 — Model unification (Chunk 7 of agent unification PR).
+# Pre-gate: qwen3.6:35b-Grindlewalt is 23 GB Q4_K_M — overflows 12 GB RTX 3060
+# (was 35%/65% CPU/GPU split, ~250s/req), so we use qwen3-coder:30b as the
+# unified default everywhere. All five constants are env-overridable for
+# instant rollback without code edits.
+_MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "qwen3-coder:30b")
+_MODEL_REASONER      = os.getenv("SWARM_MODEL_REASONER",      _MODEL_DEFAULT)
+_MODEL_FALLBACK      = os.getenv("SWARM_MODEL_FALLBACK",      _MODEL_DEFAULT)
+_MODEL_CODER         = os.getenv("SWARM_MODEL_CODER",         _MODEL_DEFAULT)
+_MODEL_PLANNER       = os.getenv("SWARM_MODEL_PLANNER",       _MODEL_DEFAULT)
+_MODEL_SMART_PLANNER = os.getenv("SWARM_MODEL_SMART_PLANNER", _MODEL_DEFAULT)
 
 # ── Swarm 3.13 kill switches ─────────────────────────────────────────────────
 RESIDUAL_LOCK_ORCH = os.getenv("SWARM_RESIDUAL_LOCK_ORCH", "1") != "0"
@@ -139,7 +145,9 @@ class OrchestratorV3:
 
         self.status = None
 
-        print(f"🚀 Swarm 3.12 OrchestratorV3  —  planner:{_MODEL_SMART_PLANNER} | solver:qwen2.5-coder:32b | writer:{_MODEL_CODER}")
+        _think_state = "on" if os.getenv("SWARM_THINK", "0") == "1" else "off"
+        print(f"🚀 Swarm 3.15 OrchestratorV3  —  unified:{_MODEL_DEFAULT} | think:{_think_state}")
+        print(f"   planner:{_MODEL_SMART_PLANNER} | reasoner:{_MODEL_REASONER} | coder:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -1624,12 +1632,12 @@ RULES — you MUST follow these:
             "computed and provided to you. If a value was not computed, you state it failed. "
             "You NEVER guess, estimate, or invent numerical results."
         )
-        print("\n✍️  Writing final answer with qwen2.5:14b …")
+        print(f"\n✍️  Writing final answer with {_MODEL_CODER} …")
         answer = await self._ollama_chat(
             model=_MODEL_CODER,
             prompt=prompt,
             system=system,
-            timeout=900,       # CPU-only fallback needs up to ~10 min
+            timeout=1200,      # 30b safety margin (Chunk 7)
             num_predict=4096,
         )
         if not answer.strip():

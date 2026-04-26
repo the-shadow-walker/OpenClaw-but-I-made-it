@@ -400,13 +400,29 @@ class PlannerV2:
         data = _extract_json(raw)
 
         # Build SubProblem list
+        # Swarm 3.15: qwen3-coder:30b sometimes emits inputs as list-of-dicts;
+        # coerce to {var: value} so downstream .items() never crashes.
+        def _coerce_inputs(_raw):
+            if isinstance(_raw, dict):
+                return _raw
+            if isinstance(_raw, list):
+                _out = {}
+                for _it in _raw:
+                    if isinstance(_it, dict):
+                        _n = _it.get("name") or _it.get("var") or _it.get("variable") or _it.get("symbol")
+                        _v = _it.get("value", _it.get("val"))
+                        if _n is not None and _v is not None:
+                            _out[str(_n)] = _v
+                return _out
+            return {}
+
         sub_problems = []
         for sp_data in data.get("sub_problems", []):
             sub_problems.append(SubProblem(
                 id=sp_data.get("id", "SP1"),
                 description=sp_data.get("description", "Solve the problem"),
                 domain=sp_data.get("domain", data.get("domain", "physics")),
-                inputs=sp_data.get("inputs", {}),
+                inputs=_coerce_inputs(sp_data.get("inputs", {})),
                 expected_outputs=sp_data.get("expected_outputs", []),
                 approach=sp_data.get("approach", ""),
                 lookup_queries=sp_data.get("lookup_queries", [])[:3],
@@ -455,8 +471,24 @@ class PlannerV2:
         if not dep_order:
             dep_order = [sp.id for sp in sub_problems]
 
-        # Given values — merge from classification.variable_schema if available
-        given_vals = data.get("given_values", {})
+        # Given values — merge from classification.variable_schema if available.
+        # Swarm 3.15: qwen3-coder:30b sometimes emits list-of-dicts shape; coerce
+        # to {var: value} dict here so downstream .items() never crashes.
+        _gv_raw = data.get("given_values", {})
+        given_vals: Dict[str, float] = {}
+        if isinstance(_gv_raw, dict):
+            given_vals = dict(_gv_raw)
+        elif isinstance(_gv_raw, list):
+            for _item in _gv_raw:
+                if not isinstance(_item, dict):
+                    continue
+                _name = _item.get("name") or _item.get("var") or _item.get("variable") or _item.get("symbol")
+                _value = _item.get("value", _item.get("val"))
+                if _name and _value is not None:
+                    try:
+                        given_vals[str(_name)] = float(_value)
+                    except (TypeError, ValueError):
+                        given_vals[str(_name)] = _value  # keep as-is
         if classification and classification.variable_schema:
             for vname, vmeta in classification.variable_schema.items():
                 if vmeta.get("known") and "value" in vmeta and vname not in given_vals:

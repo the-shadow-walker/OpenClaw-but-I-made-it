@@ -422,9 +422,11 @@ RULES:
 class ReactSolver:
     # Swarm 3.14: MAX_TURNS = 20 with Diagnostician rescue at T14 (was 15 hard-cap)
     MAX_TURNS = 20
-    # qwen2.5-coder:32b: fast, code-focused, no think loops, strong format adherence.
-    # Alternatives: "qwen2.5-coder:14b" (3× faster, weaker), "qwq:32b" (best reasoning, 5× slower)
-    MODEL = "qwen2.5-coder:32b"
+    # Swarm 3.15: unified-model default (qwen3-coder:30b). Env-overridable via
+    # SWARM_MODEL_SOLVER for instant rollback. 35b-Grindlewalt was attempted but
+    # overflows 12 GB GPU (35%/65% CPU/GPU split, ~250s/req).
+    # Alternatives: "qwen2.5-coder:32b" (prior default), "qwq:32b" (5× slower, best reasoning)
+    MODEL = os.getenv("SWARM_MODEL_SOLVER", "qwen3-coder:30b")
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     LLM_TIMEOUT = 900   # seconds — 15 min cap per turn (no think loops)
 

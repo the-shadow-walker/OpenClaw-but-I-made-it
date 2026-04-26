@@ -99,6 +99,11 @@ class Config:
     MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT_JOBS', 3))
     API_KEY    = os.getenv('SWARM_API_KEY', None)
 
+# Swarm 3.15 — Default chat model (single-token routing). Documented exception
+# to model unification: 30b stays here too unless SWARM_DEFAULT_CHAT_MODEL
+# overrides. Was hardcoded phi4:14b in 4 places; now centralised + env-overridable.
+_MODEL_DEFAULT_CHAT = os.getenv("SWARM_DEFAULT_CHAT_MODEL", "qwen3-coder:30b")
+
 
 # =============================================================================
 # PROGRESS ROUTER  (thread-local stdout -> per-job queue)
@@ -848,7 +853,7 @@ def get_model_config():
 @app.route('/config/models', methods=['POST'])
 @require_api_key
 def set_model_config():
-    """Assign a model to a role: POST {"role": "solver", "model": "phi4:14b"}"""
+    """Assign a model to a role: POST {"role": "solver", "model": "qwen3-coder:30b"}"""
     data = request.get_json(force=True) or {}
     role  = data.get("role",  "").strip()
     model = data.get("model", "").strip()
@@ -1341,7 +1346,7 @@ def metrics():
             'status': 'online',
             'active_jobs': active,
             'port': Config.PORT,
-            'model': 'phi4:14b',
+            'model': _MODEL_DEFAULT_CHAT,
         },
         'memory_pct': mem_pct,
         'cpu_pct': cpu_pct,
@@ -1421,7 +1426,7 @@ def search_stream():
             f"Give a factual answer in 2-4 sentences. Cite sources as [1], [2] etc."
         )
         payload = {
-            "model": "phi4:14b",
+            "model": _MODEL_DEFAULT_CHAT,
             "prompt": prompt,
             "stream": True,
             "keep_alive": 0,
@@ -1477,9 +1482,11 @@ _DECIDE_SYSTEM = (
 
 
 def _ollama(prompt: str, system: str = "", stream: bool = False,
-            model: str = "phi4:14b", max_tokens: int = 1024,
+            model: str = "", max_tokens: int = 1024,
             temperature: float = 0.5) -> any:
     """Fire an Ollama /api/generate call. Returns response object."""
+    if not model:
+        model = _MODEL_DEFAULT_CHAT
     return _req.post(
         "http://localhost:11434/api/generate",
         json={
@@ -1695,13 +1702,14 @@ def main():
     auth_status = "enabled" if Config.API_KEY else "disabled (set SWARM_API_KEY to enable)"
 
     print("\n" + "=" * 62)
-    print("Swarm 3.9 REST API Server  |  Integration Contract v0.1")
+    print("Swarm 3.15 REST API Server  |  Integration Contract v0.1")
     print("=" * 62)
     print(f"Host:         {args.host}:{args.port}")
     print(f"Debug:        {Config.DEBUG}")
     print(f"SearXNG:      {Config.SEARXNG_URL or 'Not configured'}")
     print(f"Max jobs:     {Config.MAX_CONCURRENT}")
     print(f"Auth:         {auth_status}")
+    print(f"Chat model:   {_MODEL_DEFAULT_CHAT}")
     print(f"Project mode: {'available' if _HAS_PROJECT_SESSION else 'unavailable'}")
     print(f"SubAgent:     {'available' if _HAS_SUBAGENT else 'unavailable'}")
     print("\nEndpoints (open):")

@@ -379,14 +379,14 @@ class EngineerModeOrchestrator:
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
     async def _llm_query(self, prompt: str, system_prompt: str = "") -> str:
-        """phi4:14b — reasoning / classification / graph building."""
+        """Unified-model reasoning / classification / graph building (Swarm 3.15)."""
         if not _HAS_BASE:
             return ""
         try:
             agent = BaseAgent(
                 agent_id="eng_phi4",
                 agent_type=AgentType.WORKER,
-                model_name="phi4:14b",
+                model_name=os.getenv("SWARM_MODEL_ENGINEER", os.getenv("SWARM_MODEL_DEFAULT", "qwen3-coder:30b")),
                 system_prompt=system_prompt or "You are an expert systems engineer.",
             )
             return await agent.query_llm(prompt, stream=False)
