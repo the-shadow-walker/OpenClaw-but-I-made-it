@@ -5,11 +5,16 @@ Uses Ollama HTTP API for reliable model interaction
 """
 
 import asyncio
+import os
 import requests
 import json
 import time
-from typing import Optional, List
+from datetime import datetime
+from typing import Any, Dict, Optional, List
 from core import Message, MessageType, Task, AgentType, message_bus, memory
+
+
+SESSIONS_DIR = os.path.expanduser("~/.agent_bin/sessions")
 
 
 class BaseAgent:
@@ -102,7 +107,7 @@ class BaseAgent:
                     f"{self.ollama_base_url}/api/generate",
                     json=payload,
                     stream=stream,
-                    timeout=120
+                    timeout=300
                 )
                 response.raise_for_status()
                 
@@ -160,7 +165,7 @@ class BaseAgent:
             return full_response
                 
         except requests.exceptions.Timeout:
-            print(f"\n      ❌ Timeout after 120s\n")
+            print(f"\n      ❌ Timeout after 300s\n")
             return "Error: Model timeout"
         except requests.exceptions.ConnectionError:
             print(f"\n      ❌ Connection error - is Ollama running?\n")
@@ -199,3 +204,62 @@ class BaseAgent:
     
     def __repr__(self):
         return f"{self.agent_type.value}:{self.agent_id}({self.model_name})"
+
+    # ── Session continuity hooks (additive) ───────────────────────────────────
+    # These are best-effort; subclasses with richer state can override.
+
+    def save_context(self, label: str = "snapshot") -> str:
+        """Snapshot lightweight agent state to ~/.agent_bin/sessions/<label>.json.
+
+        Returns the absolute path on success, "" on failure. Never raises.
+        Subclasses that hold pinned slots / file manifests should override this
+        and merge their fields into the dict before writing.
+        """
+        try:
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            safe = "".join(c if c.isalnum() else "_" for c in label)[:60] or "snapshot"
+            path = os.path.join(SESSIONS_DIR, f"swarm_{self.agent_id}_{safe}_{ts}.json")
+            payload: Dict[str, Any] = {
+                "agent_id": self.agent_id,
+                "agent_type": self.agent_type.value,
+                "model_name": self.model_name,
+                "label": label,
+                "saved_at": datetime.utcnow().isoformat(),
+                "current_task_id": getattr(self.current_task, "task_id", None) if self.current_task else None,
+            }
+            with open(path, "w") as f:
+                json.dump(payload, f, indent=2)
+            return path
+        except Exception as e:
+            print(f"⚠️ save_context({label!r}) failed: {e}")
+            return ""
+
+    def restore_context(self, path: str) -> bool:
+        """Best-effort reload from a snapshot. Returns True on success."""
+        try:
+            if not path or not os.path.exists(path):
+                return False
+            with open(path, "r") as f:
+                payload = json.load(f)
+            # Subclasses can override to merge richer fields back.
+            if isinstance(payload, dict) and payload.get("agent_id") == self.agent_id:
+                return True
+            return False
+        except Exception as e:
+            print(f"⚠️ restore_context({path!r}) failed: {e}")
+            return False
+
+    def attach_sidechain(self, writer) -> None:
+        """Attach a SidechainWriter so subsequent ReAct turns get logged."""
+        self._sidechain = writer
+
+    def _sidechain_event(self, event_type: str, **fields: Any) -> None:
+        """Internal: emit one event if a sidechain is attached."""
+        sc = getattr(self, "_sidechain", None)
+        if sc is None:
+            return
+        try:
+            sc.write_event(event_type, agent_id=self.agent_id, **fields)
+        except Exception:
+            pass
