@@ -510,6 +510,17 @@ def _start_worker(job_id: str, question: str, since: str = None,
                 if lf and answer:
                     lf.write(f"\n{'='*70}\nFINAL ANSWER\n{'='*70}\n{answer}\n{'='*70}\n")
                     lf.flush()
+            # Additive: write a clean markdown deliverable to ~/.agent_bin/results/
+            # Existing swarm_results/<job_id>.log is untouched (back-compat).
+            if _HAS_SUBAGENT and answer:
+                try:
+                    _md_path = write_deliverable_md(
+                        question=question, answer=answer, job_id=job_id, role="query"
+                    )
+                    if _md_path:
+                        logging.info(f"Job {job_id} markdown deliverable: {_md_path}")
+                except Exception as _e_md:
+                    logging.warning(f"Job {job_id} markdown deliverable failed: {_e_md}")
             logging.info(f"Job {job_id} completed in {elapsed}s")
             if callback_url:
                 _fire_webhook(callback_url, {
