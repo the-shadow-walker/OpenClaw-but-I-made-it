@@ -69,6 +69,14 @@ except ImportError:
     print("⚠️  react_solver: rag_tool not available")
 
 try:
+    from agent_memory import get_default as _get_agent_memory
+    _HAS_AGENT_MEMORY = True
+except ImportError:
+    _HAS_AGENT_MEMORY = False
+    _get_agent_memory = None
+    print("⚠️  react_solver: agent_memory not available — publish/read_context disabled")
+
+try:
     from planner_v2 import SubProblem, SolvePlan
     _HAS_PLANNER_TYPES = True
 except ImportError:
@@ -181,6 +189,25 @@ To query the physics reference database:
   ACTION: rag
   INPUT: <one specific query string>
   END_INPUT
+
+To publish a result to the shared agent context board (visible to other
+agents like CMD/GUI; survives across jobs for ttl_hours):
+  THOUGHT: <why this matters to other agents>
+  ACTION: publish_context
+  INPUT:
+  key: <stable_namespaced_key>
+  value: <free text or numeric+unit>
+  ttl_hours: 24
+  END_INPUT
+
+To read previously-published context entries (e.g. results another agent
+left for you):
+  THOUGHT: <why you need this>
+  ACTION: read_context
+  INPUT:
+  key: <stable_namespaced_key>
+  END_INPUT
+  (or `keys: a, b, c` for several at once)
 
 When you have the final answer:
   THOUGHT: <final reasoning>
@@ -424,7 +451,10 @@ class ReactSolver:
         self._turn = 0
         self._log_parts: List[str] = []
         self._ran_code: bool = False              # Lock B: set True on first run_code
-        self._tool_counts: Dict[str, int] = {"run_code": 0, "search": 0, "rag": 0}
+        self._tool_counts: Dict[str, int] = {
+            "run_code": 0, "search": 0, "rag": 0,
+            "publish_context": 0, "read_context": 0,
+        }
         self._locked_results: Dict[str, str] = {}  # Ledger: var → "value unit" (never overwritten once set)
         self._recent_lens: List[int] = []         # Loop detection: last 3 response lengths
         self._failed_snippets: List[str] = []     # Error-Memory: key failing lines across all turns
@@ -863,8 +893,106 @@ class ReactSolver:
             return await self._tool_search(input_text.strip())
         elif action == "rag":
             return await self._tool_rag(input_text.strip())
+        elif action == "publish_context":
+            return await self._tool_publish_context(input_text)
+        elif action == "read_context":
+            return await self._tool_read_context(input_text)
         else:
-            return f"Unknown action '{action}'. Use run_code, search, or rag."
+            return (f"Unknown action '{action}'. Use run_code, search, rag, "
+                    f"publish_context, or read_context.")
+
+    # ── Cross-agent context tools (Chunk 5) ───────────────────────────────────
+
+    @staticmethod
+    def _parse_kv_block(text: str) -> Dict[str, str]:
+        """Parse `key: value` lines from input_text into a dict.
+
+        Tolerates leading/trailing whitespace, comment lines (#), and
+        a single multi-line value when only one key is given.
+        """
+        out: Dict[str, str] = {}
+        if not text:
+            return out
+        # Try line-based key: value parse first
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if ":" in s:
+                k, v = s.split(":", 1)
+                k = k.strip().lower()
+                v = v.strip()
+                if k:
+                    out[k] = v
+        return out
+
+    async def _tool_publish_context(self, input_text: str) -> str:
+        """Write a key/value to the shared AgentMemory board.
+
+        Expected input:
+            key: <name>
+            value: <free-text>
+            ttl_hours: <int, optional, default 24>
+        """
+        if not _HAS_AGENT_MEMORY or _get_agent_memory is None:
+            return "ERROR: agent_memory unavailable on this server."
+        kv = self._parse_kv_block(input_text)
+        key = kv.get("key", "").strip()
+        value = kv.get("value", "").strip()
+        if not key or not value:
+            return ("ERROR: publish_context requires both 'key:' and 'value:' lines. "
+                    "Example:\n  key: rocket_burnout_velocity\n  value: 4823.7 m/s")
+        try:
+            ttl_hours = int(kv.get("ttl_hours", "24"))
+        except ValueError:
+            ttl_hours = 24
+        ttl_seconds = max(60, ttl_hours * 3600)
+        try:
+            mem = _get_agent_memory(agent_id=f"swarm.react_solver.{self.sub_problem.id}")
+            ok = mem.set_context(key, value, ttl=ttl_seconds)
+            if ok:
+                return f"OK: published '{key}' to shared context (ttl {ttl_hours}h)."
+            return f"ERROR: set_context returned False for key '{key}'."
+        except Exception as e:
+            return f"ERROR: publish_context failed: {type(e).__name__}: {e}"
+
+    async def _tool_read_context(self, input_text: str) -> str:
+        """Read one or more keys from the shared AgentMemory board.
+
+        Expected input — either a single key on one line, or:
+            key: <name>
+        Multiple keys can be given as `keys: a, b, c`.
+        """
+        if not _HAS_AGENT_MEMORY or _get_agent_memory is None:
+            return "ERROR: agent_memory unavailable on this server."
+        s = (input_text or "").strip()
+        keys: List[str] = []
+        if "\n" not in s and ":" not in s and s:
+            keys = [s]
+        else:
+            kv = self._parse_kv_block(s)
+            if "key" in kv:
+                keys = [kv["key"].strip()]
+            elif "keys" in kv:
+                keys = [k.strip() for k in kv["keys"].split(",") if k.strip()]
+        if not keys:
+            return ("ERROR: read_context requires a key. Example:\n  key: rocket_burnout_velocity\n"
+                    "or:\n  keys: a, b, c")
+        try:
+            mem = _get_agent_memory(agent_id=f"swarm.react_solver.{self.sub_problem.id}")
+            lines: List[str] = []
+            for k in keys:
+                try:
+                    v = mem.get_context(k)
+                except Exception as e:
+                    v = f"<error: {type(e).__name__}: {e}>"
+                if v is None:
+                    lines.append(f"{k}: <not set>")
+                else:
+                    lines.append(f"{k}: {v}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"ERROR: read_context failed: {type(e).__name__}: {e}"
 
     async def _tool_run_code(self, code_text: str) -> str:
         """Execute a Python code block and return stdout / error."""
