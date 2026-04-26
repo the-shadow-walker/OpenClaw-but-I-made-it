@@ -400,6 +400,9 @@ class OllamaCommandAgent:
     # 8192 tokens ≈ 30KB output — plenty for any single-file artifact or patch.
     FILE_GEN_NUM_PREDICT = 8192
     PATCH_NUM_PREDICT = 4096
+    # Disable qwen3 thinking phase by default — saves ~3× wall-clock per call.
+    # Override with AGENT_THINK=1 to re-enable (e.g. for hard reasoning tasks).
+    THINK_DEFAULT = os.getenv("AGENT_THINK", "0") == "1"
     # Session continuity: snapshots and sidechain transcripts live here. Created on demand.
     SESSIONS_DIR  = os.path.expanduser("~/.agent_bin/sessions")
     SIDECHAIN_DIR = os.path.expanduser("~/.agent_bin/sidechains")
@@ -505,6 +508,7 @@ class OllamaCommandAgent:
             "model": model,
             "messages": messages,
             "stream": False,
+            "think": self.THINK_DEFAULT,  # Hardening: disable qwen3 thinking by default
             "keep_alive": "10m",
             "options": options,
         }
@@ -554,6 +558,7 @@ class OllamaCommandAgent:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "think": self.THINK_DEFAULT,
             "keep_alive": "10m",
             "options": {"num_ctx": self.HEAVY_NUM_CTX},
         }
@@ -610,6 +615,7 @@ class OllamaCommandAgent:
         request_data = {
             "model": self.fast_model,
             "messages": messages,
+            "think": self.THINK_DEFAULT,
             "keep_alive": -1,
             "options": {"temperature": 0.1, "num_ctx": self.NUM_CTX},
         }
