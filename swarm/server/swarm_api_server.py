@@ -77,6 +77,13 @@ try:
 except ImportError:
     _HAS_SEARCH = False
 
+try:
+    from subagent_handler import run_role_sync, write_deliverable_md, VALID_ROLES  # type: ignore
+    _HAS_SUBAGENT = True
+except Exception as _e_sa:
+    _HAS_SUBAGENT = False
+    print(f"Warning: subagent_handler unavailable: {_e_sa}")
+
 
 # =============================================================================
 # CONFIG
@@ -1154,6 +1161,76 @@ def project_get_session(session_id: str):
 
 
 # =============================================================================
+# ROUTES -- /subagent/<role>  (cross-agent delegation entry point)
+# =============================================================================
+
+@app.route('/subagent/<role>', methods=['POST'])
+@require_api_key
+def subagent_endpoint(role: str):
+    """Sync long-poll subagent delegation. Per INTEGRATION_CONTRACT.md §4."""
+    if not _HAS_SUBAGENT:
+        return jsonify({'error': 'subagent_handler not loaded on this server'}), 503
+
+    role = (role or '').strip().lower()
+    if role not in VALID_ROLES:
+        return jsonify({
+            'error': f"Unknown role '{role}'",
+            'valid': sorted(VALID_ROLES),
+        }), 400
+
+    data = request.json or {}
+    task = (data.get('task') or '').strip()
+    if not task:
+        return jsonify({'error': 'task is required'}), 400
+
+    context_keys = data.get('context_keys') or []
+    if not isinstance(context_keys, list):
+        return jsonify({'error': 'context_keys must be a list of strings'}), 400
+
+    extra = data.get('extra') or {}
+    if not isinstance(extra, dict):
+        return jsonify({'error': 'extra must be a JSON object'}), 400
+
+    timeout_s = int(extra.get('timeout_s', 1800))
+    if timeout_s > 3600:
+        return jsonify({'error': 'timeout_s exceeds 3600s hard cap'}), 400
+
+    # Concurrency guard — same MAX_CONCURRENT as the main pipeline
+    with _rj_lock:
+        n_running = sum(1 for t in running_jobs.values() if t.is_alive())
+    if n_running >= Config.MAX_CONCURRENT:
+        return jsonify({'error': 'Server busy', 'retry_after': 30}), 429
+
+    max_iter = int(extra.get('max_iterations', data.get('max_iterations', 20)))
+
+    try:
+        result = run_role_sync(
+            role=role,
+            task=task,
+            max_iterations=max_iter,
+            context_keys=context_keys,
+            extra=extra,
+        )
+    except Exception as e:
+        logging.exception(f"/subagent/{role} crashed")
+        return jsonify({
+            'success': False,
+            'target': f'swarm:{role}',
+            'summary': f'Subagent dispatcher crashed: {type(e).__name__}: {e}',
+            'deliverables': [],
+            'context_keys_written': [],
+            'error': f'{type(e).__name__}: {e}',
+        }), 500
+
+    payload = result.to_dict()
+    if (not result.success) and result.error == 'timeout':
+        return jsonify(payload), 504
+    if not result.success:
+        return jsonify(payload), 500
+    return jsonify(payload), 200
+
+
+# =============================================================================
 # ROUTES -- SSE Fan-out (poll progress_log)
 # =============================================================================
 
@@ -1607,7 +1684,7 @@ def main():
     auth_status = "enabled" if Config.API_KEY else "disabled (set SWARM_API_KEY to enable)"
 
     print("\n" + "=" * 62)
-    print("Swarm 3.9 REST API Server")
+    print("Swarm 3.9 REST API Server  |  Integration Contract v0.1")
     print("=" * 62)
     print(f"Host:         {args.host}:{args.port}")
     print(f"Debug:        {Config.DEBUG}")
@@ -1615,6 +1692,7 @@ def main():
     print(f"Max jobs:     {Config.MAX_CONCURRENT}")
     print(f"Auth:         {auth_status}")
     print(f"Project mode: {'available' if _HAS_PROJECT_SESSION else 'unavailable'}")
+    print(f"SubAgent:     {'available' if _HAS_SUBAGENT else 'unavailable'}")
     print("\nEndpoints (open):")
     print("  GET  /health")
     print("  GET  /status")
@@ -1632,6 +1710,7 @@ def main():
     print("  POST /query                -- sync (blocking)")
     print("  POST /query_async          -- async, returns job_id")
     print("  POST /query_stream         -- SSE live progress stream")
+    print("  POST /subagent/<role>      -- math|engineer|deep_search (sync long-poll)")
     print("  POST /config/models        -- set model for a role")
     print("  POST /jobs/<id>/cancel     -- cancel a running job")
     print("  DELETE /jobs/<id>          -- cancel a running job (alias)")
