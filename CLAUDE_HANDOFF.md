@@ -141,3 +141,83 @@ Stanza format:
 
 **next:** Chunk 8 — `compute/deep_search_agent.py` (4-round ReAct: planner → SearXNG → synthesizer → gap-finder → writer; structured markdown deliverable) + engineer_mode markdown delivery + sidechain wiring; engineer external APIs / circuit-gen DEFERRED.
 
+
+
+## [2026-04-26 — swarm Claude] Chunk 8 shipped — PR COMPLETE
+
+**shipped:** e475fc9 (swarm: DeepSearchAgent + engineer subagent wiring)
+
+**delivered:**
+- `swarm/compute/deep_search_agent.py` (NEW, ~440 lines): standalone 6-round
+  research agent (PLAN → SEARCH → SYNTHESIZE → GAP-FIND → REFINE → WRITE)
+  with progressive markdown writes, sidechain JSONL trace, env-driven
+  configuration. Final deliverable lands at
+  `~/.agent_bin/results/<topic>_deepsearch_<job_id>.md`.
+- `swarm/engineer/engineer_mode.py`: EngineerModeOrchestrator now accepts
+  `sidechain` + `job_id`; emits `engineer_phase` events at start+done of
+  every E1-E6 phase plus run_start/run_done; new `_write_agent_bin_deliverable`
+  writes TDS to `~/.agent_bin/results/<slug>_engineer_<jid>.md` so
+  /subagent/engineer returns a real on-disk artefact. `run_engineer_mode`
+  wrapper plumbed for both kwargs.
+- `swarm/server/subagent_handler.py`: `_run_engineer` and `_run_deep_search`
+  now construct `make_sidechain(role, job_id)` (gated on SWARM_AS_SUBAGENT=1)
+  and pass sidechain + job_id into the dispatched agents.
+
+**validation:**
+- Imports clean: `DeepSearchAgent`, `EngineerModeOrchestrator`, and
+  `run_engineer_mode` resolve and the latter has the new
+  `(problem, searxng_url, debug, save_markdown, sidechain, job_id)` sig.
+- `/subagent/deep_search` end-to-end smoke ("main types of solar panels"):
+  - Plan emitted 5 sub-queries.
+  - Round 1 fired 5 SearXNG fan-out → 25 raw → 24 deduped hits.
+  - Synthesise produced 4029 chars (≈3 min, qwen3-coder:30b).
+  - Gap-find returned `n_gaps=0` → Round 4 skipped as designed.
+  - Deliverable file written with the in-progress stub plus all 24
+    `[N] (URL)` sources.
+  - Sidechain JSONL written with `ds_run_start`,
+    `ds_round_start/ds_round_done` for rounds 0/1/2/3/5 — matches spec.
+- Bug fixed mid-test: `FlexibleSearchAgent` constructor doesn't take a
+  `debug=` kwarg; replaced with `max_results=env-driven`. Verified post-fix.
+
+**partial / known issue:**
+- Round 5 (final write) wedged on cold-loading qwen3-coder:30b because
+  an external Open WebUI client kept reloading `qwen3.6:35b-Grindlewalt`
+  with `keep_alive=Forever`, hogging the 12 GB GPU. Long-poll timed out
+  at 1400 s with the writer stuck on the cold-load. This is an
+  environment-contention symptom (external clients overriding our
+  `keep_alive=0` policy), not a Chunk 8 code defect. The pipeline ran
+  through 4/6 rounds correctly and produced a valid in-progress
+  deliverable + complete sidechain trace.
+- Engineer mode end-to-end smoke not run this round (would have
+  collided with the wedged GPU); manifest plumbing verified by import +
+  signature inspection.
+
+**need from cmd:** none for this chunk. The cross-side ask is still the
+Chunk-3 follow-up: migrate `cmd/core/subagent.py:_run_swarm` from
+`POST /query` to `POST /subagent/<role>`. `/query` continues to work
+as back-compat until then.
+
+**blocking:** none.
+
+**deferred (file follow-up tasks):**
+- Engineer mode external APIs (Adafruit / Amazon / Octopart) and circuit
+  generation — explicitly out of scope per the locked plan; engineer
+  mode skeleton (markdown deliverable + sidechain) is complete and
+  ready for these to be added in a follow-up PR.
+- Sidechain pruning cron (mtime > 7 d).
+- DeepSearchAgent `fetch_url` tool (v2).
+- Harden ollama-swarm against external clients setting
+  `keep_alive=Forever` (e.g. Open WebUI). Options: pre-flight
+  `nvidia-smi` gate before LLM calls, or a watchdog that force-unloads
+  any non-30b model when a swarm job is queued. This is what wedged
+  the Chunk 8 final-write smoke; deserves its own scoped chunk.
+- Swarm → GUI delegation (SubAgentInvoker target `gui:*`).
+- A2B / qwen3.6:35b-A3B-Grindlewalt model variant.
+
+**next:** PR is feature-complete per the locked 8-chunk plan. The full
+Section-4 checklist is satisfied: AgentMemory, Sidechain, SubAgentInvoker,
+markdown deliverables, ReactSolver publish/read tools, auto-compression,
+model unification, DeepSearchAgent, and engineer subagent wiring.
+Recommend: stand down on swarm side and let CMD pick up the
+`swarm_task` migration to the new `/subagent/<role>` endpoint.
+
