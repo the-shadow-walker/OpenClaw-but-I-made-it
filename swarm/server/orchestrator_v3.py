@@ -101,6 +101,10 @@ _MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "qwen3.6:35b-Grindlewalt
 _MODEL_REASONER      = os.getenv("SWARM_MODEL_REASONER",      _MODEL_DEFAULT)
 _MODEL_FALLBACK      = os.getenv("SWARM_MODEL_FALLBACK",      _MODEL_DEFAULT)
 _MODEL_CODER         = os.getenv("SWARM_MODEL_CODER",         _MODEL_DEFAULT)
+# Swarm 3.18 — Classifier + planner stay on the unified default. With
+# format:"json" + retry-on-failure, these tiny structured-JSON tasks are now
+# reliable on the big model AND avoid the 100-200s VRAM swap cost of loading
+# a smaller secondary (OLLAMA_MAX_LOADED_MODELS=1). Override for benchmarking.
 _MODEL_PLANNER       = os.getenv("SWARM_MODEL_PLANNER",       _MODEL_DEFAULT)
 _MODEL_SMART_PLANNER = os.getenv("SWARM_MODEL_SMART_PLANNER", _MODEL_DEFAULT)
 _NUM_CTX             = int(os.getenv("SWARM_NUM_CTX", "32768"))
@@ -147,8 +151,8 @@ class OrchestratorV3:
         self.status = None
 
         _think_state = "on" if os.getenv("SWARM_THINK", "0") == "1" else "off"
-        print(f"🚀 Swarm 3.15 OrchestratorV3  —  unified:{_MODEL_DEFAULT} | think:{_think_state}")
-        print(f"   planner:{_MODEL_SMART_PLANNER} | reasoner:{_MODEL_REASONER} | coder:{_MODEL_CODER}")
+        print(f"🚀 Swarm 3.18 OrchestratorV3  —  default:{_MODEL_DEFAULT} | think:{_think_state}")
+        print(f"   planner:{_MODEL_SMART_PLANNER} (json-mode) | reasoner:{_MODEL_REASONER} | coder:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
         print("   ✅ Delegation to engineer_mode (ENGINEERING_DESIGN)")
@@ -1825,18 +1829,18 @@ Rules:
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
     async def _llm_query(self, prompt: str, system_prompt: str = "") -> str:
-        """phi4:14b — planning, classification, lightweight reasoning."""
-        try:
-            agent = BaseAgent(
-                agent_id="v3_phi4",
-                agent_type=AgentType.WORKER,
-                model_name=_MODEL_PLANNER,
-                system_prompt=system_prompt or "You are a helpful assistant.",
-            )
-            return await agent.query_llm(prompt, stream=False)
-        except Exception as e:
-            print(f"⚠️  _llm_query error: {e}")
-            return ""
+        """Classifier + lightweight structured-output reasoning. Uses Ollama
+        format:"json" so the model can never emit prose-only thinking replies.
+        4096-token cap prevents JSON truncation on big classifier prompts.
+        """
+        return await OrchestratorV3._ollama_chat(
+            model=_MODEL_PLANNER,
+            prompt=prompt,
+            system=system_prompt or "You are a helpful assistant.",
+            timeout=300,
+            num_predict=4096,
+            format="json",
+        )
 
     async def _llm_query_coder(self, prompt: str, system_prompt: str = "") -> str:
         """qwen2.5:14b — code generation and technical writing."""
@@ -1886,6 +1890,7 @@ Rules:
             system=system,
             timeout=600,        # 10 min ceiling for planning
             num_predict=4096,   # JSON plan fits well within 4k tokens
+            format="json",      # Swarm 3.18 — force structured JSON output
         )
 
     async def _llm_query_fallback(self, prompt: str, system_prompt: str = "") -> str:
@@ -1910,6 +1915,7 @@ Rules:
         num_predict: int = 2048,
         think: bool = True,
         keep_alive: int = 600,
+        format: Optional[str] = None,   # Swarm 3.18 — set "json" for structured output
     ) -> str:
         """Direct Ollama /api/chat call using streaming (avoids HTTP timeout on large models)."""
         messages = []
@@ -1929,6 +1935,9 @@ Rules:
                 "num_ctx": _NUM_CTX,
             },
         }
+        if format:
+            # Ollama API: top-level "format":"json" forces strict JSON-mode decode.
+            payload["format"] = format
 
         def _stream() -> str:
             resp = requests.post(

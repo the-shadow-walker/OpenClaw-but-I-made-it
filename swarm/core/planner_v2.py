@@ -344,7 +344,19 @@ class PlannerV2:
             )
 
             raw = await llm_query_func(prompt, system)
-            plan = PlannerV2._parse_plan(question, raw, classification, requirements)
+            # Swarm 3.18 — one-shot retry if first reply isn't parseable JSON.
+            try:
+                plan = PlannerV2._parse_plan(question, raw, classification, requirements)
+            except (ValueError, KeyError, TypeError) as parse_err:
+                print(f"⚠️  PlannerV2 parse failed ({parse_err}) — retrying with stricter reminder")
+                strict_prompt = (
+                    prompt
+                    + "\n\nIMPORTANT: Your previous reply was not valid JSON. "
+                    + "Output ONLY the JSON object — no thinking, no prose, no fences. "
+                    + "Begin with `{` and end with `}`."
+                )
+                raw = await llm_query_func(strict_prompt, system)
+                plan = PlannerV2._parse_plan(question, raw, classification, requirements)
             print(f"📋 SolvePlan: {len(plan.sub_problems)} sub-problem(s), "
                   f"order: {plan.dependency_order}")
             return plan, requirements
@@ -374,7 +386,19 @@ class PlannerV2:
                 "Output ONLY valid JSON matching the schema exactly. No prose, no fences."
             )
             raw = await llm_query_func(prompt, system)
-            data = _extract_json(raw)
+            # Swarm 3.18 — one-shot retry on JSON parse failure with stricter reminder.
+            try:
+                data = _extract_json(raw)
+            except ValueError:
+                print("⚠️  extract_requirements: no JSON in first reply — retrying")
+                strict_prompt = (
+                    prompt
+                    + "\n\nIMPORTANT: Your previous reply was not valid JSON. "
+                    + "Output ONLY the JSON object — no thinking, no prose, no fences. "
+                    + "Begin with `{` and end with `}`."
+                )
+                raw = await llm_query_func(strict_prompt, system)
+                data = _extract_json(raw)
             reqs = []
             for item in data.get("requirements", []):
                 reqs.append(Requirement(

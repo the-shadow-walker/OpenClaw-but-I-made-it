@@ -128,25 +128,43 @@ Respond with ONLY valid JSON (no markdown, no explanation):
         prompt = QuestionClassifier.CLASSIFICATION_PROMPT.format(question=question)
         
         try:
-            response = await llm_query_func(
-                prompt=prompt,
-                system_prompt="You are a physics/math question analyzer. Respond ONLY with valid JSON."
-            )
-            
             import json
             import re
 
-            # Lazy JSON: find first {...} block — handles Gemma4 thought prefixes
-            _cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(),
-                               flags=re.MULTILINE)
-            try:
-                data = json.loads(_cleaned)
-            except json.JSONDecodeError:
+            async def _ask(_prompt: str) -> str:
+                return await llm_query_func(
+                    prompt=_prompt,
+                    system_prompt="You are a physics/math question analyzer. Respond ONLY with valid JSON."
+                )
+
+            def _parse(_resp: str):
+                # Strip <think>…</think> from reasoner replies, then markdown fences.
+                _resp = re.sub(r"<think>.*?</think>", "", _resp, flags=re.DOTALL).strip()
+                _cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", _resp.strip(),
+                                  flags=re.MULTILINE)
+                try:
+                    return json.loads(_cleaned)
+                except json.JSONDecodeError:
+                    pass
                 m = re.search(r'\{.*\}', _cleaned, re.DOTALL)
                 if m:
-                    data = json.loads(m.group())
-                else:
-                    raise ValueError("No JSON object found in classifier response")
+                    return json.loads(m.group())
+                raise ValueError("No JSON object found in classifier response")
+
+            response = await _ask(prompt)
+            # Swarm 3.18 — one-shot retry with stricter reminder.
+            try:
+                data = _parse(response)
+            except (ValueError, json.JSONDecodeError):
+                print("⚠️  Classifier: no JSON in first reply — retrying")
+                strict_prompt = (
+                    prompt
+                    + "\n\nIMPORTANT: Your previous reply was not valid JSON. "
+                    + "Output ONLY the JSON object — no thinking, no prose, no fences. "
+                    + "Begin with `{` and end with `}`."
+                )
+                response = await _ask(strict_prompt)
+                data = _parse(response)
             
             # Parse question type
             qtype_str = data.get('question_type', 'unknown').lower()
