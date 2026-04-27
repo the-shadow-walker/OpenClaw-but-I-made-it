@@ -1509,7 +1509,7 @@ PLAUSIBILITY: <brief physical sanity check>
 CHAIN_SUMMARY: <one paragraph explaining how the sub-results connect>
 END_ANSWER_DATA
 """
-        print("\n🧠 Synthesising with qwen2.5:14b …")
+        print(f"\n🧠 Synthesising with {_MODEL_CODER} …")
         raw = await self._llm_query_coder(prompt)
         # If qwen fails, try fallback
         if not raw.strip():
