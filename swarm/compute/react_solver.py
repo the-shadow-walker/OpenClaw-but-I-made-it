@@ -93,7 +93,9 @@ SUMMARY_PRUNE_ENABLED = os.getenv("SWARM_SUMMARY_PRUNE", "1") != "0"
 STABILITY_GATE_ENABLED = os.getenv("SWARM_STABILITY_GATE", "1") != "0"
 DIAGNOSTICIAN_ENABLED  = os.getenv("SWARM_DIAGNOSTICIAN",  "1") != "0"
 DIAGNOSTICIAN_TURN     = int(os.getenv("SWARM_DIAGNOSTICIAN_TURN", "14"))
-DIAGNOSTICIAN_MODEL    = os.getenv("SWARM_DIAGNOSTICIAN_MODEL", "qwen3-coder:30b")
+DIAGNOSTICIAN_MODEL    = os.getenv("SWARM_DIAGNOSTICIAN_MODEL", "batiai/qwen3.6-27b:iq4")
+# Swarm 3.16: KV-cache cap; keeps 27b IQ4 fully in 20 GB combined VRAM.
+NUM_CTX                = int(os.getenv("SWARM_NUM_CTX", "32768"))
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -422,13 +424,16 @@ RULES:
 class ReactSolver:
     # Swarm 3.14: MAX_TURNS = 20 with Diagnostician rescue at T14 (was 15 hard-cap)
     MAX_TURNS = 20
-    # Swarm 3.15: unified-model default (qwen3-coder:30b). Env-overridable via
-    # SWARM_MODEL_SOLVER for instant rollback. 35b-Grindlewalt was attempted but
-    # overflows 12 GB GPU (35%/65% CPU/GPU split, ~250s/req).
-    # Alternatives: "qwen2.5-coder:32b" (prior default), "qwq:32b" (5× slower, best reasoning)
-    MODEL = os.getenv("SWARM_MODEL_SOLVER", "qwen3-coder:30b")
+    # Swarm 3.17: model flipped back to qwen3.6:35b-Grindlewalt — best raw
+    # coding quality despite ~33% CPU spill (23 GB on 20 GB combined VRAM).
+    # MoE architecture (~3-4B active params/tok) keeps inference at ~17 tok/s
+    # even with spill, so pure-quality wins beat the IQ4 speed advantage.
+    # Env-overridable via SWARM_MODEL_SOLVER for instant rollback.
+    # Alternatives: "batiai/qwen3.6-27b:iq4" (15 GB, 13 tok/s, full GPU possible),
+    # "qwen3-coder:30b" (18 GB), "qwq:32b" (5× slower).
+    MODEL = os.getenv("SWARM_MODEL_SOLVER", "qwen3.6:35b-Grindlewalt")
     OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    LLM_TIMEOUT = 900   # seconds — 15 min cap per turn (no think loops)
+    LLM_TIMEOUT = 1500  # seconds — 25 min cap per turn (35b MoE at 17 tok/s)
 
     # NUM_PREDICT: max tokens per response. 2048 is enough for THOUGHT + code + END_INPUT.
     NUM_PREDICT: int = 2048
@@ -875,6 +880,7 @@ class ReactSolver:
             "options": {
                 "temperature": 0.6,
                 "num_predict": self.NUM_PREDICT,
+                "num_ctx": NUM_CTX,
             },
         }
         try:
@@ -1821,7 +1827,7 @@ class ReactSolver:
             "messages": messages,
             "stream": True,
             "keep_alive": keep_alive,
-            "options": {"temperature": 0.3, "num_predict": num_predict},
+            "options": {"temperature": 0.3, "num_predict": num_predict, "num_ctx": NUM_CTX},
         }
 
         def _stream() -> str:

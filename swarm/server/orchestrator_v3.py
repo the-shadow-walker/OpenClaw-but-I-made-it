@@ -92,12 +92,12 @@ except ImportError:
 
 # ── Ollama constants ─────────────────────────────────────────────────────────
 _OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-# Swarm 3.16 — Model unification flipped to qwen3.6 27b IQ4 (2026-04-26).
-# batiai/qwen3.6-27b:iq4 is 15 GB on disk, ~19 GB loaded with 32K KV cache —
-# fits fully across RTX 3060 Ti (8 GB) + RTX 3060 (12 GB) = 20 GB combined.
-# Smarter than qwen3-coder:30b on every metric except raw efficiency.
-# All defaults are env-overridable; SWARM_NUM_CTX caps KV cache to keep VRAM-fit.
-_MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4")
+# Swarm 3.17 — Model flipped back to qwen3.6:35b-Grindlewalt (2026-04-26).
+# 23 GB on disk, ~27 GB loaded with KV cache — exceeds 20 GB combined VRAM,
+# so ~33% CPU spill is expected. MoE (~3-4B active params/tok) keeps
+# inference at ~17 tok/s though, and raw coding quality beats the IQ4.
+# Env-overridable; SWARM_NUM_CTX caps KV cache.
+_MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "qwen3.6:35b-Grindlewalt")
 _MODEL_REASONER      = os.getenv("SWARM_MODEL_REASONER",      _MODEL_DEFAULT)
 _MODEL_FALLBACK      = os.getenv("SWARM_MODEL_FALLBACK",      _MODEL_DEFAULT)
 _MODEL_CODER         = os.getenv("SWARM_MODEL_CODER",         _MODEL_DEFAULT)
@@ -1638,7 +1638,7 @@ RULES — you MUST follow these:
             model=_MODEL_CODER,
             prompt=prompt,
             system=system,
-            timeout=1200,      # 30b safety margin (Chunk 7)
+            timeout=1500,      # 25 min — 35b MoE safety margin (Swarm 3.17)
             num_predict=4096,
         )
         if not answer.strip():
