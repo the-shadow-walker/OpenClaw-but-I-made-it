@@ -1,0 +1,80 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Personal AI assistant — file-first memory, snapshot/merge delegation, three-gate Dreaming consolidation. See docs/BUILD_SPEC.md."
+requires-python = ">=3.12"
+authors = [{name = "Grant"}]
+license = {text = "Proprietary"}
+readme = "README.md"
+
+# Per BUILD_SPEC §17.1. Pinned loosely to give Phase-by-Phase room to bump;
+# tighten once the build is past P9.
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "sqlite-vec>=0.1.5",
+    "watchdog>=4.0",
+    "python-frontmatter>=1.1",
+    "markdown-it-py>=3.0",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+qwen-tokenizer = ["transformers>=4.40"]   # only needed when llm.tokenizer == "qwen-native"
+openai-embeddings = ["openai>=1.20"]      # only needed for the OpenAI fallback embedding provider
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+# `jarvis` CLI entry — wires to jarvis.run:main once the CLI grows past the P0 stub.
+jarvis = "jarvis.run:main"
+
+# ---------------------------------------------------------------------------
+# Build backend — setuptools with package_dir trick so the directory containing
+# this pyproject.toml IS the `jarvis` package. See BUILD_SPEC §4 layout note.
+# This means: `pip install -e .` from /mnt/storage/NAS/Jarvis/jarvis/ registers
+# `jarvis` package pointing at that same directory. Not strictly required for
+# `python -m jarvis.run` (we set PYTHONPATH=/mnt/storage/NAS/Jarvis in the
+# systemd unit), but useful for ad-hoc imports.
+# ---------------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Map package "jarvis" to the directory containing pyproject.toml.
+# Keep the discovered modules explicit so test files don't get treated as the package.
+packages = [
+    "jarvis",
+    "jarvis.core",
+    "jarvis.memory",
+    "jarvis.dreaming",
+    "jarvis.clients",
+    "jarvis.adapters",
+    "jarvis.workers",
+]
+package-dir = {"jarvis" = "."}
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+extend-exclude = ["workspace", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]   # line-length checked separately
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]

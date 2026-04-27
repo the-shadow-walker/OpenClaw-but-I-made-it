@@ -1,0 +1,35 @@
+[Unit]
+# Jarvis personal AI assistant — see /mnt/storage/NAS/Jarvis/jarvis/docs/BUILD_SPEC.md
+Description=Jarvis personal AI assistant
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=Grindlewalt
+Group=Grindlewalt
+
+# Per BUILD_SPEC §1: WorkingDirectory=/mnt/storage/NAS/Jarvis/jarvis. The package
+# itself lives at this path (this dir IS the `jarvis` Python package). To make
+# `python -m jarvis.run` resolve, we put the parent on PYTHONPATH so import
+# discovery finds `jarvis/` as a top-level package.
+WorkingDirectory=/mnt/storage/NAS/Jarvis/jarvis
+Environment="PYTHONPATH=/mnt/storage/NAS/Jarvis"
+Environment="PYTHONUNBUFFERED=1"
+
+# Optional: AGENT_CENTRAL_MIRROR_OWNER=jarvis flips Jarvis to the mirror writer
+# once CMD ships the env-flag check (BUILD_SPEC §15, §21.10). Leave commented
+# until the CMD patch lands.
+# Environment="AGENT_CENTRAL_MIRROR_OWNER=jarvis"
+
+ExecStart=/mnt/storage/NAS/Jarvis/.venv/bin/python -m jarvis.run
+
+# P0 stub exits 0 immediately; restart=no avoids a tight loop. Flip to
+# Restart=on-failure once P5 lands the long-lived FastAPI server.
+Restart=no
+
+# Resource hygiene
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

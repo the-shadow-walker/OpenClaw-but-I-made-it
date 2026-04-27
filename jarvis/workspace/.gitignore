@@ -1,0 +1,6 @@
+# Per BUILD_SPEC §4: workspace/ is per-deployment. The contents (memory state,
+# conversations, indexes) are NOT tracked — only this .gitignore + README so the
+# directory exists in the repo with documentation.
+*
+!.gitignore
+!README.md
