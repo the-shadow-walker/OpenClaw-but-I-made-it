@@ -41,7 +41,7 @@ class WriterAgent(BaseAgent):
         super().__init__(
             agent_id=agent_id,
             agent_type=AgentType.WORKER,
-            model_name="qwen2.5:14b",  # Good at clear writing
+            model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),  # Unified model
             system_prompt="""You are a TECHNICAL WRITER. Explain verified results clearly.
 
 Your ONLY job:

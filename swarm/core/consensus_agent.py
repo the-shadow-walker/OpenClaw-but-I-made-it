@@ -41,7 +41,7 @@ class ConsensusAgent(BaseAgent):
         super().__init__(
             agent_id=agent_id,
             agent_type=AgentType.WORKER,
-            model_name="phi4:14b",
+            model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),
             system_prompt="""You are a FACT VALIDATOR. Compare facts and detect contradictions.
 
 Your ONLY job:

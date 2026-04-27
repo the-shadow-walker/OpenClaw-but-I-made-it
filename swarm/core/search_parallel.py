@@ -45,7 +45,7 @@ class SearchExtractorAgent(BaseAgent):
         super().__init__(
             agent_id=agent_id,
             agent_type=AgentType.SEARCH,
-            model_name="phi4:14b",
+            model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),
             system_prompt="""You are a FACT EXTRACTOR. Extract verifiable facts from text.
 
 CRITICAL RULES:
@@ -495,7 +495,7 @@ Output JSON only:
             agent = BaseAgent(
                 agent_id="deep_think",
                 agent_type=AgentType.WORKER,
-                model_name=os.getenv("SWARM_MODEL_RESEARCH", os.getenv("SWARM_MODEL_DEFAULT", "qwen3-coder:30b")),
+                model_name=os.getenv("SWARM_MODEL_RESEARCH", os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4")),
                 system_prompt="You are a research coordinator. Output JSON only when asked.",
             )
             return await agent.query_llm(prompt, stream=False)

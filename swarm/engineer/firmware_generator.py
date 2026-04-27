@@ -5,15 +5,19 @@ Uses qwen2.5:14b via direct Ollama HTTP API (same pattern as project_mode.py).
 Single public function: generate_firmware(specs, bom, pin_map) -> dict
 """
 
+import os
 import re
 import json
 import requests
 from typing import List, Dict, Any, Optional
 
+# Swarm 3.16 — Unified default model (overridable via env)
+_DEFAULT_MODEL = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4")
+
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
-def _llm(prompt: str, model: str = "qwen2.5:14b", max_tokens: int = 2500) -> str:
+def _llm(prompt: str, model: str = _DEFAULT_MODEL, max_tokens: int = 2500) -> str:
     payload = {
         "model":   model,
         "prompt":  prompt,
@@ -29,7 +33,7 @@ def _llm(prompt: str, model: str = "qwen2.5:14b", max_tokens: int = 2500) -> str
         return f"[firmware generation error: {e}]"
 
 
-def _llm_json(prompt: str, model: str = "phi4:14b", max_tokens: int = 500) -> Dict:
+def _llm_json(prompt: str, model: str = _DEFAULT_MODEL, max_tokens: int = 500) -> Dict:
     raw = _llm(prompt, model=model, max_tokens=max_tokens)
     try:
         raw = re.sub(r"```json|```", "", raw).strip()
@@ -169,7 +173,7 @@ Keep it simple — max 12 nodes. Use --> for transitions, {{{{condition}}}} for 
 
 Output ONLY the raw Mermaid code starting with 'flowchart TD', no markdown fences."""
 
-    mermaid = llm(prompt, model="phi4:14b", max_tokens=400)
+    mermaid = llm(prompt, model=_DEFAULT_MODEL, max_tokens=400)
     # Strip any accidental backtick fences
     mermaid = re.sub(r"^```.*?\n?|```$", "", mermaid.strip(), flags=re.MULTILINE).strip()
     if not mermaid.startswith("flowchart"):
@@ -247,7 +251,7 @@ Write a COMPLETE .ino file that:
 The code must compile without errors (use correct API calls for the detected libraries).
 Output ONLY the raw .ino code, no markdown fences."""
 
-        code = _llm(prompt, model="qwen2.5:14b", max_tokens=2500)
+        code = _llm(prompt, model=_DEFAULT_MODEL, max_tokens=2500)
         # Prepend includes if the LLM omitted them
         if include_block and "#include" not in code[:200]:
             code = include_block + "\n\n" + code
@@ -279,7 +283,7 @@ Write a COMPLETE main.py / boot.py that:
 
 Output ONLY the raw Python code, no markdown fences."""
 
-        code = _llm(prompt, model="qwen2.5:14b", max_tokens=2000)
+        code = _llm(prompt, model=_DEFAULT_MODEL, max_tokens=2000)
 
     # Strip accidental fences from LLM output
     code = re.sub(r"^```[a-z]*\n?", "", code.strip(), flags=re.MULTILINE)

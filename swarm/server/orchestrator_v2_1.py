@@ -1319,7 +1319,7 @@ Instructions:
             agent = BaseAgent(
                 agent_id="temp",
                 agent_type=AgentType.WORKER,
-                model_name="phi4:14b",
+                model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),
                 system_prompt=system_prompt or "You are a helpful assistant."
             )
             return await agent.query_llm(prompt, stream=False)
@@ -1333,7 +1333,7 @@ Instructions:
             agent = BaseAgent(
                 agent_id="coder",
                 agent_type=AgentType.WORKER,
-                model_name="qwen2.5:14b",
+                model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),
                 system_prompt=system_prompt or (
                     "You are an expert Python programmer and physicist. "
                     "Write complete, correct, directly executable code. "

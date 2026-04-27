@@ -38,7 +38,7 @@ def amazon_search(query: str, max_results: int = 6) -> List[Dict]:
 
 
 # ── Ollama LLM helpers ───────────────────────────────────────────────────────
-def llm(prompt: str, system: str = "", model: str = "phi4:14b", max_tokens: int = 1000) -> str:
+def llm(prompt: str, system: str = "", model: str = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"), max_tokens: int = 1000) -> str:
     full = f"{system}\n\n{prompt}" if system else prompt
     payload = {
         "model": model,
@@ -55,7 +55,7 @@ def llm(prompt: str, system: str = "", model: str = "phi4:14b", max_tokens: int 
         return f"[LLM error: {e}]"
 
 
-def llm_json(prompt: str, system: str = "", model: str = "phi4:14b", max_tokens: int = 800) -> Dict:
+def llm_json(prompt: str, system: str = "", model: str = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"), max_tokens: int = 800) -> Dict:
     raw = llm(prompt, system=system, model=model, max_tokens=max_tokens)
     try:
         raw = re.sub(r"```json|```", "", raw).strip()

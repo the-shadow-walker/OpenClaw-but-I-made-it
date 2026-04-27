@@ -92,17 +92,18 @@ except ImportError:
 
 # ── Ollama constants ─────────────────────────────────────────────────────────
 _OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-# Swarm 3.15 — Model unification (Chunk 7 of agent unification PR).
-# Pre-gate: qwen3.6:35b-Grindlewalt is 23 GB Q4_K_M — overflows 12 GB RTX 3060
-# (was 35%/65% CPU/GPU split, ~250s/req), so we use qwen3-coder:30b as the
-# unified default everywhere. All five constants are env-overridable for
-# instant rollback without code edits.
-_MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "qwen3-coder:30b")
+# Swarm 3.16 — Model unification flipped to qwen3.6 27b IQ4 (2026-04-26).
+# batiai/qwen3.6-27b:iq4 is 15 GB on disk, ~19 GB loaded with 32K KV cache —
+# fits fully across RTX 3060 Ti (8 GB) + RTX 3060 (12 GB) = 20 GB combined.
+# Smarter than qwen3-coder:30b on every metric except raw efficiency.
+# All defaults are env-overridable; SWARM_NUM_CTX caps KV cache to keep VRAM-fit.
+_MODEL_DEFAULT       = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4")
 _MODEL_REASONER      = os.getenv("SWARM_MODEL_REASONER",      _MODEL_DEFAULT)
 _MODEL_FALLBACK      = os.getenv("SWARM_MODEL_FALLBACK",      _MODEL_DEFAULT)
 _MODEL_CODER         = os.getenv("SWARM_MODEL_CODER",         _MODEL_DEFAULT)
 _MODEL_PLANNER       = os.getenv("SWARM_MODEL_PLANNER",       _MODEL_DEFAULT)
 _MODEL_SMART_PLANNER = os.getenv("SWARM_MODEL_SMART_PLANNER", _MODEL_DEFAULT)
+_NUM_CTX             = int(os.getenv("SWARM_NUM_CTX", "32768"))
 
 # ── Swarm 3.13 kill switches ─────────────────────────────────────────────────
 RESIDUAL_LOCK_ORCH = os.getenv("SWARM_RESIDUAL_LOCK_ORCH", "1") != "0"
@@ -111,7 +112,7 @@ RESIDUAL_TOLERANCE_REL_ORCH = float(os.getenv("SWARM_RESIDUAL_TOL_ORCH", "1e-6")
 STABILITY_GATE_ORCH = os.getenv("SWARM_STABILITY_GATE_ORCH", "1") != "0"
 # Swarm 3.14.1 — Plausibility Gate (Lock D): auditor peer-review for suspicious values
 PLAUSIBILITY_GATE_ENABLED = os.getenv("SWARM_PLAUSIBILITY_GATE", "1") != "0"
-PLAUSIBILITY_AUDITOR_MODEL = os.getenv("SWARM_AUDITOR_MODEL", "qwen3-coder:30b")
+PLAUSIBILITY_AUDITOR_MODEL = os.getenv("SWARM_AUDITOR_MODEL", _MODEL_DEFAULT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,7 +311,7 @@ class OrchestratorV3:
             research_contexts = await self._targeted_research(plan)
 
         # ── VRAM handoff: evict phi4, pre-warm solver ─────────────────────
-        solver_model = "deepseek-r1:14b"
+        solver_model = os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4")
         try:
             from react_solver import ReactSolver as _RS_tmp
             solver_model = _RS_tmp.MODEL
@@ -1925,6 +1926,7 @@ Rules:
             "options": {
                 "temperature": 0.6,
                 "num_predict": num_predict,
+                "num_ctx": _NUM_CTX,
             },
         }
 

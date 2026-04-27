@@ -33,7 +33,7 @@ class VerifierAgent(BaseAgent):
         super().__init__(
             agent_id=agent_id,
             agent_type=AgentType.WORKER,
-            model_name="phi4:14b",  # Excellent at structured verification
+            model_name=os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"),  # Unified model
             system_prompt="""You are an INDEPENDENT VERIFIER. Your job is to RECOMPUTE, not review.
 
 CRITICAL MINDSET: Assume the provided answer is WRONG until you prove it's right.
