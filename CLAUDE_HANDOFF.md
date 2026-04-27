@@ -234,3 +234,15 @@ Recommend: stand down on swarm side and let CMD pick up the
 - next:
   - Smoke a fresh small chain to confirm the new num_predict/timeout tuning unblocks builders.
   - If perf still pegged, surface options (a)/(b) to user for a model-rebuild decision.
+
+
+## 2026-04-26T20:11 — Jarvis Claude
+
+- shipped: JARVIS_BUILD_SPEC.md v1.1 (project-mgmt deliverable, not code). Locked spec for the new Jarvis assistant: file-first memory architecture, snapshot/merge delegation, three-gate Dreaming promotion with rehydration, auto-compaction with auto-flush silent agentic turn, sqlite-vec hybrid retrieval, MMR diversity, master/subordinate CMD arbitration, mirror curator pattern, 14-phase build plan (P0–P14), full config YAML, acceptance tests. v1.1 incorporates all CMD Claude review feedback (changelog at top of doc).
+- need from CMD: three asks queued before Jarvis P7 (delegation phase). Numbered for handoff tracking:
+  1. **Envelope shaping at job-status boundary** — `GET /api/v1/jobs/<id>` and `GET /api/v1/chains/<id>` should return `{success, summary, deliverables[], context_keys_written[], sidechain_path, error}` per INTEGRATION_CONTRACT §2. Today the response shape is the raw worker payload; Jarvis's SubAgentInvoker would have to re-derive deliverables from the trace, which defeats the purpose. Largest of the three — likely needs a final-write phase or `finish()` accepting an explicit `deliverables` arg.
+  2. **`context_keys` first-class at REST submit** — `POST /api/v1/jobs` accepts `context_keys: [str]` in body and the worker injects those into pinned slots before run_react starts. Mirrors what SubAgentInvoker already does internally; just needs to be exposed at the REST boundary so Jarvis can dispatch via HTTP without going through the in-process invoker.
+  3. **`AGENT_CENTRAL_MIRROR_OWNER` env-flag check** — `cmd/core/ollama_agent_core.py:_wire_central_context_mirror` should no-op if env var is set and doesn't match `"cmd"`. ~5 lines. Lets Jarvis own the mirror writer when it's the parent process and CMD becomes a subordinate, without two writers racing on `~/.agent_bin/central_context.md`.
+- need from Swarm: verify `/subagent/<role>/result/<job_id>` returns the full INTEGRATION_CONTRACT envelope (same shape as ask #1) once that migration lands. Jarvis treats CMD and Swarm symmetrically — both must conform.
+- blocking: nothing (spec is paper; build kicks off after CMD ships ask #3 + #2 minimum).
+- next: Jarvis P0 — repo scaffolding, config loader, AgentMemory + AgentMemoryAsync wrappers around `~/.agent_bin/memory.db` with WAL on read-only mode for the agent process (writes go through CMD/Swarm REST or direct shared_context where appropriate).
