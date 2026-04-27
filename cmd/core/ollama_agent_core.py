@@ -397,9 +397,11 @@ class OllamaCommandAgent:
     HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
     # Hardening: bound generation so qwen3 thinking-mode can't run unbounded.
-    # 8192 tokens ≈ 30KB output — plenty for any single-file artifact or patch.
-    FILE_GEN_NUM_PREDICT = 8192
-    PATCH_NUM_PREDICT = 4096
+    # 4096 tokens ≈ 15KB output — fits ~150 LOC, enough for almost any single file.
+    # Reduced from 8192: qwen3.6:35b-Grindlewalt runs partly on CPU (model > VRAM)
+    # so 8192-token gens were timing out at 600s. 4096 ≈ 300s on this hardware.
+    FILE_GEN_NUM_PREDICT = 4096
+    PATCH_NUM_PREDICT = 2048
     # Disable qwen3 thinking phase by default — saves ~3× wall-clock per call.
     # Override with AGENT_THINK=1 to re-enable (e.g. for hard reasoning tasks).
     THINK_DEFAULT = os.getenv("AGENT_THINK", "0") == "1"
@@ -2001,7 +2003,7 @@ Return JSON only:
             f"Output ONLY the file content. Do not wrap in markdown fences."
         )
         content = self.call_ollama_heavy(
-            prompt, system, timeout=600, num_predict=self.FILE_GEN_NUM_PREDICT,
+            prompt, system, timeout=900, num_predict=self.FILE_GEN_NUM_PREDICT,
         )
         return self._strip_code_fences(content)
 
@@ -2036,7 +2038,7 @@ Return JSON only:
             f"Output ONLY the replacement text."
         )
         replacement = self.call_ollama_heavy(
-            prompt, system, timeout=600, num_predict=self.FILE_GEN_NUM_PREDICT,
+            prompt, system, timeout=900, num_predict=self.FILE_GEN_NUM_PREDICT,
         )
         return self._strip_code_fences(replacement)
 
@@ -2081,7 +2083,7 @@ Return JSON only:
             "The search string MUST match the file content exactly (same whitespace/indentation)."
         )
         raw = self.call_ollama_heavy(
-            prompt, system, timeout=180, num_predict=self.PATCH_NUM_PREDICT,
+            prompt, system, timeout=300, num_predict=self.PATCH_NUM_PREDICT,
         )
         raw = self._strip_code_fences(raw).strip()
         try:
@@ -3073,7 +3075,7 @@ class PostRunVerifier:
 
     Steps:
       1. Fast model selects the 10 most informative trace entries.
-      2. Heavy model (qwen3-coder:30b) generates 3-8 verification shell commands.
+      2. Agent's own model (qwen3.6:35b-Grindlewalt) generates 3-8 verification shell commands.
       3. Commands are executed; pass/fail recorded.
       4. Heavy model writes a PASS/FAIL report with root cause + fix plan.
     """
@@ -3153,7 +3155,7 @@ class PostRunVerifier:
         import subprocess as _sp
 
         print(f"\n{'='*70}", flush=True)
-        print("🔍 POST-RUN VERIFICATION (qwen3-coder:30b)", flush=True)
+        print(f"🔍 POST-RUN VERIFICATION ({self.agent.model})", flush=True)
         print(f"{'='*70}", flush=True)
 
         trace = react_result.get("trace", [])
@@ -3305,7 +3307,7 @@ def main():
     # Decompose the instruction
     print("\n⏳ Decomposing task...", flush=True)
     decomp_agent = OllamaCommandAgent(
-        model="qwen3-coder:30b",
+        model="qwen3.6:35b-Grindlewalt",
         searxng_url="http://10.0.0.58:8080",
     )
     subtasks = TaskDecomposer(decomp_agent).decompose(instruction, total_budget=cli_args.budget)
@@ -3313,7 +3315,7 @@ def main():
     # Single subtask → run directly, same behaviour as before
     if len(subtasks) == 1:
         agent = OllamaCommandAgent(
-            model="qwen3-coder:30b",
+            model="qwen3.6:35b-Grindlewalt",
             searxng_url="http://10.0.0.58:8080",
         )
         agent.max_react_iterations = subtasks[0]["max_iterations"]
@@ -3349,7 +3351,7 @@ def main():
         print(f"   Budget: {iters} iterations", flush=True)
 
         phase_agent = OllamaCommandAgent(
-            model="qwen3-coder:30b",
+            model="qwen3.6:35b-Grindlewalt",
             searxng_url="http://10.0.0.58:8080",
         )
         phase_agent.max_react_iterations = iters

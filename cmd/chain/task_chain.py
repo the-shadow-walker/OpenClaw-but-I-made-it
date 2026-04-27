@@ -690,13 +690,14 @@ Return ONLY the JSON array, no other text."""
 
         system = "You are a task decomposer. Return only a JSON array of sub-tasks. No prose."
 
-        # Use non-thinking coder model for decomposition — qwen3.6-Grindlewalt
-        # burns all num_predict tokens on thinking and returns empty content.
-        DECOMP_MODEL = "qwen3-coder:30b"
+        # Single-model policy: qwen3.6:35b-Grindlewalt with thinking disabled.
+        # _call_model_oneshot already passes think:THINK_DEFAULT (default 0) so
+        # tokens land in message.content instead of being burned on thinking.
+        DECOMP_MODEL = "qwen3.6:35b-Grindlewalt"
 
         try:
             raw = self.agent._call_model_oneshot(
-                DECOMP_MODEL, prompt, system, timeout=180
+                DECOMP_MODEL, prompt, system, timeout=300
             )
             # Prefer direct JSON array parse; fall back to extract_json which
             # only grabs the first {} object when the response is an array.
@@ -1740,10 +1741,10 @@ Rules:
 Return ONLY the JSON array, no prose."""
 
         system = "You are a micro-task decomposer. Return only a JSON array. No prose."
-        DECOMP_MODEL = "qwen3-coder:30b"
+        DECOMP_MODEL = "qwen3.6:35b-Grindlewalt"
         try:
             raw = self.agent._call_model_oneshot(
-                DECOMP_MODEL, prompt, system, timeout=180
+                DECOMP_MODEL, prompt, system, timeout=300
             )
             micro_tasks = None
             try:
@@ -2032,7 +2033,7 @@ class TaskChain:
         goal: str,
         subtasks: List[Dict],
         total_budget: int = 100,
-        model: str = "qwen3-coder:30b",
+        model: str = "qwen3.6:35b-Grindlewalt",
         retry_policy: Optional[Dict] = None,
     ) -> "TaskChain":
         """Create a new chain and write it to disk. Returns the TaskChain instance.

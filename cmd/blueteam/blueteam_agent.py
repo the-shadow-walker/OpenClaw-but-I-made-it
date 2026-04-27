@@ -537,7 +537,7 @@ SECURITY_SURVEY_COMMANDS: Dict[str, str] = {
 
     # ── Resources ────────────────────────────────────────────────────────────
     "disk_usage":
-        "df -h 2>/dev/null",
+        "df -h -x squashfs -x tmpfs -x devtmpfs -x overlay 2>/dev/null | grep -v '/run/credentials'",
     "memory_usage":
         "free -h 2>/dev/null",
     "system_load":
@@ -581,7 +581,7 @@ class BlueteamAgent:
     - Anomaly diffing for continuous watch mode
     """
 
-    def __init__(self, model: str = "qwen3-coder:30b"):
+    def __init__(self, model: str = "qwen3.6:35b-Grindlewalt"):
         self.agent = OllamaCommandAgent(model=model)
         # Replace the tool registry with the extended blueteam version
         self.agent.tool_registry = BlueteamToolRegistry(
@@ -1095,6 +1095,156 @@ class BlueteamAgent:
 
         return result
 
+    # ── daily smart report ───────────────────────────────────────────────────
+
+    def daily_report(self) -> Dict[str, Any]:
+        """
+        Generate a concise, actionable daily security report.
+
+        Uses smart_logger's filtered event log (last 24 h) plus a fresh security
+        survey as context. Calls the fast model once (no ReAct loop) with a
+        senior-analyst system prompt.  Hard wall: 15 minutes via a future timeout.
+
+        Returns a result dict with keys: success, finish_summary, report_length,
+        events_analyzed, report_path.
+        """
+        import concurrent.futures
+
+        # ── 1. gather context ──────────────────────────────────────────────
+        try:
+            import smart_logger as _sl
+            events_text    = _sl.format_for_llm(hours=24)
+            events_analyzed = len(_sl.read_recent(hours=24))
+        except ImportError:
+            events_text    = "(smart_logger not available — install or start it)"
+            events_analyzed = 0
+
+        survey      = self.security_survey()
+        survey_text = self._format_survey(survey)
+
+        recent_alerts = get_recent_alerts(50)
+        alert_lines = [
+            f"- [{a.get('ts','')[:16]}] {a.get('severity','?')}: "
+            f"{a.get('finding','')}"
+            for a in recent_alerts[-20:]
+        ]
+        alert_text = "\n".join(alert_lines) if alert_lines else "No alerts on record."
+
+        # ── 2. build prompt ────────────────────────────────────────────────
+        system_prompt = (
+            "You are a senior Blue Team security analyst reviewing a Linux server. "
+            "I will provide: (a) filtered critical system events from the last 24 h, "
+            "(b) a live system survey, and (c) recent SENTINEL alerts. "
+            "Your job: identify patterns of attack or impending hardware failure "
+            "and produce a concise, actionable markdown report. "
+            "Ignore routine maintenance unless it has failed. "
+            "Be direct and specific — no filler text, no generic advice.\n\n"
+            "DISK INTERPRETATION RULES — follow these exactly:\n"
+            "- Always use the 'Use%' column to assess disk fullness, NEVER the absolute Used/Size values.\n"
+            "- Disk is only concerning when Use% >= 85%. Use% < 85% = HEALTHY, do NOT mention it.\n"
+            "- snap/loop mounts (/dev/loop*) are ALWAYS 100% full — this is NORMAL. Ignore them entirely.\n"
+            "- /run/credentials/* mounts at 100% are NORMAL systemd behaviour. Ignore them.\n"
+            "- tmpfs/devtmpfs mounts are virtual RAM disks. Ignore them unless > 90%."
+        )
+
+        user_prompt = (
+            f"{events_text}\n\n"
+            f"## Current System Survey\n\n{survey_text}\n\n"
+            f"## Recent SENTINEL Alerts (last 20)\n\n{alert_text}\n\n"
+            "---\n\n"
+            "Write a markdown security report with exactly these sections:\n\n"
+            "### Threat Level\n"
+            "CRITICAL / HIGH / MEDIUM / LOW / CLEAN — one sentence explaining why.\n\n"
+            "### Key Findings\n"
+            "Bullet list. Only include things the server owner MUST know about. "
+            "Skip anything routine.\n\n"
+            "### Immediate Actions\n"
+            "What to do RIGHT NOW (or 'None required' if clean).\n\n"
+            "### Trends\n"
+            "Anything getting worse over time (or 'None observed').\n\n"
+            "### System Health\n"
+            "Only mention disk if Use% >= 85% on a REAL filesystem (not loop/snap/tmpfs). "
+            "Only mention CPU if load average > 80% of core count. "
+            "Only mention memory if free RAM < 10%. "
+            "If everything is healthy, write 'All healthy — no concerns.'\n"
+        )
+
+        # ── 3. call fast model with 14-min inner timeout ───────────────────
+        def _run() -> str:
+            return self.agent._call_model_oneshot(
+                self.agent.fast_model,
+                user_prompt,
+                system_prompt=system_prompt,
+                timeout=840,   # 14 min — leaves 1 min buffer inside 15-min wall
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as exe:
+            future = exe.submit(_run)
+            try:
+                report_md = future.result(timeout=900)   # 15-min hard wall
+            except concurrent.futures.TimeoutError:
+                report_md = (
+                    "### Threat Level\nUNKNOWN — report generation timed out.\n\n"
+                    "### Key Findings\n- Report timed out after 15 minutes. "
+                    "Manual investigation recommended.\n"
+                )
+
+        if not report_md:
+            report_md = "### Threat Level\nUNKNOWN — LLM returned empty response.\n"
+
+        # ── 4. assemble full report ────────────────────────────────────────
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Strip any leading # header the LLM might have added to avoid duplication
+        body = re.sub(r'^#+\s*SENTINEL[^\n]*\n', '', report_md, count=1).lstrip()
+        full_report = (
+            f"# SENTINEL Smart Daily Report — {now_str}\n\n"
+            f"*Events analyzed: {events_analyzed} | "
+            f"Survey sections: {len(survey)} | "
+            f"Model: {self.agent.fast_model}*\n\n"
+            f"---\n\n"
+            f"{body}"
+        )
+
+        # ── 5. write to disk (archive if new day) ─────────────────────────
+        with self._report_lock:
+            if _REPORT_PATH.exists():
+                prev_date = datetime.fromtimestamp(
+                    _REPORT_PATH.stat().st_mtime
+                ).date()
+                if prev_date != datetime.now().date():
+                    _ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                    archive_path = (
+                        _ARCHIVE_DIR
+                        / f"sentinel_report_{prev_date.isoformat()}.md"
+                    )
+                    shutil.copy2(_REPORT_PATH, archive_path)
+                    _dbg("DAILY-REPORT", f"archived → {archive_path.name}")
+            _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _REPORT_PATH.write_text(full_report, encoding="utf-8")
+
+        _dbg("DAILY-REPORT",
+             f"written  events={events_analyzed}  len={len(full_report)}")
+        print(f"📋 SENTINEL daily report written → {_REPORT_PATH}")
+
+        # ── 6. rotate the smart event log so next cycle starts clean ──────
+        try:
+            import smart_logger as _sl
+            archive = _sl.rotate()
+            if archive:
+                _dbg("DAILY-REPORT", f"smart log rotated → {archive}")
+        except Exception as rot_err:
+            _dbg("DAILY-REPORT", f"rotate failed (non-fatal): {rot_err}")
+
+        return {
+            "success":       True,
+            "finish_summary": f"Daily report generated — {events_analyzed} events analyzed",
+            "report_length":  len(full_report),
+            "events_analyzed": events_analyzed,
+            "report_path":    str(_REPORT_PATH),
+            "execution_log":  [],
+            "trace":          [],
+        }
+
     def investigate(self, finding: str, evidence: str = "",
                     max_iterations: int = 35) -> Dict[str, Any]:
         """
@@ -1407,7 +1557,7 @@ _sentinel: Optional[BlueteamAgent] = None
 _sentinel_lock = threading.Lock()
 
 
-def get_sentinel(model: str = "qwen3-coder:30b") -> BlueteamAgent:
+def get_sentinel(model: str = "qwen3.6:35b-Grindlewalt") -> BlueteamAgent:
     """Return the global singleton BlueteamAgent, creating it if needed."""
     global _sentinel
     with _sentinel_lock:
