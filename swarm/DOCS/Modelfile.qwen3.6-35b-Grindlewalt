@@ -1,0 +1,32 @@
+# Swarm 3.17 — qwen3.6:35b-Grindlewalt with optimal swarm/cmd params baked in
+# Built 2026-04-26. Overrides upstream defaults to match swarm runtime config.
+#
+# Rebuild on server:
+#   ollama show qwen3.6:35b-Grindlewalt --modelfile | grep "^FROM " > /tmp/from
+#   cat /tmp/from DOCS/Modelfile.qwen3.6-35b-Grindlewalt | tail -n +2 > /tmp/Mf
+#   ollama create qwen3.6:35b-Grindlewalt -f /tmp/Mf
+#
+# Or just point FROM at the blob:
+FROM /home/Grindlewalt/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+
+# ── Sampling: low-randomness for code/reasoning ─────────────────────
+PARAMETER temperature       0.3
+PARAMETER top_k             20
+PARAMETER top_p             0.95
+PARAMETER min_p             0
+
+# ── Penalties: drop upstream presence_penalty 1.5 (too aggressive for code) ─
+PARAMETER repeat_penalty    1
+PARAMETER presence_penalty  0
+
+# ── Context: cap at 15360 to fit KV cache in 20 GB combined VRAM ─────
+# Native max is 262144 but swarm pipeline never needs more than ~15K.
+PARAMETER num_ctx           15360
+PARAMETER num_predict       2048
+
+# ── Stop tokens (qwen3 chat) ────────────────────────────────────────
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
