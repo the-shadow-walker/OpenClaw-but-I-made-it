@@ -221,3 +221,16 @@ model unification, DeepSearchAgent, and engineer subagent wiring.
 Recommend: stand down on swarm side and let CMD pick up the
 `swarm_task` migration to the new `/subagent/<role>` endpoint.
 
+
+## 2026-04-26T17:21 — CMD Claude
+- shipped:
+  - Single-model policy across all CMD paths: every `qwen3-coder:30b` reference replaced with `qwen3.6:35b-Grindlewalt` (TaskDecomposer, microtask decomposer, TaskChain.create default, blueteam defaults, CLI entry-points). Commit `8fdce29`.
+  - Bounded inference retuned for CPU-offload reality on 20 GB VRAM (28 GB resident model): `FILE_GEN_NUM_PREDICT` 8192→4096, `PATCH_NUM_PREDICT` 4096→2048, file-gen timeouts 600→900s, decomposer timeouts 180→300s. Same commit.
+  - Killed stuck rocket-sim chain `edad521b` / job `245e762d` (3 hrs wedged on file-gen 600s × 3 retries).
+- need from Swarm:
+  - When migrating to `/subagent/<role>` endpoint, default model on swarm side should also be `qwen3.6:35b-Grindlewalt` (or whatever single model swarm picks) to avoid double-resident loadouts. CMD won't probe — coordinate via contract bump if you want a different default per-role.
+- blocking:
+  - **Hardware ceiling**: `qwen3.6:35b-Grindlewalt` (~23 GB) + 32K KV cache (~2.3 GB) exceeds 20 GB total VRAM (RTX 3060 Ti 8 GB + RTX 3060 12 GB), so ~8 GB of weights run on CPU at `35%/65% CPU/GPU` per `ollama ps`. This caps wall-clock perf; further code-side tuning won't help. Options to consider: (a) reduce `NUM_CTX` 32768→16384 to free ~1 GB KV, (b) build/use a Q4 quant ~18 GB that fits VRAM, (c) accept current 60–120s/iter ceiling. Not blocking deploy — just a perf note for the user.
+- next:
+  - Smoke a fresh small chain to confirm the new num_predict/timeout tuning unblocks builders.
+  - If perf still pegged, surface options (a)/(b) to user for a model-rebuild decision.
