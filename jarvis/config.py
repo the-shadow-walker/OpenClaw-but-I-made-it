@@ -28,6 +28,7 @@ DEFAULT_CONFIG_PATH = "~/.config/jarvis/config.yaml"
 # so drift between cfg.llm.chat_model and cfg.llm.context_window is loud.
 KNOWN_MODEL_WINDOWS: dict[str, int] = {
     "qwen2.5:3b": 32768,
+    "qwen3.6:35b-chain": 262144,
     # add more as deployments switch models
 }
 

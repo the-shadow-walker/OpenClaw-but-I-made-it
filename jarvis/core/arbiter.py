@@ -1,10 +1,10 @@
-"""RoleArbiter — P7 stub for master-mode tracking (full logic in P10).
+"""RoleArbiter — per-conversation master-mode tracking (P10).
 
 Tracks which "master mode" (``code`` vs ``gui``) is in effect for each
-conversation. P10 wires the setter on the first cmd:code / cmd:gui
-delegation; P7 only exposes the dict + the ``is_master_mode`` predicate
-that ``invoker.dispatch`` consults to decide whether to flag the
-delegation as subordinate.
+conversation. The first ``cmd:code`` or ``cmd:gui`` dispatch in a
+conversation claims the master role; subsequent cross-mode dispatches
+(``code`` master + ``cmd:gui`` target, or ``gui`` master + ``cmd:code``
+target) run subordinate.
 
 State is in-memory by design — fresh on daemon restart. Persisting it
 would require a column on the ``conversations`` table or a side file,
@@ -13,10 +13,20 @@ restart legitimately resets the per-conversation routing context. The
 first message after such a restart sees ``master_for(conv_id) is None``
 even if a master had been set; that's a known, accepted degradation.
 
-P7 never calls ``set_master`` — neither cmd:code nor cmd:gui targets
-are routed yet. ``is_master_mode`` therefore returns ``False`` in
-practice; the meta flag on the JSONL ``delegation_envelope`` event is
-plumbed end-to-end so P10 can flip it on without further plumbing.
+Lifecycle hooks:
+
+* ``invoker.dispatch`` calls :meth:`claim` on the FIRST cmd:code or
+  cmd:gui in a conversation. ``cmd:react`` / ``cmd:quick`` / ``swarm:*``
+  never claim or consult the arbiter.
+* :meth:`Conversation.close <jarvis.core.conversation.Conversation.close>`
+  calls :meth:`reset` so a closed conversation's master entry doesn't
+  linger.
+* :meth:`Conversation.open <jarvis.core.conversation.Conversation.open>`'s
+  stale-row reset path also calls :meth:`reset` — it closes a stale row
+  without instantiating a new ``Conversation`` object, so the close
+  hook above doesn't fire for that path.
+* The daily-close callback in ``run.py`` ALSO calls :meth:`reset`
+  defensively for rows the scheduler closes directly.
 """
 
 from __future__ import annotations
@@ -37,31 +47,34 @@ class RoleArbiter:
     def master_for(self, conv_id: str) -> MasterMode | None:
         return self._master_per_conv.get(conv_id)
 
-    def set_master(self, conv_id: str, mode: MasterMode) -> None:
+    def claim(self, conv_id: str, mode: MasterMode) -> None:
         """Record ``mode`` for ``conv_id`` if not already set (first-write-wins)."""
         self._master_per_conv.setdefault(conv_id, mode)
 
     def reset(self, conv_id: str) -> None:
-        """Drop the master-mode entry for ``conv_id`` (e.g. on daily reset)."""
+        """Drop the master-mode entry for ``conv_id`` (e.g. on conversation close)."""
         self._master_per_conv.pop(conv_id, None)
 
-    def is_master_mode(self, conv_id: str, target: str) -> bool:
-        """True iff dispatch should run subordinate.
+    def is_subordinate(self, conv_id: str, target: str) -> bool:
+        """True iff this dispatch should run subordinate.
 
-        That happens when a master is set on this conversation and the
-        delegation target is cross-mode:
+        Symmetric ``code ↔ gui`` cross-mode case only:
 
         * master ``code`` + target ``cmd:gui``  → True
-        * master ``gui``  + target ``cmd:*`` (any non-gui cmd target) → True
-        * otherwise → False
+        * master ``gui``  + target ``cmd:code`` → True
+        * everything else → False
+
+        Note this is intentionally narrower than the P7 stub: a ``gui``
+        master no longer flags ``cmd:react`` / ``cmd:quick`` /
+        ``cmd:chain`` as subordinate. Spec §14 only mentions the
+        ``cmd:code ↔ cmd:gui`` cross-mode case, and broadcasting the flag
+        on every cmd target the gui master happens to invoke would force
+        CMD to interpret arbitration noise on tasks it has no opinion on.
         """
         master = self.master_for(conv_id)
         if master is None:
             return False
-        if master == "code" and target == "cmd:gui":
-            return True
         return (
-            master == "gui"
-            and target.startswith("cmd:")
-            and target != "cmd:gui"
+            (master == "code" and target == "cmd:gui")
+            or (master == "gui" and target == "cmd:code")
         )

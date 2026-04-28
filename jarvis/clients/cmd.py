@@ -155,6 +155,13 @@ class CMDClient:
         ``error``) field verbatim — the LLM should never see a sanitised
         version (anti-pattern §19 #?: "Shortening the safety-block
         message").
+
+        NOTE: ``quick()`` is exempt from ``mode`` / ``master_mode``
+        arbitration. Subordinate semantics only apply to ``cmd:code`` /
+        ``cmd:gui`` (spec §14). Do NOT add ``mode`` / ``master_mode``
+        kwargs here without re-reading §14 — quietly extending arbitration
+        to ``cmd:quick`` would force CMD's quick path to interpret a flag
+        it doesn't act on.
         """
         if (command is None) == (question is None):
             raise ValueError("quick requires exactly one of command/question")
@@ -195,6 +202,8 @@ class CMDClient:
         context_keys: list[str] | None = None,
         model: str | None = None,
         timeout_s: int | None = None,
+        mode: str | None = None,
+        master_mode: str | None = None,
     ) -> dict:
         """Submit a ReAct task; poll envelope_only=1 until terminal.
 
@@ -203,6 +212,16 @@ class CMDClient:
         ``error: "..."`` (e.g. the safety-block path on ``/execute``). The
         LLM reads it via ``tool_result.result.error``; only
         ``CMDTimeout`` / HTTP submit failure raise.
+
+        ``mode`` is ``"code"`` or ``"gui"`` for ``cmd:code`` / ``cmd:gui``
+        dispatches; ``None`` for ``cmd:react`` (the legacy default — CMD
+        picks the mode itself). ``master_mode`` is the master conversation
+        role's name (also ``"code"`` or ``"gui"``) — set IFF this dispatch
+        is subordinate, telling CMD to run with reduced autonomy. Both
+        fields are omitted from the body when ``None``; never serialised
+        as a JSON ``null`` (CMD's reads use ``body.get(...)``, but a
+        ``cmd:react`` regression that started sending ``mode: null`` would
+        be a wire-protocol divergence with no upside).
         """
         body: dict[str, Any] = {"instruction": instruction, "async": True}
         if context_keys:
@@ -211,6 +230,10 @@ class CMDClient:
             body["model"] = model
         if timeout_s is not None:
             body["timeout"] = timeout_s
+        if mode is not None:
+            body["mode"] = mode
+        if master_mode is not None:
+            body["master_mode"] = master_mode
 
         deadline_s = timeout_s if timeout_s is not None else self._react_max_wait_s
 

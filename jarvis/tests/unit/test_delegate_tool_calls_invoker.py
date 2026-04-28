@@ -54,9 +54,13 @@ class FakeCMDClient:
         self.execute_calls: list[dict] = []
         self.quick_calls: list[dict] = []
 
-    def execute(self, instruction, *, context_keys=None, model=None, timeout_s=None):
+    def execute(
+        self, instruction, *, context_keys=None, model=None, timeout_s=None,
+        mode=None, master_mode=None,
+    ):
         self.execute_calls.append({"instruction": instruction,
-                                   "context_keys": context_keys})
+                                   "context_keys": context_keys,
+                                   "mode": mode, "master_mode": master_mode})
         return {
             "success": True, "summary": "ok", "deliverables": [],
             "context_keys_written": [], "sidechain_path": "/sc/x.jsonl",

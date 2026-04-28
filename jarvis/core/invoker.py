@@ -160,7 +160,20 @@ def dispatch(
     """
     started = time.monotonic()
     label = snapshot_label or _label_for_target(target)
-    master_mode = arbiter.is_master_mode(conversation.conv_id, target)
+    # P10: claim master role on first cmd:code / cmd:gui (first-write-wins).
+    # cmd:react / cmd:quick / swarm:* never claim or consult — they're
+    # exempt from arbitration.
+    if target in ("cmd:code", "cmd:gui"):
+        arbiter.claim(
+            conversation.conv_id, "code" if target == "cmd:code" else "gui"
+        )
+    subordinate = arbiter.is_subordinate(conversation.conv_id, target)
+    # Single source of truth for the master's identity — derive from the
+    # arbiter, never hardcode "code"/"gui" in the dispatch branches. Keeps
+    # the body string consistent if is_subordinate() semantics evolve.
+    master_for_body = (
+        arbiter.master_for(conversation.conv_id) if subordinate else None
+    )
 
     snap_path: Path | None = None
     try:
@@ -199,6 +212,30 @@ def dispatch(
             )
         else:
             envelope = _safe_execute(cmd_client, task, context_keys=context_keys)
+    elif target == "cmd:code":
+        if cmd_client is None:
+            envelope = _err_envelope(
+                "delegation: no CMD client wired (degraded mode)", target=target
+            )
+        else:
+            envelope = _safe_execute(
+                cmd_client, task, context_keys=context_keys,
+                mode="code",
+                master_mode=master_for_body,
+                target_label="cmd:code",
+            )
+    elif target == "cmd:gui":
+        if cmd_client is None:
+            envelope = _err_envelope(
+                "delegation: no CMD client wired (degraded mode)", target=target
+            )
+        else:
+            envelope = _safe_execute(
+                cmd_client, task, context_keys=context_keys,
+                mode="gui",
+                master_mode=master_for_body,
+                target_label="cmd:gui",
+            )
     elif target.startswith("swarm:"):
         if swarm_client is None:
             envelope = _err_envelope(
@@ -208,9 +245,9 @@ def dispatch(
             envelope = _safe_swarm(
                 swarm_client, target, task, context_keys=context_keys
             )
-    elif target in ("cmd:chain", "cmd:gui", "cmd:blue"):
+    elif target in ("cmd:chain", "cmd:blue"):
         envelope = _err_envelope(
-            f"delegation target {target!r} not implemented in P8", target=target
+            f"delegation target {target!r} not implemented in P10", target=target
         )
     else:
         envelope = _err_envelope(
@@ -227,7 +264,7 @@ def dispatch(
             task=task,
             snapshot_path=snap_path,
             ms_elapsed=elapsed_ms,
-            master_mode=master_mode,
+            master_mode=subordinate,
         )
     except Exception:  # noqa: BLE001
         logger.exception("invoker: merge failed (envelope still returned)")
@@ -249,17 +286,35 @@ def _safe_quick(cmd_client: CMDClient, task: str) -> dict:
 
 
 def _safe_execute(
-    cmd_client: CMDClient, task: str, *, context_keys: list[str] | None
+    cmd_client: CMDClient,
+    task: str,
+    *,
+    context_keys: list[str] | None,
+    mode: str | None = None,
+    master_mode: str | None = None,
+    target_label: str = "cmd:react",
 ) -> dict:
+    """Wrap ``CMDClient.execute`` for the cmd:react / cmd:code / cmd:gui paths.
+
+    ``target_label`` only shapes error-envelope messages — the wire body
+    is driven by ``mode`` (``"code"`` / ``"gui"`` for cmd:code/cmd:gui;
+    ``None`` for cmd:react). ``master_mode`` is set IFF this dispatch is
+    subordinate (cross-mode); ``None`` otherwise.
+    """
     try:
-        env = cmd_client.execute(task, context_keys=context_keys)
+        env = cmd_client.execute(
+            task,
+            context_keys=context_keys,
+            mode=mode,
+            master_mode=master_mode,
+        )
     except CMDTimeout as e:
-        return _err_envelope(f"cmd:react timed out: {e}", target="cmd:react")
+        return _err_envelope(f"{target_label} timed out: {e}", target=target_label)
     except CMDError as e:
-        return _err_envelope(str(e), target="cmd:react")
+        return _err_envelope(str(e), target=target_label)
     except Exception as e:  # noqa: BLE001
-        logger.exception("invoker: cmd:react raised unexpectedly")
-        return _err_envelope(f"cmd:react error: {e}", target="cmd:react")
+        logger.exception("invoker: %s raised unexpectedly", target_label)
+        return _err_envelope(f"{target_label} error: {e}", target=target_label)
     return _normalise_envelope(env)
 
 

@@ -83,10 +83,14 @@ class FakeCMDClient:
         self._execute_raises = execute_raises
         self._quick_raises = quick_raises
 
-    def execute(self, instruction, *, context_keys=None, model=None, timeout_s=None):
+    def execute(
+        self, instruction, *, context_keys=None, model=None, timeout_s=None,
+        mode=None, master_mode=None,
+    ):
         self.execute_calls.append({
             "instruction": instruction, "context_keys": context_keys,
             "model": model, "timeout_s": timeout_s,
+            "mode": mode, "master_mode": master_mode,
         })
         if self._execute_raises is not None:
             raise self._execute_raises
@@ -164,7 +168,7 @@ def test_dispatch_routes_cmd_react_to_execute(conversation, paths, shared_board)
 
 @pytest.mark.parametrize(
     "target",
-    ["cmd:chain", "cmd:gui", "cmd:blue"],
+    ["cmd:chain", "cmd:blue"],
 )
 def test_dispatch_unsupported_cmd_targets_return_err_envelope(
     conversation, paths, shared_board, target,
@@ -252,20 +256,23 @@ def test_dispatch_master_mode_flag_recorded_in_jsonl(
 ):
     cmd = FakeCMDClient()
     arbiter = RoleArbiter()
-    arbiter.set_master(conversation.conv_id, "code")
+    # Pre-claim "code" so the cmd:gui dispatch below runs subordinate.
+    arbiter.claim(conversation.conv_id, "code")
     dispatch(
         target="cmd:gui", task="paint", conversation=conversation,
         paths=paths, shared_board=shared_board,
         cmd_client=cmd, arbiter=arbiter,
     )
-    # cmd:gui returns "not implemented" envelope, but master_mode=True is
-    # still recorded in the JSONL event.
     transcript = conversation.transcript_path.read_text(encoding="utf-8")
     events = [json.loads(ln) for ln in transcript.splitlines() if ln.strip()]
     delegations = [e for e in events if e["kind"] == "delegation_envelope"]
     assert len(delegations) == 1
     assert delegations[0]["payload"]["master_mode"] is True
     assert delegations[0]["payload"]["target"] == "cmd:gui"
+    # P10: subordinate cmd:gui dispatch carries body.mode="gui" + body.master_mode="code".
+    assert len(cmd.execute_calls) == 1
+    assert cmd.execute_calls[0]["mode"] == "gui"
+    assert cmd.execute_calls[0]["master_mode"] == "code"
 
 
 # ---------------------------------------------------------------------------

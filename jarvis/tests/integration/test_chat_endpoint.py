@@ -244,7 +244,7 @@ def test_chat_delegation_event_flows_through(workspace, cfg, indexer):
 
     class FakeCMDClient:
         def execute(self, instruction, *, context_keys=None, model=None,
-                    timeout_s=None):
+                    timeout_s=None, mode=None, master_mode=None):
             return {
                 "success": True, "summary": "wrote /tmp/x",
                 "deliverables": ["/tmp/x"], "context_keys_written": [],
@@ -358,7 +358,7 @@ def test_chat_rocket_sim_plan_and_execute_flow(workspace, cfg, indexer):
 
     class FakeCMDClient:
         def execute(self, instruction, *, context_keys=None, model=None,
-                    timeout_s=None):
+                    timeout_s=None, mode=None, master_mode=None):
             return {
                 "success": True, "summary": "wrote sim + README",
                 "deliverables": ["/tmp/sim.py", "/tmp/README.md"],

@@ -114,8 +114,10 @@ def create_app(
     """
     app = FastAPI(title="Jarvis", version="0.1.0")
     convo_cfg = ConversationConfig.from_jarvis_config(cfg)
-    # Process-scoped: one arbiter for the lifetime of the app. P7 never
-    # calls set_master (no cmd:code/cmd:gui targets routed); P10 wires it.
+    # Process-scoped: one arbiter for the lifetime of the app. P10 calls
+    # claim() on the first cmd:code / cmd:gui in each conversation; the
+    # entry is reset on conversation close (or daily callback for rows
+    # closed without a Conversation instance).
     arbiter = arbiter if arbiter is not None else RoleArbiter()
 
     # Log a single, predictable "server listening" line once uvicorn's lifespan
@@ -144,6 +146,7 @@ def create_app(
             paths=paths,
             conn=indexer.conn,
             cfg=convo_cfg,
+            arbiter=arbiter,
         )
         # Release the file descriptor; the chat handler reopens for append.
         # We don't `close()` the row — that would stamp ended_at.
@@ -190,6 +193,7 @@ def _ndjson_stream(
             paths=paths,
             conn=indexer.conn,
             cfg=convo_cfg,
+            arbiter=arbiter,
         )
         # Resume might have produced a different conv_id than the client
         # asked for (idle-reset between session() and chat()). The spec

@@ -40,7 +40,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
-from typing import IO, Literal
+from typing import IO, TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    # Forward reference only — avoid a circular import. arbiter.py doesn't
+    # need anything from conversation.py at runtime.
+    from jarvis.core.arbiter import RoleArbiter  # noqa: F401
 
 from jarvis.memory.index import (
     close_conversation,
@@ -151,6 +156,7 @@ class Conversation:
         conn,
         *,
         _last_event_at: datetime | None = None,
+        arbiter: RoleArbiter | None = None,
     ) -> None:
         self.conv_id = conv_id
         self.channel_kind: ChannelKind = channel_kind
@@ -168,6 +174,10 @@ class Conversation:
         self._append_lock = threading.Lock()
         self._last_event_at = _last_event_at or datetime.now()
         self._closed = False
+        # Optional reference so close() can reset per-conv arbiter state.
+        # Default None keeps existing tests untouched (they construct
+        # Conversation directly without arbitration plumbing).
+        self._arbiter = arbiter
 
     # -- factory -----------------------------------------------------------
 
@@ -181,6 +191,7 @@ class Conversation:
         conn,
         cfg: ConversationConfig,
         now: datetime | None = None,
+        arbiter: RoleArbiter | None = None,
     ) -> Conversation:
         """Resume the open conversation for the channel, or create a fresh one.
 
@@ -191,6 +202,11 @@ class Conversation:
         old conversation, not ``now`` — that way "when did this conversation
         end?" reflects the user's last message, not the wakeup that retired
         it.
+
+        ``arbiter`` is threaded through so the resulting ``Conversation``
+        can clear its master entry on close. The stale-row reset path
+        also resets the prior conv's master before closing the row —
+        otherwise the entry would linger until the daily callback fires.
         """
         now = now or datetime.now()
         existing = get_open_conversation(conn, channel_kind, channel_id)
@@ -208,8 +224,17 @@ class Conversation:
                     paths=paths,
                     conn=conn,
                     _last_event_at=last_event_at,
+                    arbiter=arbiter,
                 )
             # Reset — close the stale row at its last_event_at (no slug/summary).
+            # Reset the arbiter BEFORE closing the row. Order doesn't
+            # affect correctness today (close_conversation doesn't drop
+            # the row's primary key, so the conv_id is still valid
+            # afterwards), but the BEFORE order keeps the invariant
+            # readable: arbiter state mirrors the conversation's open
+            # lifetime, so it dies first. Don't swap.
+            if arbiter is not None:
+                arbiter.reset(existing["id"])
             close_conversation(
                 conn,
                 existing["id"],
@@ -237,6 +262,7 @@ class Conversation:
             paths=paths,
             conn=conn,
             _last_event_at=now,
+            arbiter=arbiter,
         )
 
     # -- reset decision ----------------------------------------------------
@@ -289,6 +315,18 @@ class Conversation:
             except Exception:
                 logger.exception("conversation %s: close raised on transcript fp", self.conv_id)
             self._fp = None
+        # Drop per-conv arbiter entry so a fresh conversation gets fresh
+        # arbitration. Wrapped: a busted arbiter must NOT block a DB
+        # row close. Log loudly — silent swallowing is the failure mode
+        # that hides future bugs.
+        if self._arbiter is not None:
+            try:
+                self._arbiter.reset(self.conv_id)
+            except Exception:
+                logger.exception(
+                    "conversation %s: arbiter.reset raised — close continues",
+                    self.conv_id,
+                )
         self._closed = True
 
     # -- properties / context manager -------------------------------------
