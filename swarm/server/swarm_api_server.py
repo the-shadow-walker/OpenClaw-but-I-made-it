@@ -99,10 +99,11 @@ class Config:
     MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT_JOBS', 3))
     API_KEY    = os.getenv('SWARM_API_KEY', None)
 
-# Swarm 3.15 — Default chat model (single-token routing). Documented exception
-# to model unification: 30b stays here too unless SWARM_DEFAULT_CHAT_MODEL
-# overrides. Was hardcoded phi4:14b in 4 places; now centralised + env-overridable.
-_MODEL_DEFAULT_CHAT = os.getenv("SWARM_DEFAULT_CHAT_MODEL", "qwen3-coder:30b")
+# Swarm 3.16 — Default chat model. Picks up unified default if env unset.
+# Was hardcoded phi4:14b in 4 places; now centralised + env-overridable.
+_MODEL_DEFAULT_CHAT = os.getenv("SWARM_DEFAULT_CHAT_MODEL",
+                                 os.getenv("SWARM_MODEL_DEFAULT", "batiai/qwen3.6-27b:iq4"))
+_SWARM_NUM_CTX = int(os.getenv("SWARM_NUM_CTX", "32768"))
 
 
 # =============================================================================
@@ -285,12 +286,13 @@ class JobManager:
     def append_log(self, job_id: str, line: str):
         with self._lock:
             if job_id in self.jobs:
-                # Skip raw token lines from in-memory log — they go to disk only
-                if not line.startswith('[LLMTOK]'):
-                    log = self.jobs[job_id]['progress_log']
-                    log.append(line)
-                    if len(log) > 2000:
-                        self.jobs[job_id]['progress_log'] = log[-1000:]
+                # Keep ALL lines (including [LLMTOK]) so SSE can fan-out live LLM
+                # tokens to the dashboard.  Cap rolling at 5000 lines so RAM stays
+                # bounded even on long jobs (disk log keeps the full record).
+                log = self.jobs[job_id]['progress_log']
+                log.append(line)
+                if len(log) > 5000:
+                    self.jobs[job_id]['progress_log'] = log[-5000:]
                 # Update last progress line (strip emoji/debug noise for status field)
                 clean = re.sub(r'[^\x20-\x7e]', '', line).strip()
                 if clean and not clean.startswith('[LLMTOK]'):
@@ -811,6 +813,77 @@ def get_logs(job_id: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/jobs/<job_id>/code', methods=['GET'])
+@require_api_key
+def get_job_code(job_id: str):
+    """
+    Return solver code per SP for a completed job.
+
+    Source order:
+      1. Active orchestrator's solver_results (in-memory, fastest)
+      2. Parse the writer's "## Solver Code" markdown section from the answer
+      3. Fail with 404
+    """
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return jsonify({'error': 'Job not found'}), 404
+
+    # ── Source 1: live orchestrator solver_results dict ─────────────────
+    sps_out: Dict[str, Dict[str, str]] = {}
+    source = "memory"
+    orch = job.get('orchestrator')
+    sr_dict = getattr(orch, 'solver_results', None) if orch else None
+    if sr_dict:
+        for sp_id, sr in sr_dict.items():
+            code = getattr(sr, 'final_code', '') or ''
+            desc = getattr(sr, 'description', '') or ''
+            if code:
+                sps_out[sp_id] = {'description': desc, 'code': code}
+
+    # ── Source 2: scrape "## Solver Code" from the answer text ──────────
+    if not sps_out:
+        source = "answer_markdown"
+        answer = job.get('answer', '') or ''
+        if '## Solver Code' in answer:
+            tail = answer.split('## Solver Code', 1)[1]
+            # match "### SP1 — desc\n\n```python\n...```"
+            blk_re = re.compile(
+                r'###\s+(SP\w+)(?:\s+[—\-]\s+([^\n]*))?\s*\n+```python\s*\n(.*?)```',
+                re.DOTALL,
+            )
+            for m in blk_re.finditer(tail):
+                sps_out[m.group(1)] = {
+                    'description': (m.group(2) or '').strip(),
+                    'code': m.group(3).strip(),
+                }
+
+    # ── Source 3: scrape disk log for code blocks (last-ditch) ──────────
+    if not sps_out:
+        source = "disk_log"
+        log_path = job.get('log_path')
+        if log_path and Path(log_path).exists():
+            try:
+                text = Path(log_path).read_text(errors='replace')
+                # Each successful run_code prints e.g. "[SP1] Turn ... → run_code: 'import...'"
+                # That gives only a 60-char preview, so we can't reconstruct the
+                # full script from disk. Return empty here and let the caller know.
+            except Exception:
+                pass
+
+    if not sps_out:
+        return jsonify({
+            'error': 'No solver code available for this job',
+            'job_id': job_id,
+            'source': source,
+        }), 404
+
+    return jsonify({
+        'job_id': job_id,
+        'sps': sps_out,
+        'source': source,
+    })
+
+
 @app.route('/debug/<job_id>', methods=['GET'])
 def get_debug_index(job_id: str):
     """List available SP debug log files for a job."""
@@ -958,6 +1031,16 @@ _TOK_RE      = re.compile(r'(\d+)\s+tokens?\s+in\s+([\d.]+)s\s+\(([\d.]+)\s+tok/
 _AGENT_RE    = re.compile(r'Initialized\s+(\S+)\s+\(.*?\)\s+using\s+(\S+)')
 _ERROR_RE    = re.compile(r'Error:|ERROR:')
 
+# Swarm 3.20 — Command Station 2.0 dashboard event types
+_DEPGRAPH_RE = re.compile(r'^DEPENDENCY_GRAPH:\s*(\{.*\})\s*$')
+_TOOLRES_RE  = re.compile(
+    r"^TOOL_RESULT:\s*\[(SP\w+)\]\s+(\w+)\s*\|\s*(\d+)\s+bytes\s*\|\s*(.*)$"
+)
+_ORCHTHINK_RE = re.compile(r'^ORCH_THINK:\s?(.*)$')
+_WAVEDISP_RE = re.compile(
+    r"^WAVE_DISPATCH:\s*Wave\s+(\d+)/(\d+)\s+→\s+\[([^\]]*)\]\s+reason='([^']*)'\s*$"
+)
+
 
 def _parse_event(line: str) -> dict:
     """Parse a stdout line into a structured SSE event dict (V3-aware)."""
@@ -968,6 +1051,38 @@ def _parse_event(line: str) -> dict:
     if m:
         content = m.group(1).replace('\\n', '\n').replace('\\\\', '\\')
         return {**base, 'type': 'llm_chunk', 'content': content}
+
+    # Swarm 3.20 — orchestrator writer streaming chunk
+    m = _ORCHTHINK_RE.match(line)
+    if m:
+        content = m.group(1).replace('\\n', '\n').replace('\\\\', '\\')
+        return {**base, 'type': 'orch_think', 'content': content}
+
+    # Swarm 3.20 — tool execution result (paired with the start-line print)
+    m = _TOOLRES_RE.match(line)
+    if m:
+        return {**base, 'type': 'tool_result',
+                'sp_id': m.group(1), 'tool': m.group(2),
+                'bytes': int(m.group(3)), 'preview': m.group(4).strip()}
+
+    # Swarm 3.20 — dependency graph emitted at end of Phase 0B
+    m = _DEPGRAPH_RE.match(line)
+    if m:
+        try:
+            graph = json.loads(m.group(1))
+            return {**base, 'type': 'dependency_graph',
+                    'sps': graph.get('sps', []),
+                    'waves': graph.get('waves', [])}
+        except json.JSONDecodeError:
+            return {**base, 'type': 'log'}
+
+    # Swarm 3.20 — wave dispatch breakpoint
+    m = _WAVEDISP_RE.match(line)
+    if m:
+        sp_ids = [s.strip() for s in m.group(3).split(',') if s.strip()]
+        return {**base, 'type': 'wave_dispatch',
+                'wave': int(m.group(1)), 'total': int(m.group(2)),
+                'sp_ids': sp_ids, 'reason': m.group(4)}
 
     # V3 phase: "Phase 0A Classification │ 0.2s"
     m = _PHASE_RE_V3.search(line)
@@ -1430,7 +1545,7 @@ def search_stream():
             "prompt": prompt,
             "stream": True,
             "keep_alive": 0,
-            "options": {"temperature": 0.3, "num_predict": 512},
+            "options": {"temperature": 0.3, "num_predict": 512, "num_ctx": _SWARM_NUM_CTX},
         }
         full_answer = ""
         try:
@@ -1495,7 +1610,7 @@ def _ollama(prompt: str, system: str = "", stream: bool = False,
             "system":  system,
             "stream":  stream,
             "keep_alive": 0,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": _SWARM_NUM_CTX},
         },
         stream=stream,
         timeout=120,

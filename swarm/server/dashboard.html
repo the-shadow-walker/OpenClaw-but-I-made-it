@@ -3,1803 +3,1048 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jarvis Command Station</title>
+<title>Jarvis Command Station 2.0</title>
 <style>
-/* ── Base theme ─────────────────────────────────────────────────── */
 :root {
-  --bg:        #0a0a0f;
-  --surface:   #12121a;
-  --surface2:  #1a1a26;
-  --border:    #1e1e2e;
-  --accent:    #00d4ff;
-  --green:     #00ff88;
-  --red:       #ff4444;
-  --yellow:    #ffcc00;
-  --orange:    #ff8800;
-  --dim:       #555577;
-  --text:      #ccd6f6;
-  --text-dim:  #778aaa;
-  --mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --bg:           #000000;
+  --surface:      #050510;
+  --surface-2:    #0a0a18;
+  --surface-3:    #12121e;
+  --border:       #1a1a2e;
+  --border-glow:  #003366;
+  --blue:         #0088ff;
+  --blue-bright:  #00ccff;
+  --blue-dim:     #004488;
+  --green:        #00dd88;
+  --red:          #ff4466;
+  --yellow:       #ffcc44;
+  --text:         #e0e8f5;
+  --text-dim:     #6680a0;
+  --mono:         "JetBrains Mono","Fira Code","Cascadia Code",monospace;
+  --sans:         system-ui,-apple-system,"Segoe UI",sans-serif;
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.5;
-  min-height: 100vh;
-  overflow-x: hidden;
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:100%;overflow-x:hidden}
+body{display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--blue-bright);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Scrollbars */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:var(--surface)}
+::-webkit-scrollbar-thumb{background:var(--blue-dim);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--blue)}
+
+/* Header */
+header.topbar{
+  position:sticky;top:0;z-index:100;
+  display:flex;align-items:center;gap:18px;
+  padding:10px 18px;
+  background:linear-gradient(180deg,#000 0%,#000 70%,rgba(0,0,0,0.85) 100%);
+  border-bottom:1px solid var(--border);
+  backdrop-filter:blur(8px);
 }
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--surface); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--dim); }
-
-
-/* ── Top-level page nav ──────────────────────────────────────────── */
-#page-nav {
-  position: fixed; top: 44px; left: 0; right: 0; z-index: 99;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  display: flex; align-items: center;
-  height: 34px; padding: 0 16px; gap: 4px;
+header .logo{
+  font-family:var(--mono);font-size:15px;font-weight:600;
+  color:var(--blue-bright);letter-spacing:1px;
 }
-.page-tab {
-  padding: 4px 14px;
-  background: none; border: none; border-radius: 4px;
-  font-family: var(--mono); font-size: 12px; font-weight: 600;
-  color: var(--text-dim); cursor: pointer; letter-spacing: 0.5px;
-  transition: color 0.15s, background 0.15s;
+header .logo .glyph{color:var(--blue);margin-right:6px}
+header .stats{display:flex;gap:16px;flex:1;justify-content:flex-end;font-family:var(--mono);font-size:12px}
+header .stat{
+  padding:4px 10px;border:1px solid var(--border);border-radius:4px;
+  background:var(--surface-2);color:var(--text-dim);
 }
-.page-tab:hover  { color: var(--text); background: var(--surface2); }
-.page-tab.active { color: var(--accent); background: var(--surface2);
-                   box-shadow: inset 0 -2px 0 var(--accent); }
+header .stat b{color:var(--blue-bright);font-weight:600}
+header .stat.warn b{color:var(--yellow)}
+header .stat.err b{color:var(--red)}
 
-/* ── Page containers ─────────────────────────────────────────────── */
-.page { display: none; }
-.page.active { display: block; }
-
-/* Shift workspace down to make room for nav bar */
-#workspace { margin-top: 78px; }
-
-/* ── JARVIS Chat page ─────────────────────────────────────────────── */
-#page-chat {
-  position: fixed; top: 78px; left: 0; right: 0; bottom: 0;
-  display: none; flex-direction: column;
-  background: var(--bg);
+/* Layout */
+main.shell{
+  display:grid;
+  grid-template-columns:1fr 320px;
+  gap:14px;padding:14px;flex:1;
+  max-width:1920px;margin:0 auto;width:100%;
 }
-#page-chat.active { display: flex; }
-
-#jchat-messages {
-  flex: 1; overflow-y: auto;
-  padding: 20px 24px;
-  display: flex; flex-direction: column; gap: 16px;
+@media (max-width:1100px){
+  main.shell{grid-template-columns:1fr}
+  aside.sidebar{order:2}
 }
 
-.jmsg { display: flex; flex-direction: column; max-width: 72%; }
-.jmsg.user { align-self: flex-end; align-items: flex-end; }
-.jmsg.jarvis { align-self: flex-start; align-items: flex-start; }
-
-.jmsg-who {
-  font-size: 10px; font-weight: 700; letter-spacing: 1px;
-  color: var(--dim); margin-bottom: 4px;
+/* Cards */
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:14px;margin-bottom:14px;
 }
-.jmsg.jarvis .jmsg-who { color: var(--accent); }
-
-.jmsg-bubble {
-  padding: 10px 14px; border-radius: 8px;
-  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+.card h2{
+  font-size:11px;font-family:var(--mono);
+  color:var(--blue);text-transform:uppercase;letter-spacing:1.5px;
+  margin-bottom:10px;font-weight:600;
 }
-.jmsg.user .jmsg-bubble {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-.jmsg.jarvis .jmsg-bubble {
-  background: rgba(0, 212, 255, 0.06);
-  border: 1px solid rgba(0, 212, 255, 0.18);
-  color: var(--text);
-}
-.jmsg-search-status {
-  font-size: 10px; color: var(--dim);
-  margin-bottom: 5px; font-style: italic;
-}
-.jmsg-sources {
-  display: flex; flex-wrap: wrap; gap: 4px;
-  margin-bottom: 8px;
-}
-.jmsg-src-chip {
-  padding: 2px 7px; border-radius: 3px;
-  background: var(--surface2); border: 1px solid var(--border);
-  font-size: 10px; color: var(--text-dim);
-  max-width: 200px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.jmsg-answer { white-space: pre-wrap; }
-
-#jchat-input-row {
-  display: flex; gap: 8px; align-items: center;
-  padding: 12px 24px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-}
-#jchat-input {
-  flex: 1;
-  background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 9px 12px;
-  color: var(--text); font-family: var(--mono); font-size: 13px;
-  outline: none; resize: none; height: 40px; max-height: 120px;
-  transition: border-color 0.15s;
-}
-#jchat-input:focus { border-color: var(--accent); }
-#jchat-send {
-  background: var(--accent); color: #000;
-  border: none; border-radius: 6px;
-  padding: 8px 18px; font-family: var(--mono); font-size: 12px;
-  font-weight: 700; cursor: pointer; letter-spacing: 0.5px;
-  transition: opacity 0.15s;
-}
-#jchat-send:hover { opacity: 0.85; }
-#jchat-send:disabled { opacity: 0.4; cursor: default; }
-
-#jchat-tts-toggle {
-  background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 7px 10px;
-  color: var(--text-dim); font-family: var(--mono); font-size: 11px;
-  cursor: pointer; transition: color 0.15s, border-color 0.15s;
-  white-space: nowrap;
-}
-#jchat-tts-toggle.on { color: var(--accent); border-color: var(--accent); }
-
-#jchat-status {
-  font-size: 11px; color: var(--dim);
-  padding: 0 24px 8px; min-height: 18px;
+.card h2 .badge{
+  font-size:10px;background:var(--blue-dim);color:#fff;
+  padding:2px 6px;border-radius:3px;margin-left:8px;letter-spacing:.5px;
 }
 
-/* ── Header ─────────────────────────────────────────────────────── */
-#header {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  height: 44px;
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 16px;
-  user-select: none;
+/* Submit row */
+.submit-row{display:flex;gap:10px;align-items:flex-start}
+.submit-row textarea{
+  flex:1;min-height:60px;max-height:200px;
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);padding:10px 12px;border-radius:4px;
+  font-family:var(--mono);font-size:13px;resize:vertical;
 }
-.brand {
-  font-size: 15px; font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 2px;
-  text-shadow: 0 0 8px var(--accent);
-  text-decoration: none;
-  cursor: pointer;
+.submit-row textarea:focus{outline:none;border-color:var(--blue)}
+.submit-row select,.submit-row button{
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);padding:10px 14px;border-radius:4px;
+  font-family:var(--mono);font-size:12px;cursor:pointer;
 }
-.badge {
-  display: flex; align-items: center; gap: 5px;
-  padding: 3px 8px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 11px;
-  color: var(--text-dim);
+.submit-row select:hover,.submit-row button:hover{border-color:var(--blue);color:var(--blue-bright)}
+.submit-row button.primary{
+  background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600;
 }
-.badge .dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--dim);
-  transition: background 0.3s;
-}
-.badge.online .dot  { background: var(--green); box-shadow: 0 0 4px var(--green); }
-.badge.offline .dot { background: var(--red); }
-.badge .label { font-weight: 600; color: var(--text); }
-.badge .val   { color: var(--accent); }
-#hdr-clock { margin-left: auto; color: var(--dim); font-size: 11px; }
+.submit-row button.primary:hover{background:var(--blue-bright);border-color:var(--blue-bright);color:#000}
+.submit-row button.primary:disabled{opacity:.5;cursor:not-allowed}
 
-/* ── Workspace / drag area ───────────────────────────────────────── */
-#workspace {
-  position: relative;
-  margin-top: 78px;
-  min-height: calc(100vh - 78px);
-  padding: 12px;
-  background-image: radial-gradient(circle, #252540 1.5px, transparent 1.5px);
-  background-size: 20px 20px;
+/* Phase pills */
+.phase-rail{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.phase-pill{
+  font-family:var(--mono);font-size:10px;font-weight:600;
+  padding:3px 9px;border-radius:3px;
+  background:var(--surface-3);color:var(--text-dim);
+  border:1px solid var(--border);
+  transition:all .15s;
 }
+.phase-pill.active{
+  background:var(--blue);color:#fff;border-color:var(--blue-bright);
+  box-shadow:0 0 8px rgba(0,136,255,.5);
+}
+.phase-pill.done{background:var(--blue-dim);color:var(--blue-bright);border-color:var(--blue-dim)}
+.phase-pill .arr{color:var(--text-dim);margin:0 2px}
+.elapsed-clock{
+  margin-left:auto;font-family:var(--mono);font-size:11px;
+  color:var(--text-dim);
+}
+.elapsed-clock b{color:var(--blue-bright)}
 
-/* ── Widget base ─────────────────────────────────────────────────── */
-.widget {
-  position: absolute;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  display: flex; flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
-  transition: box-shadow 0.15s;
+/* Orchestrator card */
+.orch-stream{
+  background:var(--surface-2);border:1px solid var(--border);
+  border-radius:4px;padding:10px;
+  font-family:var(--mono);font-size:11px;line-height:1.5;
+  color:var(--text-dim);
+  height:140px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;
 }
-.widget:hover { box-shadow: 0 2px 20px rgba(0,212,255,0.08); }
-.widget.dragging { box-shadow: 0 8px 32px rgba(0,0,0,0.8); opacity: 0.95; z-index: 200; }
+.orch-stream .think{color:var(--blue-bright)}
 
-.widget-title {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 12px;
-  background: var(--surface2);
-  border-bottom: 1px solid var(--border);
-  font-size: 11px; font-weight: 700;
-  color: var(--text-dim);
-  letter-spacing: 1px;
-  cursor: grab;
-  user-select: none;
+/* SP grid */
+.sp-grid{display:flex;flex-direction:column;gap:10px}
+.sp-wave{
+  display:flex;gap:10px;flex-wrap:wrap;
+  padding:6px;border-left:2px solid var(--blue-dim);padding-left:12px;
+  position:relative;
 }
-.widget-title:active { cursor: grabbing; }
-.widget-title .icon { color: var(--accent); }
-.widget-body { flex: 1; overflow: auto; padding: 10px; }
-
-/* ── Tabs ────────────────────────────────────────────────────────── */
-.tabs {
-  display: flex; gap: 0;
-  border-bottom: 1px solid var(--border);
-  padding: 0 8px;
-  background: var(--surface2);
+.sp-wave::before{
+  content:attr(data-wave);
+  position:absolute;left:-22px;top:6px;
+  font-family:var(--mono);font-size:9px;color:var(--blue);
+  background:var(--bg);padding:1px 4px;
 }
-.tab-btn {
-  padding: 6px 12px;
-  font-family: var(--mono); font-size: 11px;
-  color: var(--dim);
-  background: none; border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+.sp-card{
+  flex:1;min-width:280px;max-width:480px;
+  background:var(--surface-2);
+  border:1px solid var(--border);
+  border-radius:4px;padding:10px;
+  transition:border-color .2s,box-shadow .2s;
 }
-.tab-btn:hover  { color: var(--text); }
-.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
-.tab-pane { display: none; }
-.tab-pane.active { display: flex; flex-direction: column; height: 100%; }
-
-/* ── Chat widget ─────────────────────────────────────────────────── */
-#widget-chat { left: 12px; top: 56px; width: 580px; height: 680px; }
-
-#chat-input-row {
-  display: flex; gap: 6px;
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface2);
+.sp-card.active{
+  border-color:var(--blue);
+  box-shadow:0 0 0 1px var(--border-glow), 0 0 12px rgba(0,136,255,.18);
 }
-#chat-service-sel {
-  padding: 6px 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
-  font-family: var(--mono); font-size: 11px;
-  cursor: pointer;
+.sp-card.solved{border-color:var(--green)}
+.sp-card.failed{border-color:var(--red)}
+.sp-head{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:12px;font-weight:600;
+  margin-bottom:8px;
 }
-#chat-input {
-  flex: 1;
-  padding: 6px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: var(--mono); font-size: 12px;
-  outline: none;
-  transition: border-color 0.15s;
+.sp-head .id{color:var(--blue-bright)}
+.sp-head .icon{font-size:13px}
+.sp-head .icon.pending{color:var(--text-dim)}
+.sp-head .icon.active{color:var(--yellow)}
+.sp-head .icon.solved{color:var(--green)}
+.sp-head .icon.failed{color:var(--red)}
+.sp-head .meta{margin-left:auto;color:var(--text-dim);font-weight:400;font-size:10px}
+.sp-desc{
+  font-family:var(--sans);font-size:11px;color:var(--text-dim);
+  margin-bottom:8px;line-height:1.4;
 }
-#chat-input:focus { border-color: var(--accent); }
-#chat-submit {
-  padding: 6px 14px;
-  background: var(--accent);
-  color: #000;
-  border: none; border-radius: 4px;
-  font-family: var(--mono); font-size: 11px; font-weight: 700;
-  cursor: pointer;
-  transition: opacity 0.15s;
+.tool-chain{display:flex;flex-direction:column;gap:3px;margin-bottom:8px}
+.tool-row{
+  display:flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:10px;
+  padding:3px 6px;border-radius:3px;
+  background:var(--surface-3);
 }
-#chat-submit:hover  { opacity: 0.85; }
-#chat-submit:active { opacity: 0.7; }
-
-.phase-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 4px;
-  border-radius: 4px;
-  font-size: 11px;
+.tool-row .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.tool-row .dot.ok{background:var(--green)}
+.tool-row .dot.err{background:var(--red)}
+.tool-row .dot.run{background:var(--yellow);animation:pulse 1.2s infinite}
+.tool-row .name{color:var(--blue-bright);min-width:62px}
+.tool-row .preview{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.tool-row .bytes{color:var(--text-dim);font-size:9px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.sp-results{
+  font-family:var(--mono);font-size:10px;
+  background:var(--surface);border-top:1px dashed var(--border);
+  padding-top:6px;color:var(--green);
+  word-break:break-all;
 }
-.phase-row:hover { background: var(--surface2); }
-.phase-icon { width: 18px; text-align: center; }
-.phase-id   { color: var(--accent); width: 28px; font-weight: 700; }
-.phase-name { color: var(--text); flex: 1; }
-.phase-el   { color: var(--dim); font-size: 10px; width: 40px; text-align: right; }
-
-.sp-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 3px 4px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-.sp-row:hover { background: var(--surface2); }
-.sp-id     { color: var(--accent); width: 36px; font-weight: 700; }
-.sp-status { width: 18px; text-align: center; }
-.sp-turns  { color: var(--dim); width: 42px; font-size: 10px; }
-.sp-tool   { color: #8888cc; width: 80px; }
-.sp-vals   { color: var(--green); flex: 1; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-#stream-log {
-  flex: 1; overflow-y: auto;
-  padding: 6px;
-  font-size: 11px; line-height: 1.6;
-  background: var(--bg);
-}
-.log-phase   { color: var(--accent); }
-.log-wave    { color: var(--yellow); }
-.log-sp      { color: #8888cc; }
-.log-sp-done { color: var(--green); }
-.log-fail    { color: var(--red); }
-.log-default { color: var(--text-dim); }
-
-#answer-box {
-  flex: 1; overflow-y: auto;
-  padding: 10px;
-  font-size: 12px; line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-#answer-copy-btn {
-  margin: 6px; padding: 4px 10px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  border-radius: 4px;
-  font-family: var(--mono); font-size: 10px;
-  cursor: pointer;
-}
-#answer-copy-btn:hover { color: var(--accent); border-color: var(--accent); }
-
-
-/* ── API Builder widget ──────────────────────────────────────────── */
-#widget-api { width: 340px; height: 400px; }
-
-#api-method-badge {
-  margin-left: auto;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px; font-weight: 700;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--accent);
-}
-#api-top-row {
-  display: flex; gap: 5px;
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface2);
-}
-#api-svc-sel, #api-ep-sel {
-  padding: 4px 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
-  font-family: var(--mono); font-size: 10px;
-  cursor: pointer;
-  outline: none;
-}
-#api-svc-sel { width: 110px; flex-shrink: 0; }
-#api-ep-sel  { flex: 1; min-width: 0; }
-#api-fire {
-  padding: 4px 10px;
-  background: var(--green);
-  color: #000;
-  border: none; border-radius: 4px;
-  font-family: var(--mono); font-size: 11px; font-weight: 700;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: opacity 0.15s;
-}
-#api-fire:hover { opacity: 0.85; }
-#api-params {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  display: flex; flex-direction: column; gap: 5px;
-  background: var(--surface);
-  min-height: 0;
-}
-.api-param-label {
-  font-size: 10px; color: var(--text-dim); margin-bottom: 1px;
-}
-.api-param-input, .api-param-textarea, .api-param-select {
-  width: 100%; padding: 4px 7px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  font-family: var(--mono); font-size: 11px;
-  outline: none;
-  box-sizing: border-box;
-}
-.api-param-textarea { resize: vertical; min-height: 52px; }
-.api-param-input:focus, .api-param-textarea:focus { border-color: var(--accent); }
-#api-response-bar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface2);
-}
-#api-status-badge {
-  flex: 1; font-size: 10px; color: var(--text-dim);
-}
-#api-copy-btn {
-  padding: 2px 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  border-radius: 3px; font-size: 10px; cursor: pointer;
-  font-family: var(--mono);
-}
-#api-copy-btn:hover { color: var(--accent); border-color: var(--accent); }
-#api-response-body {
-  flex: 1; overflow-y: auto;
-  padding: 7px 9px;
-  font-size: 10px; line-height: 1.5;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  word-break: break-all;
-  background: var(--bg);
-  margin: 0;
+.sp-results.soft{color:var(--yellow)}
+.sp-tokens{
+  height:36px;overflow:hidden;font-family:var(--mono);font-size:10px;
+  color:var(--text-dim);margin-top:6px;
+  -webkit-mask-image:linear-gradient(180deg,transparent,#000 30%);
+  mask-image:linear-gradient(180deg,transparent,#000 30%);
+  white-space:pre-wrap;word-break:break-word;
 }
 
-/* ── GPU widget ──────────────────────────────────────────────────── */
-#widget-gpu { width: 320px; height: 220px; }
-
-.metric-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 0;
+/* Answer card */
+.answer-md{
+  font-family:var(--sans);font-size:14px;line-height:1.6;
+  color:var(--text);max-height:none;
 }
-.metric-label { color: var(--text-dim); width: 50px; font-size: 11px; }
-.metric-bar-wrap {
-  flex: 1; height: 10px;
-  background: var(--surface2);
-  border-radius: 5px; overflow: hidden;
+.answer-md h1,.answer-md h2,.answer-md h3,.answer-md h4{
+  font-family:var(--mono);color:var(--blue-bright);
+  margin:18px 0 8px;font-weight:600;
 }
-.metric-bar {
-  height: 100%; border-radius: 5px;
-  background: var(--accent);
-  transition: width 0.4s ease;
+.answer-md h1{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.answer-md h2{font-size:15px}
+.answer-md h3{font-size:13px;color:var(--blue)}
+.answer-md h4{font-size:12px;color:var(--blue-dim)}
+.answer-md p{margin:6px 0}
+.answer-md ul,.answer-md ol{margin:6px 0 6px 22px}
+.answer-md li{margin:3px 0}
+.answer-md hr{border:0;border-top:1px solid var(--border);margin:14px 0}
+.answer-md table{border-collapse:collapse;margin:10px 0;font-size:12px}
+.answer-md th,.answer-md td{border:1px solid var(--border);padding:5px 9px}
+.answer-md th{background:var(--surface-2);color:var(--blue-bright)}
+.answer-md code{
+  font-family:var(--mono);font-size:12px;
+  background:var(--surface-3);padding:1px 5px;border-radius:3px;
+  color:var(--blue-bright);
 }
-.metric-bar.warn  { background: var(--yellow); }
-.metric-bar.crit  { background: var(--red); }
-.metric-val { width: 50px; text-align: right; font-size: 11px; color: var(--text); }
-.metric-name { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
-.metric-temp { font-size: 10px; color: var(--dim); }
-
-/* ── Jobs widget ─────────────────────────────────────────────────── */
-#widget-jobs   { left: 12px; top: 752px; width: 880px; height: 240px; }
-
-/* ── Search widget ───────────────────────────────────────────────────── */
-#widget-search { width: 440px; height: 560px; }
-#search-input-row {
-  display: flex; gap: 6px;
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface2);
+.answer-md strong{color:#fff}
+.answer-md em{color:var(--blue-bright)}
+.code-block{
+  background:var(--surface-2);border:1px solid var(--border);
+  border-radius:4px;margin:10px 0;overflow:hidden;
 }
-#search-input {
-  flex: 1; padding: 6px 10px;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 4px; color: var(--text);
-  font-family: var(--mono); font-size: 12px; outline: none;
-  transition: border-color 0.15s;
+.code-header{
+  display:flex;align-items:center;gap:8px;
+  background:var(--surface-3);
+  padding:6px 10px;border-bottom:1px solid var(--border);
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);
 }
-#search-input:focus { border-color: var(--accent); }
-#search-n-sel {
-  padding: 5px 6px; width: 52px;
-  background: var(--surface); border: 1px solid var(--border);
-  color: var(--text-dim); border-radius: 4px;
-  font-family: var(--mono); font-size: 11px; cursor: pointer;
+.code-header .lang{color:var(--blue);font-weight:600}
+.code-header .actions{margin-left:auto;display:flex;gap:6px}
+.code-header button{
+  background:var(--surface);border:1px solid var(--border);
+  color:var(--text);padding:3px 9px;border-radius:3px;
+  font-family:var(--mono);font-size:10px;cursor:pointer;
 }
-#search-go {
-  padding: 6px 12px; background: var(--accent); color: #000;
-  border: none; border-radius: 4px;
-  font-family: var(--mono); font-size: 11px; font-weight: 700;
-  cursor: pointer; transition: opacity 0.15s;
-}
-#search-go:hover { opacity: 0.85; }
-#search-go:disabled { opacity: 0.4; cursor: default; }
-#search-results-list {
-  overflow-y: auto; flex: 1; padding: 8px;
-}
-.search-result-card {
-  padding: 7px 8px; margin-bottom: 6px;
-  background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 5px; font-size: 11px;
-}
-.search-result-card:hover { border-color: var(--accent); }
-.sr-title { color: var(--accent); font-weight: 700; margin-bottom: 2px; }
-.sr-url   { color: var(--dim); font-size: 10px; margin-bottom: 4px;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sr-snip  { color: var(--text-dim); line-height: 1.5; }
-#search-answer-box {
-  border-top: 1px solid var(--border);
-  padding: 8px 10px; font-size: 12px; line-height: 1.7;
-  color: var(--text); white-space: pre-wrap; max-height: 180px;
-  overflow-y: auto; background: var(--bg);
-}
-#search-status {
-  padding: 3px 8px; font-size: 10px; color: var(--dim);
-  border-top: 1px solid var(--border); min-height: 18px;
+.code-header button:hover{border-color:var(--blue);color:var(--blue-bright)}
+.code-block pre{
+  padding:10px;font-family:var(--mono);font-size:12px;
+  line-height:1.5;color:var(--text);overflow-x:auto;white-space:pre;
 }
 
-.job-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 6px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  transition: background 0.1s;
-  cursor: pointer;
+/* Sidebar */
+aside.sidebar{display:flex;flex-direction:column;gap:14px;align-self:flex-start;position:sticky;top:60px}
+.gpu-bar{
+  height:8px;background:var(--surface-3);border-radius:3px;overflow:hidden;
+  margin:6px 0 4px;
 }
-.job-row:hover { background: var(--surface2); }
-.job-svc   { width: 14px; text-align: center; }
-.job-id    { color: var(--accent); width: 60px; font-weight: 700; font-size: 10px; }
-.job-type  { color: var(--text-dim); width: 60px; }
-.job-st    { width: 70px; }
-.job-el    { color: var(--dim); width: 44px; text-align: right; font-size: 10px; }
-.job-prev  { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job-watch {
-  padding: 2px 7px;
-  background: var(--surface2); border: 1px solid var(--border);
-  color: var(--text-dim); border-radius: 3px;
-  font-size: 10px; cursor: pointer;
+.gpu-bar .fill{
+  height:100%;background:linear-gradient(90deg,var(--blue),var(--blue-bright));
+  transition:width .4s;
 }
-.job-watch:hover { color: var(--accent); border-color: var(--accent); }
-.st-processing { color: var(--yellow); }
-.st-pending    { color: var(--dim); }
-.st-completed  { color: var(--green); }
-.st-failed     { color: var(--red); }
+.gpu-row{
+  display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  padding:2px 0;
+}
+.gpu-row b{color:var(--text)}
 
-/* ── Utilities ───────────────────────────────────────────────────── */
-.empty-hint { color: var(--dim); font-size: 11px; text-align: center; padding: 20px; }
-.status-dot-inline {
-  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--dim); margin-right: 4px;
-  vertical-align: middle;
+#gui-feed-wrap{
+  position:relative;background:var(--surface-2);
+  border:1px solid var(--border);border-radius:4px;
+  aspect-ratio:16/10;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
 }
-.status-dot-inline.active { background: var(--green); box-shadow: 0 0 4px var(--green); }
+#gui-feed-wrap img{width:100%;height:100%;object-fit:contain;display:block}
+#gui-feed-wrap .placeholder{
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);text-align:center;padding:20px;
+}
+.gui-status{
+  font-family:var(--mono);font-size:10px;color:var(--text-dim);
+  margin-top:6px;display:flex;justify-content:space-between;
+}
+.gui-status .live{color:var(--green)}
+.gui-status .live::before{content:"●";margin-right:4px;animation:pulse 1.5s infinite}
+
+.jobs-list{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto}
+.job-item{
+  display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:11px;
+  padding:5px 8px;border-radius:3px;background:var(--surface-2);
+  border:1px solid transparent;cursor:pointer;
+  transition:border-color .15s;
+}
+.job-item:hover{border-color:var(--blue-dim)}
+.job-item.active{border-color:var(--blue);background:var(--surface-3)}
+.job-item .id{color:var(--blue-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+.job-item .status{color:var(--text-dim)}
+.job-item .status.completed{color:var(--green)}
+.job-item .status.failed{color:var(--red)}
+.job-item .status.processing,.job-item .status.running{color:var(--yellow)}
+
+.empty-msg{
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  padding:20px;text-align:center;
+}
 </style>
 </head>
 <body>
 
-<!-- ── HEADER ──────────────────────────────────────────────────────── -->
-<div id="header">
-  <a class="brand" href="#" onclick="window.open('http://'+location.hostname+':4210','_blank');return false">⬡ JARVIS</a>
-
-  <div class="badge" id="badge-swarm">
-    <span class="dot"></span>
-    <span class="label">Swarm</span>
-    <span class="val" id="hdr-swarm-jobs">—</span>
+<header class="topbar">
+  <div class="logo"><span class="glyph">⬡</span> JARVIS COMMAND STATION 2.0</div>
+  <div class="stats">
+    <div class="stat" id="stat-jobs">JOBS <b>0/3</b></div>
+    <div class="stat" id="stat-gpu">GPU <b>—</b></div>
+    <div class="stat" id="stat-model">MODEL <b>—</b></div>
   </div>
+</header>
 
-  <div class="badge" id="badge-cmd">
-    <span class="dot"></span>
-    <span class="label">Cmd</span>
-  </div>
+<main class="shell">
+  <section class="main-col">
 
-  <div class="badge" id="badge-jarvis">
-    <span class="dot"></span>
-    <span class="label">JARVIS</span>
-  </div>
-
-  <div class="badge">
-    <span style="color:var(--accent)">GPU</span>
-    <span class="val" id="hdr-gpu">—</span>
-  </div>
-
-  <div class="badge">
-    <span style="color:var(--text-dim)">RAM</span>
-    <span class="val" id="hdr-ram">—</span>
-  </div>
-
-  <div class="badge">
-    <span style="color:var(--text-dim)">CPU</span>
-    <span class="val" id="hdr-cpu">—</span>
-  </div>
-
-  <span id="hdr-clock">--:--:--</span>
-</div>
-
-
-<!-- ── PAGE NAV ─────────────────────────────────────────────────── -->
-<div id="page-nav">
-  <button class="page-tab active" data-page="tools">⬡ Tools</button>
-  <button class="page-tab"        data-page="chat">⯢ JARVIS Chat</button>
-</div>
-
-<!-- ── WORKSPACE ───────────────────────────────────────────────────── -->
-<div id="page-tools" class="page active">
-<div id="workspace">
-
-  <!-- Chat Widget -->
-  <div class="widget" id="widget-chat">
-    <div class="widget-title" data-widget="widget-chat">
-      <span class="icon">⬡</span>
-      <span>SWARM RESEARCH</span>
-      <span id="chat-job-badge" style="margin-left:auto;color:var(--dim);font-size:10px"></span>
-    </div>
-
-    <!-- Input row -->
-    <div id="chat-input-row">
-      <select id="chat-service-sel">
-        <option value="swarm">Swarm</option>
-        <option value="cmd">Execute</option>
-        <option value="jarvis">⯢ JARVIS</option>
-      </select>
-      <input id="chat-input" placeholder="Ask anything or give a command…" autocomplete="off">
-      <button id="chat-submit">↵</button>
-    </div>
-
-    <!-- Tabs -->
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="phases">Phases</button>
-      <button class="tab-btn" data-tab="sps">SPs</button>
-      <button class="tab-btn" data-tab="stream">Stream</button>
-      <button class="tab-btn" data-tab="answer">Answer</button>
-    </div>
-
-    <!-- Tab: Phases -->
-    <div class="tab-pane active" id="tab-phases" style="overflow:auto;padding:8px;flex:1">
-      <div class="empty-hint" id="phases-empty">Submit a query to see pipeline phases</div>
-      <div id="phases-list"></div>
-    </div>
-
-    <!-- Tab: SPs -->
-    <div class="tab-pane" id="tab-sps" style="overflow:auto;padding:8px;flex:1">
-      <div class="empty-hint" id="sps-empty">Sub-problems appear here during solving</div>
-      <div id="sps-list"></div>
-    </div>
-
-    <!-- Tab: Stream -->
-    <div class="tab-pane" id="tab-stream" style="flex:1">
-      <div id="stream-log"></div>
-    </div>
-
-    <!-- Tab: Answer -->
-    <div class="tab-pane" id="tab-answer" style="flex:1;display:none">
-      <button id="answer-copy-btn">Copy</button>
-      <div id="answer-box"><span style="color:var(--dim)">Answer will appear here…</span></div>
-    </div>
-  </div>
-
-  <!-- API Builder Widget -->
-  <div class="widget" id="widget-api">
-    <div class="widget-title" data-widget="widget-api">
-      <span class="icon">🔌</span>
-      <span>API BUILDER</span>
-      <span id="api-method-badge">GET</span>
-    </div>
-    <div id="api-top-row">
-      <select id="api-svc-sel">
-        <option value="swarm">⬡ Swarm :5002</option>
-        <option value="cmd">🔧 Cmd :5000</option>
-      </select>
-      <select id="api-ep-sel"><!-- populated by JS --></select>
-      <button id="api-fire">FIRE</button>
-    </div>
-    <div id="api-params"></div>
-    <div id="api-response-bar">
-      <span id="api-status-badge"></span>
-      <button id="api-copy-btn">Copy</button>
-    </div>
-    <pre id="api-response-body">…</pre>
-  </div>
-
-  <!-- GPU Widget -->
-  <div class="widget" id="widget-gpu">
-    <div class="widget-title" data-widget="widget-gpu">
-      <span class="icon">⚡</span>
-      <span>GPU / SYSTEM</span>
-    </div>
-    <div class="widget-body">
-      <div class="metric-name" id="gpu-name">Loading…</div>
-      <div class="metric-temp" id="gpu-temp"></div>
-      <br>
-      <div class="metric-row">
-        <span class="metric-label">GPU</span>
-        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-gpu" style="width:0%"></div></div>
-        <span class="metric-val" id="val-gpu">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-label">VRAM</span>
-        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-vram" style="width:0%"></div></div>
-        <span class="metric-val" id="val-vram">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-label">RAM</span>
-        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-ram" style="width:0%"></div></div>
-        <span class="metric-val" id="val-ram">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-label">CPU</span>
-        <div class="metric-bar-wrap"><div class="metric-bar" id="bar-cpu" style="width:0%"></div></div>
-        <span class="metric-val" id="val-cpu">—</span>
+    <!-- Submit row -->
+    <div class="card">
+      <h2>Submit Question</h2>
+      <div class="submit-row">
+        <textarea id="q-text" placeholder="Ask anything…  e.g. Compute the kinetic energy of a 1500 kg car at 25 m/s, then derive the work-energy theorem from first principles."></textarea>
+        <select id="q-service" title="Service">
+          <option value="swarm">Swarm</option>
+          <option value="execute">Execute</option>
+          <option value="engineer">Engineer</option>
+          <option value="deepsearch">DeepSearch</option>
+        </select>
+        <button id="q-submit" class="primary">SUBMIT</button>
       </div>
     </div>
-  </div>
 
-  <!-- Jobs Widget -->
-  <div class="widget" id="widget-jobs">
-    <div class="widget-title" data-widget="widget-jobs">
-      <span class="icon">📋</span>
-      <span>JOBS</span>
-      <span id="jobs-count" style="margin-left:auto;color:var(--dim);font-size:10px">0 total</span>
+    <!-- Agent flow stage -->
+    <div class="card" id="orch-card">
+      <h2>Orchestrator <span class="badge" id="orch-job">no job</span></h2>
+      <div class="phase-rail" id="phase-rail">
+        <span class="phase-pill" data-phase="0A">0A</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="0B">0B</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="0C">0C</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="1">1</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="2">2</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="3">3</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="3C">3C</span><span class="arr">→</span>
+        <span class="phase-pill" data-phase="W">W</span>
+        <span class="elapsed-clock">elapsed <b id="orch-elapsed">0s</b></span>
+      </div>
+      <div class="orch-stream" id="orch-stream"><span class="placeholder">Awaiting job…</span></div>
     </div>
-    <div class="widget-body" style="padding:0">
-      <div id="jobs-list">
-        <div class="empty-hint">No jobs yet</div>
+
+    <div class="card">
+      <h2>Sub-Problems &amp; Tool Chain</h2>
+      <div class="sp-grid" id="sp-grid">
+        <div class="empty-msg">Submit a question to see the agent flow.</div>
       </div>
     </div>
-  </div>
 
-  <!-- Search Widget -->
-  <div class="widget" id="widget-search">
-    <div class="widget-title" data-widget="widget-search">
-      <span class="icon">🔍</span>
-      <span>SEARCH + SYNTHESIZE</span>
-      <span id="search-src-badge" style="margin-left:auto;color:var(--dim);font-size:10px"></span>
+    <div class="card" id="answer-card">
+      <h2>Final Answer</h2>
+      <div class="answer-md" id="answer-md">
+        <div class="empty-msg">Waiting for first answer…</div>
+      </div>
     </div>
-    <div id="search-input-row">
-      <input id="search-input" placeholder="Search anything…" autocomplete="off">
-      <select id="search-n-sel" title="Max results">
-        <option value="3">3</option>
-        <option value="5" selected>5</option>
-        <option value="8">8</option>
-      </select>
-      <button id="search-go">⌕</button>
-    </div>
-    <div id="search-results-list"></div>
-    <div id="search-answer-box"><span style="color:var(--dim)">Answer will appear here…</span></div>
-    <div id="search-status"></div>
-  </div>
 
-</div><!-- /workspace -->
+  </section>
+
+  <aside class="sidebar">
+    <div class="card">
+      <h2>GPU + System</h2>
+      <div id="gpu-name" style="font-family:var(--mono);font-size:11px;color:var(--blue-bright);margin-bottom:6px">—</div>
+      <div class="gpu-bar"><div class="fill" id="gpu-fill" style="width:0%"></div></div>
+      <div class="gpu-row"><span>VRAM</span><b id="gpu-vram">—</b></div>
+      <div class="gpu-row"><span>GPU%</span><b id="gpu-pct">—</b></div>
+      <div class="gpu-row"><span>Temp</span><b id="gpu-temp">—</b></div>
+      <div class="gpu-row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>CPU%</span><b id="cpu-pct">—</b></div>
+      <div class="gpu-row"><span>RAM%</span><b id="ram-pct">—</b></div>
+    </div>
+
+    <div class="card">
+      <h2>GUI Desktop <span class="badge" id="gui-state">offline</span></h2>
+      <div id="gui-feed-wrap">
+        <div class="placeholder" id="gui-placeholder">Awaiting CMD live feed at<br>http://10.0.0.58:5005/stream</div>
+        <img id="gui-feed" style="display:none" alt="GUI desktop">
+      </div>
+      <div class="gui-status">
+        <span id="gui-iter">—</span>
+        <span id="gui-live"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Jobs</h2>
+      <div class="jobs-list" id="jobs-list">
+        <div class="empty-msg">No jobs yet.</div>
+      </div>
+    </div>
+  </aside>
+</main>
 
 <script>
-/* ── Config ───────────────────────────────────────────────────── */
-const SWARM_URL  = `${location.protocol}//${location.hostname}:5002`
-const CMD_URL    = `${location.protocol}//${location.hostname}:5000`
-const JARVIS_URL = SWARM_URL   // /api/session + /api/chat live on swarm server
-const GRID      = 20  // drag snap grid in pixels
+'use strict';
+//=============================================================
+// Jarvis Command Station 2.0 — Live Agent-Flow Dashboard
+// Pure-vanilla JS, zero CDN deps. Single-file IIFE-style modules.
+//=============================================================
 
-/* ── State ────────────────────────────────────────────────────── */
+// ─── State ──────────────────────────────────────────────────
 const state = {
-  swarm:  { url: SWARM_URL, online: false, jobs: [] },
-  cmd:    { url: CMD_URL,   online: false, jobs: [] },
-  jarvis: { url: JARVIS_URL, online: false, session: null },
-  gpu:    {},
-  activeStream: null,       // EventSource for current watched job
-  activeJobId: null,
-  activeJobSvc: null,
-  currentJob: {
-    phases: {},             // phase_id → {name, status, elapsed_s}
-    sps:    {},             // sp_id   → {status, turn, max_turn, tool, values}
-    wave: '', qtype: '',
-    logs: [], answer: '',
-  },
-  widgets: JSON.parse(localStorage.getItem('jcs-widgets') || '{}'),
+  currentJob: null,            // {id, question, t0, phasesDone:Set, currentPhase}
+  sps: {},                     // sp_id → {id, desc, deps, status, turns, tools:[], results:'', tokenBuf:''}
+  waves: [],                   // [[sp_id,...], ...]
+  llmTarget: null,             // sp_id receiving current [LLMTOK] stream
+  llmFlushPending: false,
+  orchThinkBuf: '',
+  jobs: [],                    // last fetched /jobs
+  metrics: {},
+  guiOnline: false,
+  startedAt: 0,
+};
+
+// ─── Utility ────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const escapeHtml = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtBytes = n => n<1024 ? n+'B' : n<1024*1024 ? (n/1024).toFixed(1)+'K' : (n/1048576).toFixed(1)+'M';
+const fmtElapsed = sec => {
+  if (!sec) return '0s';
+  if (sec < 60) return Math.round(sec)+'s';
+  const m = Math.floor(sec/60), s = Math.round(sec%60);
+  return `${m}m${s.toString().padStart(2,'0')}s`;
+};
+
+// ─── Throttled render scheduler ─────────────────────────────
+let _renderQueued = false;
+const queueRender = () => {
+  if (_renderQueued) return;
+  _renderQueued = true;
+  requestAnimationFrame(() => {
+    _renderQueued = false;
+    renderOrchCard();
+    renderSPGrid();
+  });
+};
+
+// ─── Phase management ───────────────────────────────────────
+const PHASE_ORDER = ['0A','0B','0C','1','2','3','3C','W'];
+const phasesDone = new Set();
+let currentPhase = null;
+
+function setPhase(pid){
+  if (currentPhase) phasesDone.add(currentPhase);
+  currentPhase = pid;
+  document.querySelectorAll('.phase-pill').forEach(p=>{
+    const id = p.dataset.phase;
+    p.classList.remove('active','done');
+    if (id === currentPhase) p.classList.add('active');
+    else if (phasesDone.has(id)) p.classList.add('done');
+  });
 }
 
-/* ── Widget positions ─────────────────────────────────────────── */
-function saveWidgetPos(id, left, top) {
-  state.widgets[id] = { left, top }
-  localStorage.setItem('jcs-widgets', JSON.stringify(state.widgets))
-}
-function restoreWidgetPositions() {
-  for (const [id, pos] of Object.entries(state.widgets)) {
-    const el = document.getElementById(id)
-    if (el) {
-      el.style.left = Math.round(pos.left / GRID) * GRID + 'px'
-      el.style.top  = Math.round(pos.top  / GRID) * GRID + 'px'
-    }
-  }
+function resetPhases(){
+  phasesDone.clear();
+  currentPhase = null;
+  document.querySelectorAll('.phase-pill').forEach(p=>p.classList.remove('active','done'));
 }
 
-function initWidgetDefaults() {
-  const W = document.getElementById('workspace').clientWidth
-  const R = Math.round((W - 360) / GRID) * GRID   // right column left edge
-  const defaults = {
-    'widget-chat':   { left: 20,  top: 60  },
-    'widget-api':    { left: R,   top: 60  },
-    'widget-gpu':    { left: R,   top: 340 },
-    'widget-jobs':   { left: 20,  top: 760 },
-    'widget-search': { left: R,   top: 580 },
-  }
-  for (const [id, pos] of Object.entries(defaults)) {
-    if (!state.widgets[id]) {
-      const el = document.getElementById(id)
-      if (el) { el.style.left = pos.left + 'px'; el.style.top = pos.top + 'px' }
-    }
-  }
-}
+// ─── Connection: main job stream ────────────────────────────
+let mainES = null;
+let mainBackoff = 1000;
 
-/* ── Drag-and-drop ────────────────────────────────────────────── */
-function initDrag() {
-  document.querySelectorAll('.widget-title').forEach(handle => {
-    const widget = handle.closest('.widget')
-    let ox = 0, oy = 0
-
-    handle.addEventListener('mousedown', e => {
-      e.preventDefault()
-      const rect = widget.getBoundingClientRect()
-      const wsRect = document.getElementById('workspace').getBoundingClientRect()
-      ox = e.clientX - rect.left
-      oy = e.clientY - rect.top
-      widget.classList.add('dragging')
-      widget.style.zIndex = 1000
-
-      const onMove = ev => {
-        const rawX = ev.clientX - wsRect.left - ox
-        const rawY = ev.clientY - wsRect.top  - oy
-        const x = Math.round(rawX / GRID) * GRID
-        const y = Math.round(rawY / GRID) * GRID
-        widget.style.left = Math.max(0, x) + 'px'
-        widget.style.top  = Math.max(0, y) + 'px'
-      }
-      const onUp = ev => {
-        widget.classList.remove('dragging')
-        widget.style.zIndex = ''
-        saveWidgetPos(widget.id,
-          parseInt(widget.style.left) || 0,
-          parseInt(widget.style.top)  || 0)
-        document.removeEventListener('mousemove', onMove)
-        document.removeEventListener('mouseup', onUp)
-      }
-      document.addEventListener('mousemove', onMove)
-      document.addEventListener('mouseup', onUp)
-    })
-  })
-}
-
-/* ── Tabs ─────────────────────────────────────────────────────── */
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const tabId = btn.dataset.tab
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
-    document.querySelectorAll('.tab-pane').forEach(p => {
-      p.classList.remove('active')
-      p.style.display = 'none'
-    })
-    btn.classList.add('active')
-    const pane = document.getElementById('tab-' + tabId)
-    if (pane) { pane.classList.add('active'); pane.style.display = 'flex' }
-  })
-})
-
-/* ── Clock ────────────────────────────────────────────────────── */
-function tickClock() {
-  const now = new Date()
-  document.getElementById('hdr-clock').textContent =
-    now.toTimeString().slice(0,8)
-}
-setInterval(tickClock, 1000); tickClock()
-
-/* ── Poll (metrics + jobs every 3s) ──────────────────────────── */
-async function poll() {
-  // Swarm health + metrics
-  try {
-    const m = await fetchJSON(SWARM_URL + '/metrics')
-    if (m) updateMetrics(m)
-    document.getElementById('badge-swarm').className = 'badge online'
-    state.swarm.online = true
-  } catch { document.getElementById('badge-swarm').className = 'badge offline' }
-
-  // Swarm jobs
-  try {
-    const d = await fetchJSON(SWARM_URL + '/jobs')
-    if (d && d.jobs) {
-      state.swarm.jobs = d.jobs.map(j => normalizeJob(j, 'swarm'))
-      document.getElementById('hdr-swarm-jobs').textContent =
-        state.swarm.jobs.filter(j => j.status === 'processing').length + ' active'
-    }
-  } catch {}
-
-  // Cmd health
-  // EXPAND: add cmd /api/v1/state polling here
-  try {
-    const c = await fetchJSON(CMD_URL + '/api/v1/health')
-    if (c) { document.getElementById('badge-cmd').className = 'badge online'; state.cmd.online = true }
-  } catch { document.getElementById('badge-cmd').className = 'badge offline' }
-
-  // JARVIS health
-  try {
-    const j = await fetchJSON(JARVIS_URL + '/api/status')
-    if (j) { document.getElementById('badge-jarvis').className = 'badge online'; state.jarvis.online = true }
-  } catch { document.getElementById('badge-jarvis').className = 'badge offline' }
-
-  renderJobsList()
-}
-
-async function fetchJSON(url) {
-  const r = await fetch(url, { signal: AbortSignal.timeout(4000) })
-  if (!r.ok) return null
-  return r.json()
-}
-
-/* ── Metrics update ───────────────────────────────────────────── */
-function updateMetrics(m) {
-  const gpu = m.gpu || {}
-  if (!gpu.error) {
-    document.getElementById('gpu-name').textContent = gpu.name || 'GPU'
-    document.getElementById('gpu-temp').textContent = gpu.temp_c != null ? `${gpu.temp_c}°C` : ''
-    setBar('gpu',  gpu.gpu_pct,  `${gpu.gpu_pct}%`)
-    setBar('vram', gpu.mem_pct,
-      gpu.mem_used_mb != null
-        ? `${(gpu.mem_used_mb/1024).toFixed(1)}/${(gpu.mem_total_mb/1024).toFixed(0)} GB`
-        : `${gpu.mem_pct}%`)
-    document.getElementById('hdr-gpu').textContent = `${gpu.gpu_pct}%`
-  } else {
-    const errMsg = (gpu.error || '').toLowerCase()
-    let gpuLabel = 'nvidia-smi unavailable'
-    if (errMsg.includes('mismatch') || errMsg.includes('nvml')) {
-      gpuLabel = 'Driver mismatch — reboot or: sudo modprobe -r nvidia && sudo modprobe nvidia'
-    }
-    document.getElementById('gpu-name').textContent = gpuLabel
-    document.getElementById('hdr-gpu').textContent = 'ERR'
-  }
-  if (m.memory_pct != null) {
-    setBar('ram', m.memory_pct, `${m.memory_pct.toFixed(0)}%`)
-    document.getElementById('hdr-ram').textContent = `${m.memory_pct.toFixed(0)}%`
-  }
-  if (m.cpu_pct != null) {
-    setBar('cpu', m.cpu_pct, `${m.cpu_pct.toFixed(0)}%`)
-    document.getElementById('hdr-cpu').textContent = `${m.cpu_pct.toFixed(0)}%`
-  }
-}
-function setBar(key, pct, label) {
-  const bar = document.getElementById('bar-' + key)
-  const val = document.getElementById('val-' + key)
-  if (!bar) return
-  bar.style.width = Math.min(100, pct || 0) + '%'
-  bar.className   = 'metric-bar' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '')
-  if (val) val.textContent = label || `${pct}%`
-}
-
-/* ── Job normalization ────────────────────────────────────────── */
-function normalizeJob(raw, service) {
-  if (service === 'swarm') return {
-    id:      raw.job_id,
-    service: 'swarm',
-    status:  raw.status,
-    type:    'query',
-    preview: (raw.question || '').slice(0, 55),
-    elapsed: raw.elapsed,
-    stream:  `${SWARM_URL}/stream/${raw.job_id}`,
-  }
-  if (service === 'cmd') return {
-    id:      raw.id,
-    service: 'cmd',
-    status:  raw.status,
-    type:    raw.type || 'execute',
-    preview: (raw.instruction || '').slice(0, 55),
-    elapsed: raw.elapsed_s,
-    stream:  `${CMD_URL}/api/v1/jobs/${raw.id}/stream`,
-  }
-  return raw
-}
-
-/* ── Jobs list render ─────────────────────────────────────────── */
-function renderJobsList() {
-  const all = [...state.swarm.jobs, ...state.cmd.jobs]
-    .sort((a, b) => (b.elapsed || 0) - (a.elapsed || 0))
-    .slice(0, 30)
-
-  const container = document.getElementById('jobs-list')
-  document.getElementById('jobs-count').textContent = `${all.length} total`
-
-  if (!all.length) { container.innerHTML = '<div class="empty-hint">No jobs yet</div>'; return }
-
-  container.innerHTML = all.map(j => {
-    const icon  = j.service === 'swarm' ? '⬡' : '🔧'
-    const stCls = { processing: 'st-processing', pending: 'st-pending',
-                    completed: 'st-completed',   failed: 'st-failed' }[j.status] || ''
-    const el    = j.elapsed ? `${parseFloat(j.elapsed).toFixed(0)}s` : '—'
-    const active = j.id === state.activeJobId ? 'style="background:var(--surface2)"' : ''
-    return `<div class="job-row" ${active} onclick="watchJob('${j.id}','${j.service}')">
-      <span class="job-svc">${icon}</span>
-      <span class="job-id">${j.id}</span>
-      <span class="job-type">${j.type}</span>
-      <span class="job-st ${stCls}">${j.status}</span>
-      <span class="job-el">${el}</span>
-      <span class="job-prev">${escHtml(j.preview)}</span>
-      <button class="job-watch" onclick="event.stopPropagation();watchJob('${j.id}','${j.service}')">Watch</button>
-    </div>`
-  }).join('')
-}
-
-/* ── Watch job (SSE) ──────────────────────────────────────────── */
-function watchJob(jobId, service) {
-  // Close existing stream
-  if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
-
-  state.activeJobId  = jobId
-  state.activeJobSvc = service
-
-  // Reset current job state
-  state.currentJob = { phases: {}, sps: {}, wave: '', qtype: '', logs: [], answer: '' }
-  clearJobDisplay()
-
-  document.getElementById('chat-job-badge').textContent = `[ ${jobId} ]`
-
-  const streamUrl = service === 'swarm'
-    ? `${SWARM_URL}/stream/${jobId}`
-    : `${CMD_URL}/api/v1/jobs/${jobId}/stream`
-
-  const es = new EventSource(streamUrl)
-  state.activeStream = es
-
-  es.onmessage = e => {
-    try { handleEvent(JSON.parse(e.data)) } catch {}
-  }
+function connectStream(jobId){
+  if (mainES){ mainES.close(); mainES = null; }
+  const url = `/stream/${encodeURIComponent(jobId)}`;
+  const es  = new EventSource(url);
+  mainES = es;
+  es.onmessage = ev => {
+    try { dispatchEvent(JSON.parse(ev.data)); }
+    catch(e){ console.warn('parse error',e,ev.data); }
+  };
   es.onerror = () => {
-    appendLog('[stream error / closed]', 'log-fail')
-    es.close()
-  }
-}
-
-/* ── Handle SSE event ─────────────────────────────────────────── */
-function handleEvent(ev) {
-  const t = ev.type || ''
-
-  if (t === 'phase') {
-    const pid = ev.phase_id || ''
-    // Mark previous active phases done
-    for (const [k, p] of Object.entries(state.currentJob.phases)) {
-      if (p.status === 'active') p.status = 'done'
+    es.close();
+    if (state.currentJob && state.currentJob.id === jobId){
+      setTimeout(()=>connectStream(jobId), Math.min(mainBackoff,10000));
+      mainBackoff = Math.min(mainBackoff*2, 10000);
     }
-    state.currentJob.phases[pid] = {
-      name: ev.phase_name || '', status: 'active',
-      elapsed_s: ev.elapsed_s || ev.elapsed || 0
-    }
-    if (pid.toUpperCase() === '0A' && ev.phase_name)
-      state.currentJob.qtype = ev.phase_name
-    renderPhases()
-    appendLog(`Phase ${pid} ${ev.phase_name || ''} ${ev.elapsed_s ? '| '+ev.elapsed_s+'s' : ''}`, 'log-phase')
-  }
-
-  else if (t === 'wave') {
-    state.currentJob.wave = `Wave ${ev.wave}/${ev.total_waves}`
-    for (const sp of (ev.sps || [])) {
-      if (!state.currentJob.sps[sp])
-        state.currentJob.sps[sp] = { status:'pending', turn:0, max_turn:15, tool:'—', values:'—' }
-    }
-    renderSPs()
-    appendLog(`Wave ${ev.wave}/${ev.total_waves}: [${(ev.sps||[]).join(', ')}]`, 'log-wave')
-  }
-
-  else if (t === 'sp_turn') {
-    const sp = state.currentJob.sps[ev.sp_id] || {}
-    state.currentJob.sps[ev.sp_id] = Object.assign(sp, {
-      status: 'active', turn: ev.turn, max_turn: ev.max_turns,
-      tool: ev.tool || '—'
-    })
-    renderSPs()
-    appendLog(`[${ev.sp_id}] Turn ${ev.turn}/${ev.max_turns} → ${ev.tool}: ${ev.preview||''}`, 'log-sp')
-  }
-
-  else if (t === 'sp_done') {
-    const sp = state.currentJob.sps[ev.sp_id] || {}
-    state.currentJob.sps[ev.sp_id] = Object.assign(sp, {
-      status: ev.status, values: (ev.values||'').slice(0,32), turn: ev.turns || 0
-    })
-    renderSPs()
-    const cls = ev.status === 'solved' ? 'log-sp-done' : 'log-fail'
-    appendLog(`[${ev.sp_id}] ${ev.status.toUpperCase()} | ${ev.values||''} | ${ev.turns} turns`, cls)
-  }
-
-  else if (t === 'solve_done') {
-    appendLog(`Done ${ev.solved}/${ev.total} SPs · ${ev.total_s}s total`, 'log-sp-done')
-  }
-
-  else if (t === 'toks') {
-    appendLog(`${ev.tokens} tokens ${ev.toks_per_sec?.toFixed(1)} tok/s`, 'log-default')
-  }
-
-  else if (t === 'agent') {
-    appendLog(`Agent: ${ev.agent} @ ${ev.model}`, 'log-default')
-  }
-
-  else if (t === 'log' || t === 'error_line') {
-    const cls = t === 'error_line' ? 'log-fail' : 'log-default'
-    appendLog(ev.line || '', cls)
-  }
-
-  else if (t === 'answer') {
-    state.currentJob.answer = ev.answer || ''
-    document.getElementById('answer-box').textContent = ev.answer || ''
-    // Auto-switch to Answer tab
-    document.querySelector('[data-tab="answer"]')?.click()
-    appendLog(`✅ Answer ready (${ev.elapsed?.toFixed ? ev.elapsed.toFixed(1) : ev.elapsed}s)`, 'log-sp-done')
-    if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
-    // Mark phase done
-    const lastPhase = Object.keys(state.currentJob.phases).pop()
-    if (lastPhase) state.currentJob.phases[lastPhase].status = 'done'
-    renderPhases()
-  }
-
-  else if (t === 'error') {
-    appendLog(`❌ Error: ${ev.error || ev.message || 'unknown'}`, 'log-fail')
-  }
-
-  else if (t === 'done') {
-    if (state.activeStream) { state.activeStream.close(); state.activeStream = null }
-  }
-
-  // EXPAND: handle cmd-specific event types (react_iter, tool_call, etc.) here
+  };
+  es.onopen = () => { mainBackoff = 1000; };
 }
 
-/* ── Render helpers ───────────────────────────────────────────── */
-const SI = { pending:'⏳', active:'🔄', done:'✅', solved:'✅', failed:'❌', timeout:'⏱' }
+// ─── Connection: GUI feed (cross-origin) ────────────────────
+let guiES = null;
+let guiBackoff = 1000;
 
-function renderPhases() {
-  const list = document.getElementById('phases-list')
-  const empty = document.getElementById('phases-empty')
-  const phases = state.currentJob.phases
-  if (!Object.keys(phases).length) { empty.style.display=''; list.innerHTML=''; return }
-  empty.style.display = 'none'
-  list.innerHTML = Object.entries(phases).map(([pid, ph]) =>
-    `<div class="phase-row">
-      <span class="phase-icon">${SI[ph.status]||'·'}</span>
-      <span class="phase-id">${escHtml(pid)}</span>
-      <span class="phase-name">${escHtml(ph.name)}</span>
-      <span class="phase-el">${ph.elapsed_s ? ph.elapsed_s.toFixed(1)+'s' : ''}</span>
-    </div>`
-  ).join('')
-}
-
-function renderSPs() {
-  const list  = document.getElementById('sps-list')
-  const empty = document.getElementById('sps-empty')
-  const sps   = state.currentJob.sps
-  if (!Object.keys(sps).length) { empty.style.display=''; list.innerHTML=''; return }
-  empty.style.display = 'none'
-  list.innerHTML = Object.entries(sps).map(([spId, sp]) => {
-    const st = sp.status || 'pending'
-    const turnsStr = st === 'active'
-      ? `<span class="sp-turns" style="color:var(--yellow)">${sp.turn}/${sp.max_turn}</span>`
-      : `<span class="sp-turns">${sp.turn || '—'}</span>`
-    const valsStyle = st === 'solved' ? 'color:var(--green)' : st === 'failed' ? 'color:var(--red)' : ''
-    return `<div class="sp-row">
-      <span class="sp-status">${SI[st]||'·'}</span>
-      <span class="sp-id">${escHtml(spId)}</span>
-      ${turnsStr}
-      <span class="sp-tool">${escHtml(sp.tool||'—')}</span>
-      <span class="sp-vals" style="${valsStyle}">${escHtml(sp.values||'—')}</span>
-    </div>`
-  }).join('')
-}
-
-function appendLog(line, cls) {
-  if (!line) return
-  const log = document.getElementById('stream-log')
-  const div = document.createElement('div')
-  div.className = cls || 'log-default'
-  div.textContent = line
-  log.appendChild(div)
-  log.scrollTop = log.scrollHeight
-  // Keep max 500 lines
-  while (log.children.length > 500) log.removeChild(log.firstChild)
-}
-
-function clearJobDisplay() {
-  document.getElementById('phases-list').innerHTML = ''
-  document.getElementById('sps-list').innerHTML = ''
-  document.getElementById('stream-log').innerHTML = ''
-  document.getElementById('answer-box').innerHTML =
-    '<span style="color:var(--dim)">Answer will appear here…</span>'
-  document.getElementById('phases-empty').style.display = ''
-  document.getElementById('sps-empty').style.display = ''
-}
-
-/* ── Submit Swarm query ───────────────────────────────────────── */
-async function submitSwarm(q) {
-  if (!q.trim()) return
-  appendLog(`↗ Swarm: ${q.slice(0,80)}`, 'log-phase')
+function connectGUIFeed(){
+  if (guiES){ try{guiES.close();}catch(_){}}
   try {
-    const r = await fetch(SWARM_URL + '/query_async', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q }),
-    })
-    if (!r.ok) { appendLog(`HTTP ${r.status}`, 'log-fail'); return }
-    const d = await r.json()
-    const jobId = d.job_id
-    if (!jobId) { appendLog('No job_id returned', 'log-fail'); return }
-    document.getElementById('chat-job-badge').textContent = `[ ${jobId} ]`
-    watchJob(jobId, 'swarm')
-    // Switch to phases tab
-    document.querySelector('[data-tab="phases"]')?.click()
-  } catch (e) { appendLog(`Submit error: ${e.message}`, 'log-fail') }
-}
-
-/* ── Submit CMD task ──────────────────────────────────────────── */
-async function submitCmd(instruction) {
-  if (!instruction.trim()) return
-  appendLog(`↗ Cmd: ${instruction.slice(0,80)}`, 'log-wave')
-  // EXPAND: add tier selection (quick/execute/chain)
-  try {
-    const r = await fetch(CMD_URL + '/api/v1/execute', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction }),
-    })
-    if (!r.ok) { appendLog(`Cmd HTTP ${r.status}`, 'log-fail'); return }
-    const d = await r.json()
-    if (d.job_id || d.id) {
-      watchJob(d.job_id || d.id, 'cmd')
-      document.querySelector('[data-tab="stream"]')?.click()
-    }
-  } catch (e) {
-    appendLog(`Cmd error: ${e.message}`, 'log-fail')
-    // EXPAND: fallback to /api/v1/quick for simple one-shot commands
-  }
-}
-
-/* ── API Builder ─────────────────────────────────────────────────── */
-const API_ENDPOINTS = [
-  // Swarm
-  { svc:'swarm', method:'GET',  path:'/health',       label:'Health Check',    params:[] },
-  { svc:'swarm', method:'GET',  path:'/status',        label:'Server Status',   params:[] },
-  { svc:'swarm', method:'GET',  path:'/jobs',          label:'List Jobs',       params:[] },
-  { svc:'swarm', method:'GET',  path:'/metrics',       label:'GPU Metrics',     params:[] },
-  { svc:'swarm', method:'GET',  path:'/result/{id}',   label:'Get Result',
-    params:[{name:'id', type:'text', in:'path', ph:'job_id'}] },
-  { svc:'swarm', method:'POST', path:'/query_async',   label:'Research (async)',
-    params:[{name:'question', type:'textarea', ph:'Ask anything…'}] },
-  { svc:'swarm', method:'POST', path:'/query',         label:'Research (sync)',
-    params:[{name:'question', type:'textarea', ph:'Ask anything…'}] },
-  // Cmd
-  { svc:'cmd', method:'GET',  path:'/api/v1/health',          label:'Cmd Health',      params:[] },
-  { svc:'cmd', method:'GET',  path:'/api/v1/jobs',            label:'List Cmd Jobs',   params:[] },
-  { svc:'cmd', method:'GET',  path:'/api/v1/events',          label:'Global Events',   params:[] },
-  { svc:'cmd', method:'GET',  path:'/api/v1/blueteam/alerts', label:'Security Alerts', params:[] },
-  { svc:'cmd', method:'POST', path:'/api/v1/execute',         label:'Execute Task',
-    params:[
-      {name:'instruction', type:'textarea', ph:'What to do…'},
-      {name:'tier',        type:'select',   options:['quick','standard','deep']},
-    ]},
-  { svc:'cmd', method:'POST', path:'/api/v1/quick',           label:'Quick Command',
-    params:[{name:'command', type:'text', ph:'shell command'}] },
-]
-
-function populateApiEndpoints(svc) {
-  const sel = document.getElementById('api-ep-sel')
-  sel.innerHTML = ''
-  API_ENDPOINTS.filter(ep => ep.svc === svc).forEach((ep, i) => {
-    const opt = document.createElement('option')
-    opt.value = i
-    opt.textContent = ep.label
-    sel.appendChild(opt)
-  })
-  renderApiParams(svc)
-}
-
-function renderApiParams(svc) {
-  const svcVal = svc || document.getElementById('api-svc-sel').value
-  const epIdx  = document.getElementById('api-ep-sel').selectedIndex
-  const allEps = API_ENDPOINTS.filter(ep => ep.svc === svcVal)
-  const ep     = allEps[epIdx >= 0 ? epIdx : 0]
-  if (!ep) return
-  document.getElementById('api-method-badge').textContent = ep.method
-  document.getElementById('api-method-badge').style.color =
-    ep.method === 'POST' ? 'var(--yellow)' : 'var(--accent)'
-  const container = document.getElementById('api-params')
-  container.innerHTML = ''
-  ep.params.forEach(p => {
-    const wrap  = document.createElement('div')
-    const label = document.createElement('div')
-    label.className   = 'api-param-label'
-    label.textContent = p.name
-    wrap.appendChild(label)
-    let field
-    if (p.type === 'textarea') {
-      field = document.createElement('textarea')
-      field.className   = 'api-param-textarea'
-      field.placeholder = p.ph || ''
-    } else if (p.type === 'select') {
-      field = document.createElement('select')
-      field.className = 'api-param-select';
-      (p.options || []).forEach(v => {
-        const o = document.createElement('option'); o.value = v; o.textContent = v
-        field.appendChild(o)
-      })
-    } else {
-      field = document.createElement('input')
-      field.className   = 'api-param-input'
-      field.type        = 'text'
-      field.placeholder = p.ph || ''
-    }
-    field.dataset.paramName = p.name
-    field.dataset.paramIn   = p.in || 'body'
-    wrap.appendChild(field)
-    container.appendChild(wrap)
-  })
-}
-
-async function fireApi() {
-  const svc    = document.getElementById('api-svc-sel').value
-  const epIdx  = document.getElementById('api-ep-sel').selectedIndex
-  const allEps = API_ENDPOINTS.filter(ep => ep.svc === svc)
-  const ep     = allEps[epIdx]
-  if (!ep) return
-
-  const baseUrl = svc === 'swarm' ? SWARM_URL : CMD_URL
-  let path = ep.path
-  const body = {}
-  document.querySelectorAll('#api-params [data-param-name]').forEach(el => {
-    const n = el.dataset.paramName
-    const v = el.value
-    if (el.dataset.paramIn === 'path') {
-      path = path.replace(`{${n}}`, encodeURIComponent(v))
-    } else {
-      if (v !== '') body[n] = v
-    }
-  })
-
-  const url   = baseUrl + path
-  const isSSE = path.includes('/stream') || path.includes('/events')
-  const badge = document.getElementById('api-status-badge')
-  const pre   = document.getElementById('api-response-body')
-
-  if (isSSE) {
-    pre.textContent = '…streaming…\n'
-    badge.textContent = 'SSE'
-    const es = new EventSource(url)
-    es.onmessage = e => { pre.textContent += e.data + '\n'; pre.scrollTop = pre.scrollHeight }
-    es.onerror   = () => { pre.textContent += '[stream closed]\n'; es.close() }
-    return
-  }
-
-  badge.textContent = '…'
-  badge.style.color = 'var(--text-dim)'
-  const t0 = Date.now()
-  try {
-    const opts = { method: ep.method, signal: AbortSignal.timeout(30000) }
-    if (ep.method === 'POST') {
-      opts.headers = { 'Content-Type': 'application/json' }
-      opts.body    = JSON.stringify(body)
-    }
-    const r = await fetch(url, opts)
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(2)
-    badge.textContent = `${r.status} · ${elapsed}s`
-    badge.style.color = r.ok ? 'var(--green)' : 'var(--red)'
-    let text = await r.text()
-    try { text = JSON.stringify(JSON.parse(text), null, 2) } catch {}
-    pre.textContent = text
-    // Offer Watch button if response has job_id
+    guiES = new EventSource('http://10.0.0.58:5005/stream', { withCredentials:false });
+  } catch(e){ return; }
+  guiES.addEventListener('screenshot', ev => {
     try {
-      const parsed = JSON.parse(text)
-      const jid = parsed.job_id || parsed.id
-      if (jid) {
-        const btn = document.createElement('button')
-        btn.className = 'job-watch'
-        btn.textContent = `▶ Watch ${jid}`
-        btn.style.cssText = 'display:block;margin:6px 8px;'
-        btn.onclick = () => watchJob(jid, svc)
-        pre.parentNode.insertBefore(btn, pre)
-        setTimeout(() => btn.remove(), 60000)
+      const data = JSON.parse(ev.data);
+      const b64 = data.image || data.frame || data.b64 || data;
+      if (typeof b64 === 'string' && b64.length > 100){
+        const img = $('gui-feed');
+        img.src = b64.startsWith('data:') ? b64 : `data:image/jpeg;base64,${b64}`;
+        img.style.display = 'block';
+        $('gui-placeholder').style.display = 'none';
+        $('gui-state').textContent = 'live';
+        $('gui-live').className = 'live';
+        $('gui-live').textContent = 'streaming';
+        state.guiOnline = true;
       }
-    } catch {}
-  } catch (e) {
-    badge.textContent = `Error · ${((Date.now()-t0)/1000).toFixed(2)}s`
-    badge.style.color = 'var(--red)'
-    pre.textContent = e.message
-  }
-}
-
-document.getElementById('api-svc-sel').addEventListener('change', e => {
-  populateApiEndpoints(e.target.value)
-})
-document.getElementById('api-ep-sel').addEventListener('change', () => {
-  renderApiParams()
-})
-document.getElementById('api-fire').addEventListener('click', fireApi)
-document.getElementById('api-copy-btn').addEventListener('click', () => {
-  const txt = document.getElementById('api-response-body').textContent
-  if (txt && txt !== '…') navigator.clipboard.writeText(txt).then(() => {
-    const btn = document.getElementById('api-copy-btn')
-    btn.textContent = 'Copied!'
-    setTimeout(() => { btn.textContent = 'Copy' }, 1500)
-  })
-})
-
-/* ── Chat submit ──────────────────────────────────────────────── */
-document.getElementById('chat-submit').addEventListener('click', () => {
-  const q   = document.getElementById('chat-input').value.trim()
-  const svc = document.getElementById('chat-service-sel').value
-  if (!q) return
-  document.getElementById('chat-input').value = ''
-  if (svc === 'swarm')       submitSwarm(q)
-  else if (svc === 'jarvis') submitJarvis(q)
-  else                       submitCmd(q)
-})
-document.getElementById('chat-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('chat-submit').click()
-})
-
-/* ── Answer copy ──────────────────────────────────────────────── */
-document.getElementById('answer-copy-btn').addEventListener('click', () => {
-  const txt = state.currentJob.answer
-  if (txt) navigator.clipboard.writeText(txt).then(() => {
-    const btn = document.getElementById('answer-copy-btn')
-    btn.textContent = 'Copied!'
-    setTimeout(() => { btn.textContent = 'Copy' }, 1500)
-  })
-})
-
-/* ── Piper TTS playback ──────────────────────────────────── */
-async function playTTS(text) {
-  // TTS first sentence only (keep it snappy)
-  const m = text.match(/^[^.!?\n]{1,220}[.!?]?/)
-  const phrase = m ? m[0].trim() : text.slice(0, 200)
-  if (!phrase) return
-  try {
-    const resp = await fetch(JARVIS_URL + '/api/tts?text=' + encodeURIComponent(phrase), {
-      signal: AbortSignal.timeout(8000)
-    })
-    if (!resp.ok) return
-    const wav = await resp.arrayBuffer()
-    const ctx = new AudioContext()
-    const buf = await ctx.decodeAudioData(wav)
-    const src = ctx.createBufferSource()
-    src.buffer = buf
-    src.connect(ctx.destination)
-    src.start(0)
-  } catch(e) {
-    console.warn('[TTS]', e.message)
-  }
-}
-
-/* ── Submit JARVIS chat ───────────────────────────────── */
-async function submitJarvis(q) {
-  if (!q.trim()) return
-  appendLog('↗ JARVIS: ' + q.slice(0,80), 'log-wave')
-  // Ensure session
-  if (!state.jarvis.session) {
+    } catch(_){}
+  });
+  guiES.addEventListener('iter', ev => {
     try {
-      const s = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
-      if (!s.ok) { appendLog('JARVIS: session failed', 'log-fail'); return }
-      state.jarvis.session = (await s.json()).session_token
-    } catch(e) { appendLog('JARVIS: ' + e.message, 'log-fail'); return }
-  }
-  // Stream response
-  const answerBox = document.getElementById('answer-box')
-  answerBox.innerHTML = ''
-  document.querySelector('[data-tab="answer"]')?.click()
-  try {
-    const r = await fetch(JARVIS_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: q, session_token: state.jarvis.session }),
-      signal: AbortSignal.timeout(300000),
-    })
-    if (!r.ok) { appendLog('JARVIS HTTP ' + r.status, 'log-fail'); return }
-    const reader = r.body.getReader()
-    const dec    = new TextDecoder()
-    let buf = '', full = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
-      const lines = buf.split('
-'); buf = lines.pop()
-      for (const line of lines) {
-        if (!line.trim()) continue
-        try { const c = JSON.parse(line); if (c.content) { full += c.content; answerBox.textContent = full } } catch {}
-      }
-    }
-    state.currentJob.answer = full
-    playTTS(full)
-    document.getElementById('chat-job-badge').textContent = '[ JARVIS ]'
-  } catch(e) {
-    appendLog('JARVIS: ' + (e.name === 'TimeoutError' ? 'timed out' : e.message), 'log-fail')
-    state.jarvis.session = null
-  }
+      const d = JSON.parse(ev.data);
+      $('gui-iter').textContent = `Iter: ${d.iter||'?'} • ${d.action||'idle'}`;
+    } catch(_){}
+  });
+  guiES.onerror = () => {
+    state.guiOnline = false;
+    $('gui-state').textContent = 'offline';
+    $('gui-live').className = '';
+    $('gui-live').textContent = '';
+    try{guiES.close();}catch(_){}
+    setTimeout(connectGUIFeed, Math.min(guiBackoff,15000));
+    guiBackoff = Math.min(guiBackoff*2, 15000);
+  };
+  guiES.onopen = () => { guiBackoff = 1000; };
 }
 
-/* ── Search widget ────────────────────────────────────────────── */
-;(function() {
-  function go() {
-    const q  = document.getElementById('search-input').value.trim()
-    const n  = document.getElementById('search-n-sel').value
-    if (!q) return
+// ─── Event dispatch ─────────────────────────────────────────
+function dispatchEvent(ev){
+  const t = ev.type;
+  if (ev.elapsed != null && state.currentJob){
+    $('orch-elapsed').textContent = fmtElapsed(ev.elapsed);
+  }
 
-    document.getElementById('search-results-list').innerHTML = ''
-    document.getElementById('search-answer-box').innerHTML =
-      '<span style="color:var(--dim)">Searching…</span>'
-    document.getElementById('search-status').textContent = ''
-    document.getElementById('search-src-badge').textContent = ''
-    document.getElementById('search-go').disabled = true
+  switch(t){
+    case 'phase':
+      setPhase(ev.phase_id);
+      appendOrchLine(`Phase ${ev.phase_id} ${ev.phase_name||''}`);
+      break;
 
-    const answerBox  = document.getElementById('search-answer-box')
-    const resultsList = document.getElementById('search-results-list')
-    const statusEl   = document.getElementById('search-status')
-    const badgeEl    = document.getElementById('search-src-badge')
-    let answer = '', numResults = 0
-
-    fetch(SWARM_URL + '/search/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, max_results: parseInt(n) }),
-    }).then(resp => {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status)
-      const reader = resp.body.getReader()
-      const dec = new TextDecoder()
-      let buf = ''
-      function pump() {
-        return reader.read().then(({ done, value }) => {
-          if (done) { document.getElementById('search-go').disabled = false; return }
-          buf += dec.decode(value, { stream: true })
-          const parts = buf.split('\n\n'); buf = parts.pop()
-          for (const part of parts) {
-            const line = part.replace(/^data:\s*/, '')
-            if (!line) continue
-            try { handle(JSON.parse(line)) } catch {}
-          }
-          return pump()
-        })
+    case 'dependency_graph':
+      // Build SP cards up-front from the orchestrator's plan
+      state.waves = ev.waves || [];
+      for (const sp of (ev.sps || [])){
+        if (!state.sps[sp.id]){
+          state.sps[sp.id] = {
+            id: sp.id, desc: sp.desc, deps: sp.deps || [],
+            status: 'pending', turns: 0, maxTurns: 0,
+            tools: [], results: '', tokenBuf: '', resultsSoft: false,
+          };
+        } else {
+          Object.assign(state.sps[sp.id], { desc: sp.desc, deps: sp.deps });
+        }
       }
-      return pump()
-    }).catch(e => {
-      answerBox.textContent = '❌ ' + e.message
-      document.getElementById('search-go').disabled = false
-    })
+      queueRender();
+      break;
 
-    function handle(ev) {
-      if (ev.type === 'searching') {
-        statusEl.textContent = `Searching: "${ev.query}"`
-      } else if (ev.type === 'result') {
-        numResults++
-        badgeEl.textContent = `${numResults} result${numResults > 1 ? 's' : ''}`
-        const card = document.createElement('div')
-        card.className = 'search-result-card'
-        card.innerHTML =
-          `<div class="sr-title">[${ev.index+1}] ${escHtml(ev.title)}</div>` +
-          `<div class="sr-url">${escHtml(ev.url)}</div>` +
-          `<div class="sr-snip">${escHtml(ev.snippet)}</div>`
-        resultsList.appendChild(card)
-      } else if (ev.type === 'thinking') {
-        answerBox.textContent = ''; statusEl.textContent = 'Synthesizing…'
-      } else if (ev.type === 'token') {
-        answer += ev.text; answerBox.textContent = answer
-        answerBox.scrollTop = answerBox.scrollHeight
-      } else if (ev.type === 'done') {
-        statusEl.textContent = `✓ ${ev.num_results} result${ev.num_results !== 1 ? 's' : ''}`
-        document.getElementById('search-go').disabled = false
-        if (ev.answer && !answer) answerBox.textContent = ev.answer
-      } else if (ev.type === 'error') {
-        answerBox.textContent = '❌ ' + ev.error
-        statusEl.textContent = 'Error'
-        document.getElementById('search-go').disabled = false
-      }
-    }
-  }
+    case 'wave_dispatch':
+      appendOrchLine(`Wave ${ev.wave}/${ev.total} → [${(ev.sp_ids||[]).join(', ')}]  (${ev.reason||''})`);
+      break;
 
-  document.getElementById('search-go').addEventListener('click', go)
-  document.getElementById('search-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') go()
-  })
-})()
-
-/* ── Escape HTML ──────────────────────────────────────────────── */
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-}
-
-/* ── Init ─────────────────────────────────────────────────────── */
-restoreWidgetPositions()
-initWidgetDefaults()
-initDrag()
-poll()
-setInterval(poll, 3000)
-
-// Seed API Builder
-populateApiEndpoints('swarm')
-
-// Focus chat input on load
-document.getElementById('chat-input').focus()
-
-// Fix tab-pane initial visibility
-document.querySelectorAll('.tab-pane').forEach(p => {
-  if (!p.classList.contains('active')) p.style.display = 'none'
-  else p.style.display = 'flex'
-})
-
-/* ── Top-level page tab switching ───────────────────────────────── */
-(function() {
-  const tabs = document.querySelectorAll('.page-tab')
-  const toolsPage = document.getElementById('page-tools')
-  const chatPage  = document.getElementById('page-chat')
-
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'))
-      tab.classList.add('active')
-      const p = tab.dataset.page
-      if (p === 'tools') {
-        toolsPage.classList.add('active')
-        chatPage.classList.remove('active')
-      } else {
-        toolsPage.classList.remove('active')
-        chatPage.classList.add('active')
-        document.getElementById('jchat-input').focus()
-      }
-    })
-  })
-})()
-
-/* ── JARVIS Chat UI ──────────────────────────────────────────────── */
-;(function() {
-  let jSession = null
-  let jTTS = true
-  let jBusy = false
-
-  const messagesEl = document.getElementById('jchat-messages')
-  const inputEl    = document.getElementById('jchat-input')
-  const sendBtn    = document.getElementById('jchat-send')
-  const statusEl   = document.getElementById('jchat-status')
-  const ttsBtn     = document.getElementById('jchat-tts-toggle')
-
-  ttsBtn.addEventListener('click', () => {
-    jTTS = !jTTS
-    ttsBtn.classList.toggle('on', jTTS)
-    ttsBtn.textContent = jTTS ? '🔊 TTS' : '🔇 TTS'
-  })
-
-  function addMessage(role, text) {
-    const wrap = document.createElement('div')
-    wrap.className = 'jmsg ' + role
-    wrap.innerHTML = '<div class="jmsg-who">' + (role === 'user' ? 'YOU' : 'JARVIS') + '</div>' +
-                     '<div class="jmsg-bubble"></div>'
-    wrap.querySelector('.jmsg-bubble').textContent = text
-    messagesEl.appendChild(wrap)
-    messagesEl.scrollTop = messagesEl.scrollHeight
-    return wrap.querySelector('.jmsg-bubble')
-  }
-
-  async function ensureSession() {
-    if (jSession) return true
-    try {
-      const r = await fetch(JARVIS_URL + '/api/session', { method: 'POST', signal: AbortSignal.timeout(8000) })
-      if (!r.ok) return false
-      jSession = (await r.json()).session_token
-      return true
-    } catch { return false }
-  }
-
-  // Build a structured JARVIS bubble with search status, source chips, answer area
-  function makeBubble() {
-    const wrap = document.createElement('div')
-    wrap.className = 'jmsg jarvis'
-    wrap.innerHTML =
-      '<div class="jmsg-who">JARVIS</div>' +
-      '<div class="jmsg-bubble">' +
-        '<div class="jmsg-search-status"></div>' +
-        '<div class="jmsg-sources"></div>' +
-        '<div class="jmsg-answer"></div>' +
-      '</div>'
-    messagesEl.appendChild(wrap)
-    messagesEl.scrollTop = messagesEl.scrollHeight
-    return {
-      status:  wrap.querySelector('.jmsg-search-status'),
-      sources: wrap.querySelector('.jmsg-sources'),
-      answer:  wrap.querySelector('.jmsg-answer'),
-    }
-  }
-
-  async function sendMessage() {
-    const text = inputEl.value.trim()
-    if (!text || jBusy) return
-    jBusy = true
-    sendBtn.disabled = true
-    inputEl.value = ''
-    inputEl.style.height = '40px'
-
-    addMessage('user', text)
-
-    if (!await ensureSession()) {
-      statusEl.textContent = '✗ Could not connect to JARVIS'
-      jBusy = false; sendBtn.disabled = false; return
-    }
-
-    const parts  = makeBubble()
-    parts.status.textContent = '⟳ deciding…'
-    statusEl.textContent = ''
-
-    try {
-      const r = await fetch(JARVIS_URL + '/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, session_token: jSession }),
-        signal: AbortSignal.timeout(300000),
-      })
-      if (!r.ok) throw new Error('HTTP ' + r.status)
-
-      const reader = r.body.getReader()
-      const dec    = new TextDecoder()
-      let buf = '', fullAnswer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        const lines = buf.split('\n'); buf = lines.pop()
-        for (const line of lines) {
-          if (!line.trim()) continue
-          let ev
-          try { ev = JSON.parse(line) } catch { continue }
-
-          if (ev.type === 'deciding') {
-            parts.status.textContent = '⟳ deciding…'
-
-          } else if (ev.type === 'tool_call' && ev.tool === 'search') {
-            parts.status.textContent = `🔍 searching: "${ev.query}"`
-
-          } else if (ev.type === 'result') {
-            const chip = document.createElement('a')
-            chip.className = 'jmsg-src-chip'
-            chip.href = ev.url; chip.target = '_blank'
-            chip.title = ev.url
-            chip.textContent = `[${ev.index + 1}] ${ev.title}`
-            parts.sources.appendChild(chip)
-            messagesEl.scrollTop = messagesEl.scrollHeight
-
-          } else if (ev.type === 'answering') {
-            parts.status.textContent = ''
-
-          } else if (ev.type === 'token') {
-            fullAnswer += ev.text
-            parts.answer.textContent = fullAnswer
-            messagesEl.scrollTop = messagesEl.scrollHeight
-
-          } else if (ev.type === 'done') {
-            parts.status.textContent = ''
-            if (jTTS && fullAnswer) playTTS(fullAnswer)
-
-          } else if (ev.type === 'error') {
-            parts.status.textContent = '✗ ' + ev.error
+    case 'wave':
+      // Older wave event — fallback grouping
+      if (!state.waves.length){
+        state.waves.push(ev.sps || []);
+        for (const id of (ev.sps||[])){
+          if (!state.sps[id]){
+            state.sps[id] = { id, desc:'', deps:[], status:'pending',
+              turns:0, maxTurns:0, tools:[], results:'', tokenBuf:'', resultsSoft:false };
           }
         }
       }
+      queueRender();
+      break;
 
-    } catch(e) {
-      parts.status.textContent = '✗ ' + (e.name === 'TimeoutError' ? 'timed out' : e.message)
-      if (e.message?.includes('session')) jSession = null
+    case 'sp_turn': {
+      const sp = state.sps[ev.sp_id] || (state.sps[ev.sp_id] = {
+        id: ev.sp_id, desc:'', deps:[], status:'active',
+        turns:0, maxTurns:0, tools:[], results:'', tokenBuf:'', resultsSoft:false,
+      });
+      sp.status = 'active';
+      sp.turns = ev.turn;
+      sp.maxTurns = ev.max_turns;
+      sp.tools.push({
+        tool: ev.tool, preview: ev.preview, status: 'run',
+        bytes: 0, result: '',
+      });
+      sp.tokenBuf = '';
+      state.llmTarget = ev.sp_id;
+      queueRender();
+      break;
     }
 
-    jBusy = false; sendBtn.disabled = false
-    inputEl.focus()
+    case 'tool_result': {
+      const sp = state.sps[ev.sp_id];
+      if (sp && sp.tools.length){
+        const last = sp.tools[sp.tools.length-1];
+        if (last.status === 'run' && last.tool === ev.tool){
+          last.bytes  = ev.bytes;
+          last.result = ev.preview;
+          last.status = /(error|trace|failed)/i.test(ev.preview) ? 'err' : 'ok';
+        }
+      }
+      queueRender();
+      break;
+    }
+
+    case 'sp_done': {
+      const sp = state.sps[ev.sp_id] || {};
+      sp.id = ev.sp_id;
+      sp.status  = ev.status === 'solved' ? 'solved' : 'failed';
+      sp.results = ev.values || '';
+      sp.turns   = ev.turns;
+      // Mark last running tool as ok if not already
+      if (sp.tools){
+        for (const t of sp.tools) if (t.status === 'run') t.status = 'ok';
+      }
+      state.sps[ev.sp_id] = sp;
+      if (state.llmTarget === ev.sp_id) state.llmTarget = null;
+      queueRender();
+      break;
+    }
+
+    case 'llm_chunk': {
+      // Append to current SP's token buffer (fading ticker under tool chain)
+      const target = state.llmTarget;
+      if (target && state.sps[target]){
+        const buf = (state.sps[target].tokenBuf || '') + ev.content;
+        state.sps[target].tokenBuf = buf.length > 600 ? buf.slice(-600) : buf;
+        if (!state.llmFlushPending){
+          state.llmFlushPending = true;
+          setTimeout(()=>{ state.llmFlushPending = false; queueRender(); }, 80);
+        }
+      }
+      break;
+    }
+
+    case 'orch_think': {
+      state.orchThinkBuf += ev.content;
+      if (state.orchThinkBuf.length > 4000){
+        state.orchThinkBuf = state.orchThinkBuf.slice(-4000);
+      }
+      if (!state.llmFlushPending){
+        state.llmFlushPending = true;
+        setTimeout(()=>{ state.llmFlushPending = false; renderOrchCard(); }, 80);
+      }
+      break;
+    }
+
+    case 'agent':
+      $('stat-model').innerHTML = `MODEL <b>${escapeHtml(ev.model||'—')}</b>`;
+      break;
+
+    case 'answer':
+      renderAnswer(ev.answer || '');
+      setPhase(null);
+      phasesDone.add('W');
+      document.querySelectorAll('.phase-pill').forEach(p=>{
+        if (phasesDone.has(p.dataset.phase)) p.classList.add('done');
+      });
+      break;
+
+    case 'done':
+      appendOrchLine(`✓ done`);
+      pollJobs();
+      break;
+
+    case 'error':
+    case 'error_line':
+      appendOrchLine(`⚠ ${ev.error || ev.line || ''}`);
+      break;
+
+    case 'log':
+    default:
+      // Skip generic log spam from dashboard rendering (visible in /logs)
+      break;
+  }
+}
+
+// ─── Renderers ──────────────────────────────────────────────
+function appendOrchLine(line){
+  const el = $('orch-stream');
+  if (!el) return;
+  // Replace placeholder on first line
+  if (el.querySelector('.placeholder')) el.innerHTML = '';
+  const div = document.createElement('div');
+  div.textContent = line;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  // Keep last 200 lines
+  while (el.childNodes.length > 200) el.removeChild(el.firstChild);
+}
+
+function renderOrchCard(){
+  // Stream the orch_think buffer into the bottom of the pane
+  const el = $('orch-stream');
+  if (!el || !state.orchThinkBuf) return;
+  let live = el.querySelector('.live-think');
+  if (!live){
+    live = document.createElement('div');
+    live.className = 'think live-think';
+    el.appendChild(live);
+  }
+  live.textContent = state.orchThinkBuf.slice(-1500);
+  el.scrollTop = el.scrollHeight;
+}
+
+function renderSPGrid(){
+  const grid = $('sp-grid');
+  if (!grid) return;
+  if (!Object.keys(state.sps).length){
+    grid.innerHTML = '<div class="empty-msg">Submit a question to see the agent flow.</div>';
+    return;
   }
 
-  sendBtn.addEventListener('click', sendMessage)
-  inputEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
-  })
-  // Auto-resize textarea
-  inputEl.addEventListener('input', () => {
-    inputEl.style.height = '40px'
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px'
-  })
-})()
+  // Group by waves; orphans go into a final wave
+  const inWave = new Set();
+  const waveRows = [];
+  for (const wave of (state.waves || [])){
+    const row = wave.filter(id => state.sps[id]);
+    row.forEach(id => inWave.add(id));
+    if (row.length) waveRows.push(row);
+  }
+  const orphans = Object.keys(state.sps).filter(id => !inWave.has(id));
+  if (orphans.length) waveRows.push(orphans);
 
+  let html = '';
+  for (let wi = 0; wi < waveRows.length; wi++){
+    const row = waveRows[wi];
+    html += `<div class="sp-wave" data-wave="W${wi+1}">`;
+    for (const id of row){
+      const sp = state.sps[id];
+      html += renderSPCard(sp);
+    }
+    html += '</div>';
+  }
+  grid.innerHTML = html;
+}
+
+function renderSPCard(sp){
+  const ICONS = { pending:'⏳', active:'⟳', solved:'✓', failed:'✗' };
+  const statusCls = sp.status || 'pending';
+  const turnTxt = sp.turns ? `T${sp.turns}${sp.maxTurns?'/'+sp.maxTurns:''}` : '';
+
+  let toolsHtml = '';
+  for (const t of (sp.tools||[])){
+    const dotCls = t.status === 'ok' ? 'ok' : t.status === 'err' ? 'err' : 'run';
+    const bytesTxt = t.bytes ? fmtBytes(t.bytes) : '';
+    const previewTxt = t.result || t.preview || '';
+    toolsHtml += `
+      <div class="tool-row">
+        <span class="dot ${dotCls}"></span>
+        <span class="name">${escapeHtml(t.tool||'')}</span>
+        <span class="preview" title="${escapeHtml(previewTxt)}">${escapeHtml((previewTxt||'').slice(0,80))}</span>
+        ${bytesTxt ? `<span class="bytes">${bytesTxt}</span>` : ''}
+      </div>`;
+  }
+
+  const tokens = sp.tokenBuf
+    ? `<div class="sp-tokens">${escapeHtml(sp.tokenBuf.slice(-300))}</div>`
+    : '';
+
+  const results = sp.results
+    ? `<div class="sp-results ${sp.resultsSoft?'soft':''}">${escapeHtml(sp.results)}</div>`
+    : '';
+
+  const desc = sp.desc
+    ? `<div class="sp-desc">${escapeHtml(sp.desc.slice(0,200))}</div>`
+    : '';
+
+  return `
+    <div class="sp-card ${statusCls}">
+      <div class="sp-head">
+        <span class="icon ${statusCls}">${ICONS[statusCls]||'?'}</span>
+        <span class="id">${escapeHtml(sp.id)}</span>
+        <span class="meta">${turnTxt}</span>
+      </div>
+      ${desc}
+      <div class="tool-chain">${toolsHtml || '<div class="tool-row"><span class="preview">(no tool calls yet)</span></div>'}</div>
+      ${results}
+      ${tokens}
+    </div>`;
+}
+
+// ─── Markdown renderer (small subset) ──────────────────────
+function renderMarkdown(md){
+  if (!md) return '';
+  // Normalize CRLF
+  md = md.replace(/\r\n/g,'\n');
+
+  // Pull fenced code blocks aside (so other regex can't touch them)
+  const blocks = [];
+  md = md.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
+    const idx = blocks.length;
+    blocks.push({ lang: lang||'', code: code.replace(/\n+$/,'') });
+    return `\u0001CODEBLK${idx}\u0001`;
+  });
+
+  // Tables
+  md = md.replace(/(^\|.+\|\n\|[\s|:-]+\|\n(?:\|.+\|\n?)+)/gm, (m) => {
+    const lines = m.trim().split('\n');
+    const header = lines[0].slice(1,-1).split('|').map(s=>s.trim());
+    const rows   = lines.slice(2).map(l => l.replace(/^\||\|$/g,'').split('|').map(s=>s.trim()));
+    let out = '<table><thead><tr>';
+    for (const h of header) out += `<th>${inline(h)}</th>`;
+    out += '</tr></thead><tbody>';
+    for (const r of rows){
+      out += '<tr>';
+      for (const c of r) out += `<td>${inline(c)}</td>`;
+      out += '</tr>';
+    }
+    out += '</tbody></table>';
+    return out;
+  });
+
+  // Headings
+  md = md.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
+  md = md.replace(/^###\s+(.+)$/gm,  '<h3>$1</h3>');
+  md = md.replace(/^##\s+(.+)$/gm,   '<h2>$1</h2>');
+  md = md.replace(/^#\s+(.+)$/gm,    '<h1>$1</h1>');
+  // hr
+  md = md.replace(/^---+$/gm, '<hr>');
+
+  // Lists (very small subset)
+  md = md.replace(/(?:^[ \t]*[-*]\s+.+(?:\n|$))+/gm, m => {
+    const items = m.trim().split(/\n/).map(l => l.replace(/^[ \t]*[-*]\s+/,''));
+    return '<ul>' + items.map(i => `<li>${inline(i)}</li>`).join('') + '</ul>';
+  });
+  md = md.replace(/(?:^[ \t]*\d+\.\s+.+(?:\n|$))+/gm, m => {
+    const items = m.trim().split(/\n/).map(l => l.replace(/^[ \t]*\d+\.\s+/,''));
+    return '<ol>' + items.map(i => `<li>${inline(i)}</li>`).join('') + '</ol>';
+  });
+
+  // Paragraphs (anything else not already block-level)
+  md = md.split(/\n{2,}/).map(blk => {
+    const trimmed = blk.trim();
+    if (!trimmed) return '';
+    if (/^\s*<(h\d|ul|ol|table|hr|pre|div)/.test(trimmed)) return blk;
+    if (/^\u0001CODEBLK\d+\u0001$/.test(trimmed)) return blk;
+    return `<p>${inline(blk.replace(/\n/g,' '))}</p>`;
+  }).join('\n\n');
+
+  // Restore code blocks with copy/download UI
+  md = md.replace(/\u0001CODEBLK(\d+)\u0001/g, (_, i) => {
+    const blk = blocks[+i];
+    const lang = blk.lang || 'text';
+    const codeId = 'code_' + Math.random().toString(36).slice(2,9);
+    const buttons = lang === 'python'
+      ? `<button onclick="copyCode('${codeId}')">Copy</button>
+         <button onclick="downloadCode('${codeId}','sp_${codeId}.py')">Download .py</button>`
+      : `<button onclick="copyCode('${codeId}')">Copy</button>`;
+    return `
+      <div class="code-block">
+        <div class="code-header">
+          <span class="lang">${escapeHtml(lang)}</span>
+          <div class="actions">${buttons}</div>
+        </div>
+        <pre><code id="${codeId}">${escapeHtml(blk.code)}</code></pre>
+      </div>`;
+  });
+
+  return md;
+}
+
+function inline(s){
+  if (!s) return '';
+  s = escapeHtml(s);
+  // inline code first
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // bold / italic
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  return s;
+}
+
+function copyCode(id){
+  const el = document.getElementById(id);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(()=>{
+    flashButton(event && event.target, 'Copied!');
+  }).catch(()=>{});
+}
+
+function downloadCode(id, filename){
+  const el = document.getElementById(id);
+  if (!el) return;
+  const blob = new Blob([el.textContent], { type:'text/x-python' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 200);
+  flashButton(event && event.target, 'Saved!');
+}
+
+function flashButton(btn, txt){
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.textContent = txt;
+  setTimeout(()=>{ btn.textContent = orig; }, 1100);
+}
+window.copyCode = copyCode;
+window.downloadCode = downloadCode;
+
+function renderAnswer(md){
+  const el = $('answer-md');
+  if (!el) return;
+  if (!md){ el.innerHTML = '<div class="empty-msg">No answer.</div>'; return; }
+  el.innerHTML = renderMarkdown(md);
+  el.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+// ─── GPU + Jobs polling ─────────────────────────────────────
+async function pollMetrics(){
+  try {
+    const r = await fetch('/metrics');
+    if (!r.ok) return;
+    const m = await r.json();
+    state.metrics = m;
+    if (m.gpu && !m.gpu.error){
+      $('gpu-name').textContent = m.gpu.name;
+      $('gpu-fill').style.width  = (m.gpu.mem_pct||0) + '%';
+      $('gpu-vram').textContent  = `${m.gpu.mem_used_mb||0} / ${m.gpu.mem_total_mb||0} MB`;
+      $('gpu-pct').textContent   = (m.gpu.gpu_pct||0) + '%';
+      $('gpu-temp').textContent  = (m.gpu.temp_c||0) + '°C';
+      $('stat-gpu').innerHTML    = `GPU <b>${m.gpu.gpu_pct||0}%</b>`;
+    } else {
+      $('gpu-name').textContent = 'driver mismatch / unavailable';
+    }
+    if (m.cpu_pct != null) $('cpu-pct').textContent = m.cpu_pct.toFixed(0)+'%';
+    if (m.mem_pct != null) $('ram-pct').textContent = m.mem_pct.toFixed(0)+'%';
+  } catch(_){}
+}
+
+async function pollJobs(){
+  try {
+    const r = await fetch('/jobs?limit=30');
+    if (!r.ok) return;
+    const data = await r.json();
+    const jobs = data.jobs || data || [];
+    state.jobs = jobs;
+    let running = 0;
+    const list = $('jobs-list');
+    if (!jobs.length){ list.innerHTML = '<div class="empty-msg">No jobs yet.</div>'; }
+    else {
+      list.innerHTML = jobs.map(j => {
+        const st = (j.status||'').toLowerCase();
+        if (st === 'running' || st === 'processing') running++;
+        const active = state.currentJob && state.currentJob.id === j.id ? 'active' : '';
+        return `
+          <div class="job-item ${active}" data-id="${escapeHtml(j.id||'')}">
+            <span class="id" title="${escapeHtml(j.question||'')}">${escapeHtml((j.id||'').slice(0,12))}</span>
+            <span class="status ${st}">${escapeHtml(st)}</span>
+          </div>`;
+      }).join('');
+      list.querySelectorAll('.job-item').forEach(el => {
+        el.addEventListener('click', () => watchJob(el.dataset.id));
+      });
+    }
+    $('stat-jobs').innerHTML = `JOBS <b>${running}/3</b>`;
+  } catch(_){}
+}
+
+// ─── Submit + watch ─────────────────────────────────────────
+async function watchJob(jobId){
+  state.currentJob = { id: jobId, t0: Date.now()/1000 };
+  state.sps = {}; state.waves = []; state.llmTarget = null; state.orchThinkBuf = '';
+  resetPhases();
+  $('orch-job').textContent = jobId.slice(0,12);
+  $('orch-stream').innerHTML = '';
+  $('answer-md').innerHTML = '<div class="empty-msg">Streaming…</div>';
+  queueRender();
+  pollJobs();
+
+  // If job is already complete, render its answer + code immediately
+  try {
+    const r = await fetch(`/result/${encodeURIComponent(jobId)}`);
+    if (r.ok){
+      const data = await r.json();
+      if (data.answer) renderAnswer(data.answer);
+    }
+  } catch(_){}
+
+  connectStream(jobId);
+}
+
+async function submitQuestion(){
+  const q = $('q-text').value.trim();
+  if (!q) return;
+  const service = $('q-service').value;
+  const btn = $('q-submit');
+  btn.disabled = true;
+  try {
+    let url = '/query_async';
+    if (service === 'engineer') url = '/query_async';   // server detects via classifier
+    if (service === 'execute' || service === 'deepsearch') url = '/query_async';
+    const body = JSON.stringify({ question: q, service });
+    const r = await fetch(url, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body,
+    });
+    if (!r.ok){ alert('submit failed: '+r.status); return; }
+    const data = await r.json();
+    const jid = data.job_id || data.id;
+    if (jid) watchJob(jid);
+  } catch(e){
+    alert('submit error: '+e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ─── Boot ───────────────────────────────────────────────────
+function boot(){
+  $('q-submit').addEventListener('click', submitQuestion);
+  $('q-text').addEventListener('keydown', e => {
+    if ((e.ctrlKey||e.metaKey) && e.key === 'Enter') submitQuestion();
+  });
+  pollMetrics(); setInterval(pollMetrics, 3000);
+  pollJobs();    setInterval(pollJobs, 5000);
+  connectGUIFeed();
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+else boot();
 </script>
-</div><!-- /page-tools -->
-
-
-<!-- ── JARVIS CHAT PAGE ──────────────────────────────────────────── -->
-<div id="page-chat">
-  <div id="jchat-messages"></div>
-  <div id="jchat-status"></div>
-  <div id="jchat-input-row">
-    <textarea id="jchat-input" placeholder="Message JARVIS…" rows="1"></textarea>
-    <button id="jchat-tts-toggle" class="on" title="Toggle TTS">🔊 TTS</button>
-    <button id="jchat-send">SEND</button>
-  </div>
-</div>
 
 </body>
 </html>

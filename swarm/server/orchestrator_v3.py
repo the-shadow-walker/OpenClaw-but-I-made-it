@@ -305,6 +305,25 @@ class OrchestratorV3:
               f"order: {plan.dependency_order}")
         print(plan.to_markdown()[:600])
 
+        # Dashboard event: emit a single-line JSON summary of the dependency
+        # graph + wave grouping so the UI can render lanes/rows up-front.
+        try:
+            _waves_for_event = self._topological_waves(plan)
+            _graph = {
+                "sps": [
+                    {
+                        "id": sp.id,
+                        "desc": (sp.description or "")[:200],
+                        "deps": list(getattr(sp, "depends_on", []) or []),
+                    }
+                    for sp in plan.sub_problems
+                ],
+                "waves": _waves_for_event,
+            }
+            print(f"DEPENDENCY_GRAPH: {json.dumps(_graph, ensure_ascii=False)}")
+        except Exception as _dg_err:
+            print(f"  (dep-graph emit skipped: {_dg_err})")
+
         # ── Phase 0C: Targeted research (HYBRID only) ─────────────────────
         research_contexts: Dict[str, str] = {}
         if qtype_value == "hybrid":
@@ -342,6 +361,21 @@ class OrchestratorV3:
 
         for wave_idx, wave in enumerate(waves):
             print(f"\n  Wave {wave_idx+1}/{len(waves)}: {wave}  │ {_elapsed()}")
+            # Dashboard event: clean breakpoint for animating wave transitions.
+            try:
+                _solved_so_far = [
+                    pid for pid, pr in solver_results.items() if pr.status == "solved"
+                ]
+                _reason = (
+                    f"deps met from solved: {','.join(_solved_so_far)}"
+                    if _solved_so_far else "no deps"
+                )
+                print(
+                    f"WAVE_DISPATCH: Wave {wave_idx+1}/{len(waves)} → "
+                    f"[{', '.join(wave)}] reason='{_reason}'"
+                )
+            except Exception:
+                pass
 
             # ── Build global manifest from ALL solved SPs so far ────────────────
             global_manifest: Dict[str, str] = {}  # var → "value unit"
@@ -1644,6 +1678,7 @@ RULES — you MUST follow these:
             system=system,
             timeout=1500,      # 25 min — 35b MoE safety margin (Swarm 3.17)
             num_predict=4096,
+            emit_chunks=True,  # Swarm 3.20 — stream ORCH_THINK to dashboard
         )
         if not answer.strip():
             answer = f"## Result\n\n{synthesis}"
@@ -1653,6 +1688,40 @@ RULES — you MUST follow these:
         elapsed_str = ""  # timing handled in _solve_react
         print(f"Phase 3C  ConstraintCheck")
         answer = await self._enforce_negative_constraints(answer, requirements or [])
+
+        # ── Phase 3D: Append "## Solver Code" appendix (Swarm 3.20) ───────
+        # Runs AFTER constraint filter so python keywords don't get rewritten
+        # as prose. Deterministic — never trusts the writer to embed code.
+        try:
+            code_blocks: List[str] = []
+            for sp_id in plan.dependency_order:
+                sr = solver_results.get(sp_id)
+                if not sr:
+                    continue
+                final_code = (getattr(sr, 'final_code', '') or '').strip()
+                if not final_code:
+                    continue
+                sp_obj = next(
+                    (s for s in plan.sub_problems if s.id == sp_id),
+                    None,
+                )
+                desc = (sp_obj.description if sp_obj else '').strip()[:200]
+                heading = f"### {sp_id} — {desc}" if desc else f"### {sp_id}"
+                code_blocks.append(
+                    f"{heading}\n\n```python\n{final_code}\n```\n"
+                )
+            if code_blocks:
+                answer = (
+                    answer.rstrip()
+                    + "\n\n---\n\n## Solver Code\n\n"
+                    + "Each sub-problem produced an executable Python script. "
+                    + "Click **Copy** or **Download** in the dashboard to grab "
+                    + "any block and run it locally.\n\n"
+                    + "\n".join(code_blocks)
+                )
+                print(f"  📎 Appended {len(code_blocks)} solver code block(s)")
+        except Exception as _ce:
+            print(f"  (code appendix skipped: {_ce})")
 
         return answer
 
@@ -1916,6 +1985,7 @@ Rules:
         think: bool = True,
         keep_alive: int = 600,
         format: Optional[str] = None,   # Swarm 3.18 — set "json" for structured output
+        emit_chunks: bool = False,      # Swarm 3.20 — emit ORCH_THINK per delta for dashboard
     ) -> str:
         """Direct Ollama /api/chat call using streaming (avoids HTTP timeout on large models)."""
         messages = []
@@ -1956,6 +2026,16 @@ Rules:
                     delta = chunk.get("message", {}).get("content", "")
                     if delta:
                         parts.append(delta)
+                        if emit_chunks:
+                            # ORCH_THINK: dashboard live-streams the writer composing
+                            # the final answer (mirrors react_solver's [LLMTOK]).
+                            try:
+                                _esc = (
+                                    delta.replace('\\', '\\\\').replace('\n', '\\n')
+                                )
+                                print(f"ORCH_THINK: {_esc}")
+                            except Exception:
+                                pass
                     if chunk.get("done", False):
                         break
                 except json.JSONDecodeError:

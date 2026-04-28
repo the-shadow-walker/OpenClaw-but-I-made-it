@@ -836,6 +836,16 @@ class ReactSolver:
                 inp_preview = inp[:60].replace('\n', '↵')
                 print(f"→ {action}: {inp_preview!r}")
                 obs = await self._run_tool(action, inp)
+                # Dashboard event: emit a TOOL_RESULT line summarising the tool
+                # exec — pairs with the start-line print above so the UI can
+                # render the full tool chain.
+                try:
+                    _result_str = obs if isinstance(obs, str) else str(obs)
+                    _bytes = len(_result_str.encode('utf-8', errors='replace'))
+                    _preview = _result_str[:80].replace('\n', '↵')
+                    print(f"TOOL_RESULT: [{sp.id}] {action} | {_bytes} bytes | {_preview!r}")
+                except Exception:
+                    pass
 
             # Prepend locked results ledger so the model never loses computed values
             if self._locked_results:
