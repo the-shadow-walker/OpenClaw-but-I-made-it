@@ -305,6 +305,37 @@ class JobRunner:
                     if 'max_iterations' in job:
                         agent.max_react_iterations = int(job['max_iterations'])
 
+                    # Inject context_keys (INTEGRATION_CONTRACT §2): pre-load
+                    # shared_context values into pinned slots BEFORE run_react
+                    # starts. Mirrors SubAgentInvoker's in-process behavior so
+                    # REST clients (Jarvis et al) can request identical context
+                    # propagation. Quietly skip missing keys — it's not an error
+                    # for a key to have expired between submit and run.
+                    _ck = job.get('context_keys') or []
+                    if _ck and getattr(agent, 'memory', None) is not None:
+                        injected = []
+                        for _key in _ck:
+                            try:
+                                _val = agent.memory.get_context(_key)
+                            except Exception:
+                                _val = None
+                            if _val is None:
+                                continue
+                            _slot = (
+                                f"[CONTEXT KEY: {_key}]\n"
+                                f"{_val if isinstance(_val, str) else json.dumps(_val)}"
+                            )
+                            agent.pinned_messages.append({
+                                "role": "user",
+                                "content": _slot[:4000],
+                            })
+                            injected.append(_key)
+                        if injected:
+                            _original_print(
+                                f"[worker] injected {len(injected)} context_keys into pins: {injected}",
+                                flush=True,
+                            )
+
                     # Chain subtasks use SubtaskOrchestrator (Producer tier):
                     # breaks each subtask into 3-5 micro-tasks → Minion agents.
                     # Single jobs bypass the orchestrator and run directly.
@@ -411,6 +442,17 @@ class JobRunner:
                     job['execution_log'] = agent.execution_log
                     job['_react_result'] = result
                     job['_react_trace'] = agent.react_trace
+
+                    # Capture INTEGRATION_CONTRACT §2 envelope fields so the
+                    # GET /api/v1/jobs/<id> endpoint can shape the response per
+                    # contract without re-deriving them from the trace. The
+                    # blueteam/gui/chain branches may not populate these — the
+                    # envelope builder defaults missing fields to empty lists.
+                    _r = result if isinstance(result, dict) else {}
+                    job['deliverables'] = list(_r.get('deliverables') or [])
+                    job['context_keys_written'] = list(_r.get('context_keys_written') or [])
+                    job['files_created'] = list(_r.get('files_created') or [])
+                    job['summary'] = _r.get('summary') or _r.get('finish_summary') or ''
 
                 except Exception as e:
                     job['status'] = 'failed'
@@ -1110,7 +1152,14 @@ def execute_command():
         "instruction": "Run a vulnerability scan",
         "model": "qwen3.6:35b-Grindlewalt",  // optional
         "searxng_url": "http://...",  // optional
-        "async": true  // optional, default true
+        "async": true,  // optional, default true
+        "context_keys": ["project.workspace", "rocket.research"]  // optional
+                                                                  // INTEGRATION_CONTRACT §2:
+                                                                  // shared_context keys to
+                                                                  // pre-load into the agent's
+                                                                  // pinned slots before run.
+                                                                  // Missing keys are silently
+                                                                  // skipped (TTL expiry, etc).
     }
     
     Returns:
@@ -1121,10 +1170,25 @@ def execute_command():
     }
     """
     data = request.get_json()
-    
+
     if not data or 'instruction' not in data:
         return jsonify({'error': 'Missing instruction'}), 400
-    
+
+    # Validate optional context_keys — must be a list of non-empty strings if present.
+    # Per INTEGRATION_CONTRACT §2: shared_context keys to pre-load into the agent's
+    # pinned slots before run_react starts. Mirrors what SubAgentInvoker does
+    # in-process; exposing it at the REST boundary lets out-of-process clients
+    # (Jarvis, dashboards) dispatch the same way without weaving keys into the
+    # instruction text as a workaround.
+    context_keys_in = data.get('context_keys') or []
+    if context_keys_in:
+        if not isinstance(context_keys_in, list) or not all(
+            isinstance(k, str) and k.strip() for k in context_keys_in
+        ):
+            return jsonify({
+                'error': "context_keys must be a list of non-empty strings"
+            }), 400
+
     # Create job
     job_id = str(uuid.uuid4())
     job = {
@@ -1132,6 +1196,7 @@ def execute_command():
         'instruction': data['instruction'],
         'model': data.get('model', 'qwen3.6:35b-Grindlewalt'),
         'searxng_url': data.get('searxng_url', 'http://10.0.0.58:8080'),
+        'context_keys': list(context_keys_in),
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
         'output': '',
@@ -1170,32 +1235,67 @@ def execute_command():
         return jsonify(job)
 
 
+def _build_job_envelope(job: dict) -> dict:
+    """Shape a job into the INTEGRATION_CONTRACT §2 envelope.
+
+    Required keys (always present, even on failure):
+      success, summary, deliverables, context_keys_written, sidechain_path, error
+
+    Notes:
+      - ``deliverables`` falls back to ``files_created`` when the agent didn't
+        explicitly call ``finish(deliverables=[...])`` — gives downstream callers
+        (Jarvis, dashboards) a usable artifact list without forcing every agent
+        to fill the new field.
+      - ``sidechain_path`` is null for direct jobs; it's set when the work
+        actually delegated to a sub-agent via SubAgentInvoker (which writes
+        ``~/.agent_bin/sidechains/<id>.jsonl``).
+      - ``error`` is null on success, the captured error string on failure.
+    """
+    status = job.get('status', 'unknown')
+    is_done = status in ('completed', 'failed', 'timeout')
+    success = bool(job.get('success')) if is_done else False
+    deliverables = list(job.get('deliverables') or [])
+    if not deliverables:
+        deliverables = list(job.get('files_created') or [])
+    summary = job.get('summary') or ''
+    if not summary:
+        # Fall back to react result's finish_summary when present
+        _r = job.get('_react_result') or {}
+        summary = _r.get('finish_summary') or _r.get('summary') or ''
+    return {
+        'success': success,
+        'summary': summary,
+        'deliverables': deliverables,
+        'context_keys_written': list(job.get('context_keys_written') or []),
+        'sidechain_path': job.get('sidechain_path'),
+        'error': job.get('error'),
+    }
+
+
 @app.route('/api/v1/jobs/<job_id>', methods=['GET'])
 @require_api_key
 def get_job_status(job_id: str):
     """
-    Get job status and results
-    
-    Returns:
-    {
-        "job_id": "uuid",
-        "status": "completed|running|queued|failed",
-        "instruction": "original instruction",
-        "output": "captured output",
-        "execution_log": [...],
-        "success": true|false,
-        "created_at": "timestamp",
-        "started_at": "timestamp",
-        "completed_at": "timestamp",
-        "error": "error message if failed"
-    }
+    Get job status and results.
+
+    Returns the legacy job shape (backward compatible) plus an ``envelope``
+    field carrying the INTEGRATION_CONTRACT §2 shape:
+        {success, summary, deliverables, context_keys_written, sidechain_path, error}
+
+    Pass ``?envelope_only=1`` to return ONLY the envelope (Jarvis-style).
     """
     if job_id not in jobs:
         return jsonify({'error': 'Job not found'}), 404
 
     job = jobs[job_id]
+    envelope = _build_job_envelope(job)
+
+    if request.args.get('envelope_only') in ('1', 'true', 'yes'):
+        return jsonify(envelope)
+
     # Exclude internal _-prefixed fields (e.g. _react_result, _react_trace)
     public_job = {k: v for k, v in job.items() if not k.startswith('_')}
+    public_job['envelope'] = envelope
     return jsonify(public_job)
 
 
@@ -1497,10 +1597,76 @@ def create_chain():
     }), 202
 
 
+def _build_chain_envelope(chain_data: dict) -> dict:
+    """Roll up subtask envelopes into a single chain-level envelope.
+
+    Per INTEGRATION_CONTRACT §2:
+      - success: True only when chain status is 'completed' AND every subtask succeeded
+      - summary: chain-level summary if set, else a short rollup line
+      - deliverables: union of all subtask deliverables (de-duplicated, order preserved)
+      - context_keys_written: union of all subtask context_keys
+      - sidechain_path: null at chain level (sidechains are per-job)
+      - error: first failed subtask's error, or null
+    """
+    status = chain_data.get('status', 'unknown')
+    subtasks = chain_data.get('subtasks', [])
+
+    deliverables: list = []
+    seen: set = set()
+    context_keys: list = []
+    seen_keys: set = set()
+    first_error = None
+    all_succeeded = bool(subtasks)
+
+    for st in subtasks:
+        st_status = st.get('status', '')
+        if st_status not in ('completed', 'passed', 'success'):
+            all_succeeded = False
+        # Pull from artifact-stored fields first; fall back to live job dict
+        artifact = st.get('artifact') or {}
+        st_deliv = artifact.get('deliverables') or []
+        st_ck = artifact.get('context_keys_written') or []
+        if not st_deliv or not st_ck:
+            jid = st.get('job_id')
+            if jid and jid in jobs:
+                job = jobs[jid]
+                st_deliv = st_deliv or job.get('deliverables') or job.get('files_created') or []
+                st_ck = st_ck or job.get('context_keys_written') or []
+                if first_error is None and job.get('status') == 'failed':
+                    first_error = job.get('error')
+        for d in st_deliv:
+            if d and d not in seen:
+                seen.add(d)
+                deliverables.append(d)
+        for k in st_ck:
+            if k and k not in seen_keys:
+                seen_keys.add(k)
+                context_keys.append(k)
+
+    success = (status == 'completed' and all_succeeded)
+    summary = chain_data.get('summary') or chain_data.get('goal', '')[:200]
+    if not summary:
+        summary = f"chain {status} — {len(subtasks)} subtasks"
+
+    return {
+        'success': success,
+        'summary': summary,
+        'deliverables': deliverables,
+        'context_keys_written': context_keys,
+        'sidechain_path': None,
+        'error': first_error if not success else None,
+    }
+
+
 @app.route('/api/v1/chains/<chain_id>', methods=['GET'])
 @require_api_key
 def get_chain(chain_id: str):
-    """Get full chain state including sub-task summaries."""
+    """Get full chain state including sub-task summaries.
+
+    Adds an ``envelope`` field (INTEGRATION_CONTRACT §2 shape) and a per-subtask
+    ``envelope`` rollup. Pass ``?envelope_only=1`` to return only the chain
+    envelope (Jarvis-style).
+    """
     try:
         chain = TaskChain.load(chain_id)
     except FileNotFoundError:
@@ -1510,7 +1676,7 @@ def get_chain(chain_id: str):
 
     d = chain.data
 
-    # Attach brief job output summary to each subtask
+    # Attach brief job output summary + per-subtask envelope to each subtask
     subtask_summaries = []
     for st in d.get('subtasks', []):
         summary = dict(st)
@@ -1519,9 +1685,15 @@ def get_chain(chain_id: str):
             job = jobs[job_id]
             summary['job_status'] = job.get('status')
             summary['job_output_tail'] = (job.get('output', '') or '')[-500:]
+            summary['envelope'] = _build_job_envelope(job)
         subtask_summaries.append(summary)
 
-    return jsonify({**d, 'subtasks': subtask_summaries})
+    chain_envelope = _build_chain_envelope({**d, 'subtasks': subtask_summaries})
+
+    if request.args.get('envelope_only') in ('1', 'true', 'yes'):
+        return jsonify(chain_envelope)
+
+    return jsonify({**d, 'subtasks': subtask_summaries, 'envelope': chain_envelope})
 
 
 @app.route('/api/v1/chains', methods=['GET'])

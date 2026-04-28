@@ -195,9 +195,13 @@ TOOL_SCHEMAS: dict = {
     "web_search":       '  web_search       — {{"query": str}}',
     "read_file":        '  read_file        — {{"path": str, "offset": int (opt, default 0), "limit": int (opt, default 200 lines)}}',
     "memory_lookup":    '  memory_lookup    — {{"query": str}}',
-    "finish":           '  finish           — {{"summary": str, "success": bool, "files_created": [str]}}\n'
+    "finish":           '  finish           — {{"summary": str, "success": bool, "files_created": [str], '
+                       '"deliverables": [str] (opt), "context_keys_written": [str] (opt)}}\n'
                        '    # files_created: absolute paths of EVERY file you wrote this session.\n'
                        '    # finish() is REJECTED if any listed file is absent from disk.\n'
+                       '    # deliverables (opt): user-facing artifact paths (markdown reports, runnable apps, '
+                       'main outputs). Falls back to files_created if omitted.\n'
+                       '    # context_keys_written (opt): shared_context keys you published via publish_context.\n'
                        '    # Always list all created files — omitting them causes rejection.',
     "manage_server":    '  manage_server    — {{"action": "start|stop|status|restart", "name": str, "command": str}}',
     "validate_arch":    '  validate_arch    — {{"path": str (default "DOCS/ARCH.json")}}\n'
@@ -1640,7 +1644,18 @@ Return JSON only:
         The SQLite board remains the source of truth; the .md file is a
         convenience for humans (and agents that want to grep without SQL).
         Idempotent — only wraps once per memory instance.
+
+        Multi-writer guard: when ``AGENT_CENTRAL_MIRROR_OWNER`` is set to a
+        value other than ``"cmd"``, this no-ops so a sibling process (e.g.
+        Jarvis acting as parent) can own the mirror writer without two
+        writers racing on the markdown file. Default ("cmd" or unset) keeps
+        the historical behavior — CMD owns the mirror.
         """
+        owner = os.getenv("AGENT_CENTRAL_MIRROR_OWNER", "cmd").strip().lower()
+        if owner != "cmd":
+            print(f"ℹ️  central_context.md mirror disabled in this process "
+                  f"(AGENT_CENTRAL_MIRROR_OWNER={owner!r}, not 'cmd')")
+            return
         if self.memory is None:
             return
         if getattr(self.memory, "_central_mirror_wired", False):
@@ -2397,6 +2412,9 @@ Return JSON only:
         react_history: List[Dict] = [{"role": "user", "content": initial_message}]
         self.react_trace = []
         finish_summary = ""
+        # Reset envelope fields for this run (filled in if finish() supplies them)
+        self._last_finish_deliverables: list = []
+        self._last_finish_context_keys: list = []
         # Reset per-run file tracking (accumulates fresh within this run_react call)
         self._files_created = []
         self.pinned_messages = [m for m in self.pinned_messages
@@ -2812,6 +2830,11 @@ Return JSON only:
 
                 finish_summary = args.get("summary", result.output)
                 final_confidence = confidence
+                # Capture envelope fields off the accepted finish() metadata so
+                # the result_dict can ship the INTEGRATION_CONTRACT envelope.
+                _finish_meta = result.metadata or {}
+                self._last_finish_deliverables = list(_finish_meta.get("deliverables") or [])
+                self._last_finish_context_keys = list(_finish_meta.get("context_keys_written") or [])
                 break
 
             if result.metadata.get("stuck") == "warn":
@@ -2981,6 +3004,14 @@ Return JSON only:
 
         iterations_used = sum(1 for e in self.react_trace if e["tool"] != "finish")
 
+        # Envelope synthesis (INTEGRATION_CONTRACT §2):
+        # - deliverables falls back to files_created when the agent didn't provide
+        #   an explicit list, so callers always get a usable artifact list.
+        # - context_keys_written defaults to whatever the agent declared at finish().
+        _deliverables = list(self._last_finish_deliverables) if self._last_finish_deliverables \
+            else list(self._files_created)
+        _context_keys_written = list(self._last_finish_context_keys)
+
         result_dict = {
             "success": verification.get("verified", False),
             "summary": finish_summary,   # alias so callers can use result.get("summary")
@@ -2989,6 +3020,10 @@ Return JSON only:
             "finish_summary": finish_summary,
             "iterations_used": iterations_used,
             "trace": self.react_trace,
+            # INTEGRATION_CONTRACT envelope fields — additive, legacy callers ignore.
+            "deliverables": _deliverables,
+            "context_keys_written": _context_keys_written,
+            "files_created": list(self._files_created),
         }
 
         if result_dict["success"]:

@@ -1061,6 +1061,14 @@ class ToolRegistry:
         summary  = args.get("summary", "Task completed.")
         success  = bool(args.get("success", True))
         declared = args.get("files_created", [])
+        # Optional envelope fields per INTEGRATION_CONTRACT §2 (additive — agents that
+        # don't know about these keep working unchanged).
+        deliverables_in = args.get("deliverables") or []
+        context_keys_in = args.get("context_keys_written") or []
+        if not isinstance(deliverables_in, list):
+            deliverables_in = [str(deliverables_in)]
+        if not isinstance(context_keys_in, list):
+            context_keys_in = [str(context_keys_in)]
 
         # --- Guard 1: verify all declared files exist on disk ---
         missing = [f for f in declared if not os.path.exists(os.path.expanduser(f))]
@@ -1106,7 +1114,16 @@ class ToolRegistry:
         if declared:
             print(f"   Files verified: {len(declared)}")
         print(f"{'=' * 70}")
-        return ToolResult(success, summary, "", {"finished": True, "files_created": declared})
+        # Default deliverables to declared files when not explicitly provided —
+        # gives downstream callers (Jarvis, chain rollup) something usable
+        # without forcing every agent to fill in the new fields.
+        deliverables = deliverables_in if deliverables_in else list(declared)
+        return ToolResult(success, summary, "", {
+            "finished": True,
+            "files_created": declared,
+            "deliverables": deliverables,
+            "context_keys_written": context_keys_in,
+        })
 
     def _handle_manage_server(self, args: dict) -> ToolResult:
         action = (args.get("action") or "").lower()
