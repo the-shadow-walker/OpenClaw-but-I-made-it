@@ -1701,6 +1701,14 @@ RULES — you MUST follow these:
                 final_code = (getattr(sr, 'final_code', '') or '').strip()
                 if not final_code:
                     continue
+                # Defensive: strip leading/trailing fenced-block markers if the
+                # solver captured them — otherwise the dashboard renders nested
+                # ```python ... ``` ``` which breaks the markdown parser.
+                _fence_open = re.match(r'^```(?:python|py)?\s*\n', final_code)
+                if _fence_open:
+                    final_code = final_code[_fence_open.end():]
+                if final_code.endswith('```'):
+                    final_code = final_code[:-3].rstrip()
                 sp_obj = next(
                     (s for s in plan.sub_problems if s.id == sp_id),
                     None,
