@@ -690,10 +690,10 @@ Return ONLY the JSON array, no other text."""
 
         system = "You are a task decomposer. Return only a JSON array of sub-tasks. No prose."
 
-        # Single-model policy: qwen3.6:35b-Grindlewalt with thinking disabled.
+        # Single-model policy: qwen3.6:35b-chain with thinking disabled.
         # _call_model_oneshot already passes think:THINK_DEFAULT (default 0) so
         # tokens land in message.content instead of being burned on thinking.
-        DECOMP_MODEL = "qwen3.6:35b-Grindlewalt"
+        DECOMP_MODEL = "qwen3.6:35b-chain"
 
         try:
             raw = self.agent._call_model_oneshot(
@@ -1741,7 +1741,7 @@ Rules:
 Return ONLY the JSON array, no prose."""
 
         system = "You are a micro-task decomposer. Return only a JSON array. No prose."
-        DECOMP_MODEL = "qwen3.6:35b-Grindlewalt"
+        DECOMP_MODEL = "qwen3.6:35b-chain"
         try:
             raw = self.agent._call_model_oneshot(
                 DECOMP_MODEL, prompt, system, timeout=300
@@ -2033,7 +2033,7 @@ class TaskChain:
         goal: str,
         subtasks: List[Dict],
         total_budget: int = 100,
-        model: str = "qwen3.6:35b-Grindlewalt",
+        model: str = "qwen3.6:35b-chain",
         retry_policy: Optional[Dict] = None,
     ) -> "TaskChain":
         """Create a new chain and write it to disk. Returns the TaskChain instance.

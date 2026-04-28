@@ -1,5 +1,5 @@
 """
-gui_agent.py — GUIAgent: vision-based desktop automation powered by qwen3.6:35b-Grindlewalt.
+gui_agent.py — GUIAgent: vision-based desktop automation powered by qwen3.6:35b-chain.
 
 The agent takes screenshots, overlays a 16×16 grid, runs OCR for text positions,
 sends the annotated image to the vision model (Ollama vision API), receives a JSON action,
@@ -571,7 +571,7 @@ def _call_vision(model: str, prompt: str, image_b64: str,
 # ── GUIAgent ──────────────────────────────────────────────────────────────────
 
 class GUIAgent:
-    MODEL = "qwen3.6:35b-Grindlewalt"
+    MODEL = "qwen3.6:35b-chain"
 
     def __init__(self, display=":0", screen_w=1920, screen_h=1080,
                  event_cb=None, stop_event=None):

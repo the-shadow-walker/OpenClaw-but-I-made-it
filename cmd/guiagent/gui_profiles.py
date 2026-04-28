@@ -19,7 +19,7 @@ import subprocess
 from typing import List, Dict
 
 PROFILES_DIR = os.path.expanduser("~/.agent_bin/gui_profiles/")
-_OLLAMA_MODEL = "qwen3.6:35b-Grindlewalt"
+_OLLAMA_MODEL = "qwen3.6:35b-chain"
 
 
 def _call_ollama(prompt: str, model: str = _OLLAMA_MODEL, timeout: int = 30) -> str:

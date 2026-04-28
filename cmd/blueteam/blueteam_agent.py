@@ -581,7 +581,7 @@ class BlueteamAgent:
     - Anomaly diffing for continuous watch mode
     """
 
-    def __init__(self, model: str = "qwen3.6:35b-Grindlewalt"):
+    def __init__(self, model: str = "qwen3.6:35b-chain"):
         self.agent = OllamaCommandAgent(model=model)
         # Replace the tool registry with the extended blueteam version
         self.agent.tool_registry = BlueteamToolRegistry(
@@ -1557,7 +1557,7 @@ _sentinel: Optional[BlueteamAgent] = None
 _sentinel_lock = threading.Lock()
 
 
-def get_sentinel(model: str = "qwen3.6:35b-Grindlewalt") -> BlueteamAgent:
+def get_sentinel(model: str = "qwen3.6:35b-chain") -> BlueteamAgent:
     """Return the global singleton BlueteamAgent, creating it if needed."""
     global _sentinel
     with _sentinel_lock:

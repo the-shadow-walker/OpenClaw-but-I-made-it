@@ -2,7 +2,7 @@
 # =============================================================================
 # ollama_agent_core.py  —  v3.0
 # Features in this build:
-#   - Single model: qwen3.6:35b-Grindlewalt (ReAct loop + code gen)
+#   - Single model: qwen3.6:35b-chain (ReAct loop + code gen)
 #   - num_ctx: react loop=32768, all one-shot calls=8192 (no KV cache bloat)
 #   - react timeout: 180s; one-shot calls use their own per-call timeout
 #   - Chain mode CLI: --budget/-b, --yes/-y  (TaskDecomposer multi-phase)
@@ -397,12 +397,12 @@ class CommandSafetyValidator:
 
 
 class OllamaCommandAgent:
-    NUM_CTX = 32768       # ReAct loop context window (matches qwen3.6:35b-Grindlewalt Modelfile)
+    NUM_CTX = 32768       # ReAct loop context window (matches qwen3.6:35b-chain Modelfile)
     HEAVY_NUM_CTX = 8192  # one-shot calls (code gen, explain) — short prompt in/out
     MINION_NUM_CTX = 8192 # minion agents — clean slate per micro-task
     # Hardening: bound generation so qwen3 thinking-mode can't run unbounded.
     # 4096 tokens ≈ 15KB output — fits ~150 LOC, enough for almost any single file.
-    # Reduced from 8192: qwen3.6:35b-Grindlewalt runs partly on CPU (model > VRAM)
+    # Reduced from 8192: qwen3.6:35b-chain runs partly on CPU (model > VRAM)
     # so 8192-token gens were timing out at 600s. 4096 ≈ 300s on this hardware.
     FILE_GEN_NUM_PREDICT = 4096
     PATCH_NUM_PREDICT = 2048
@@ -418,8 +418,8 @@ class OllamaCommandAgent:
 
     def __init__(
         self,
-        model: str = "qwen3.6:35b-Grindlewalt",
-        fast_model: str = "qwen3.6:35b-Grindlewalt",
+        model: str = "qwen3.6:35b-chain",
+        fast_model: str = "qwen3.6:35b-chain",
         searxng_url: str = "http://10.0.0.58:8080",
     ):
         # single model for everything — ReAct loop + code/file generation
@@ -3110,7 +3110,7 @@ class PostRunVerifier:
 
     Steps:
       1. Fast model selects the 10 most informative trace entries.
-      2. Agent's own model (qwen3.6:35b-Grindlewalt) generates 3-8 verification shell commands.
+      2. Agent's own model (qwen3.6:35b-chain) generates 3-8 verification shell commands.
       3. Commands are executed; pass/fail recorded.
       4. Heavy model writes a PASS/FAIL report with root cause + fix plan.
     """
@@ -3342,7 +3342,7 @@ def main():
     # Decompose the instruction
     print("\n⏳ Decomposing task...", flush=True)
     decomp_agent = OllamaCommandAgent(
-        model="qwen3.6:35b-Grindlewalt",
+        model="qwen3.6:35b-chain",
         searxng_url="http://10.0.0.58:8080",
     )
     subtasks = TaskDecomposer(decomp_agent).decompose(instruction, total_budget=cli_args.budget)
@@ -3350,7 +3350,7 @@ def main():
     # Single subtask → run directly, same behaviour as before
     if len(subtasks) == 1:
         agent = OllamaCommandAgent(
-            model="qwen3.6:35b-Grindlewalt",
+            model="qwen3.6:35b-chain",
             searxng_url="http://10.0.0.58:8080",
         )
         agent.max_react_iterations = subtasks[0]["max_iterations"]
@@ -3386,7 +3386,7 @@ def main():
         print(f"   Budget: {iters} iterations", flush=True)
 
         phase_agent = OllamaCommandAgent(
-            model="qwen3.6:35b-Grindlewalt",
+            model="qwen3.6:35b-chain",
             searxng_url="http://10.0.0.58:8080",
         )
         phase_agent.max_react_iterations = iters
