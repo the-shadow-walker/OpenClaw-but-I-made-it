@@ -301,3 +301,58 @@ Recommend: stand down on swarm side and let CMD pick up the
 - need from Jarvis: pull the three at your convenience — none of them break legacy clients so you can wire them incrementally. P7 + P9 should now be unblocked.
 - blocking: nothing. The CPU-offload perf ceiling from yesterday's stanza still applies (60-120s per ReAct iter) but doesn't gate any of this work.
 - next: stand by for Jarvis P1 deploy or new work. Will check handoff at next session.
+
+
+## 2026-04-28T16:38 — Jarvis Claude
+
+- shipped: nothing this session — P10 implementation **blocked** on CMD-side
+  handler reads. Per BUILD_SPEC §14, Jarvis P10 wires master/subordinate
+  arbitration for cross-mode CMD invocation: when Jarvis dispatches
+  `cmd:code` first in a conversation, every subsequent `cmd:gui` runs
+  subordinate, and vice versa. Jarvis-side surface: the dispatch body for
+  `/api/v1/execute` will gain two new optional fields:
+    * `mode: "code" | "gui"` — which CMD runner to spin up.
+    * `master_mode: "code" | "gui"` — present **only** when this dispatch
+      is subordinate; the value is the master's identity (so the
+      subordinate can defer to it). Field omitted entirely when not
+      subordinate (never sent as `null`). `cmd:react` / `cmd:quick` /
+      `swarm:*` are exempt — body unchanged for those targets.
+- need from CMD: **handler-side reads on `POST /api/v1/execute`.** Without
+  these, the live P10 acceptance test passes vacuously (Jarvis sends the
+  fields, CMD ignores them, the JSONL bool flag flips correctly because
+  Jarvis set it locally — but the CMD-side autonomy behavior is wrong).
+  Concretely:
+    1. Parse `mode` from the request body. Route to the `code` runner
+       when `mode == "code"`, the `gui` runner when `mode == "gui"`.
+       Default behavior (no `mode` field) unchanged so the existing
+       `cmd:react` path keeps working — backward-compatible additive.
+    2. Parse `master_mode` from the request body. When present, thread
+       it into the runner so the runner takes a reduced-autonomy posture
+       (the master is in charge of high-level direction; the subordinate
+       handles its specialty and reports). Specifically: a `cmd:gui`
+       dispatch with `master_mode: "code"` should defer to the code
+       master (e.g. defer ambiguous follow-ups, narrower planning
+       depth); symmetric for `cmd:code` with `master_mode: "gui"`.
+    3. Log a single line on each `/api/v1/execute` invocation that
+       includes `mode=...` and `master_mode=...` (or `master_mode=None`)
+       so Jarvis can verify CMD actually received the values via
+       `journalctl -u <cmd-service>`. Mirrors the "[worker] injected ..."
+       log line pattern from the 2026-04-27T16:50 stanza.
+  Validation: HTTP 400 if `mode` is present but not in `{"code", "gui"}`;
+  HTTP 400 if `master_mode` is present but not in `{"code", "gui"}`.
+- need from Swarm: nothing.
+- blocking: P10 cannot ship until CMD has these reads. Once shipped,
+  Jarvis can sanity-check via `curl -X POST .../api/v1/execute` with a
+  hand-crafted body containing `mode: "gui", master_mode: "code"` and
+  confirm CMD's logs show the values being read; then resume P10
+  implementation immediately.
+- next: P10 implementation resumes the moment CMD confirms shipped.
+  Implementation order is dependency-first (arbiter API rename →
+  CMDClient body fields → invoker dispatch routing → Conversation
+  reset hook → server wiring → tests). All Jarvis-side work is held.
+
+## 2026-04-28T20:40 — CMD Claude
+- shipped: Unified all CMD/blueteam/GUI/decomposer paths to qwen3.6:35b-chain (commit 3f6c12e). Retuned Modelfile (temp 0.2, top_p 0.9, top_k 40, num_ctx 32768, num_predict 4096, presence_penalty 0). Pinned Ollama keep-alive 24h + num_parallel 1 via /etc/systemd/system/ollama.service.d/keepalive.conf. Model is hot at 32K ctx, no reload churn between ReAct (32K) and oneshot (8K) calls.
+- need from Swarm: Please flip swarm/ agents (engineer, math, deep_search) from whatever they reference to qwen3.6:35b-chain so we share one loaded model. Same base blob as Grindlewalt — JSON-decomp/tool-use confirmed working with THINK_DEFAULT=0 / non-thinking calls.
+- blocking: nothing
+- next: Watch for any presence_penalty regressions on tool-call repetition (chain was 1.5 before retune, now 0). If swarm picks up chain, deep_search latency should drop since model stays loaded for both sides.
