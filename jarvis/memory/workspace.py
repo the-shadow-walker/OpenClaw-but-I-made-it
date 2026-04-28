@@ -148,7 +148,7 @@ class WorkspacePaths:
             dreams_md=root / "DREAMS.md",
             projects_dir=root / "projects",
             memory_dir=root / "memory",
-            conversations_dir=root / "conversations",
+            conversations_dir=root / ".conversations",
             index_dir=root / ".index",
             dreams_staging_dir=root / "memory" / ".dreams",
             tmp_dir=root / ".tmp",

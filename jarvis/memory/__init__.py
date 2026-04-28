@@ -2,3 +2,7 @@
 
 Phases P1–P4. Empty in P0.
 """
+
+from jarvis.memory.watcher import WatcherConfig, WorkspaceWatcher
+
+__all__ = ["WatcherConfig", "WorkspaceWatcher"]

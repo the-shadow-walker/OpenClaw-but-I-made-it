@@ -1,9 +1,12 @@
-"""P0 smoke: verify package imports, config defaults validate, run.main exits 0."""
+"""P0 smoke: verify package imports + config defaults validate.
+
+The original ``test_run_stub_exits_zero`` was retired in P4: ``run.main``
+no longer prints a banner and exits — it starts the watcher and blocks
+on a signal. The subprocess-based equivalent lives in
+``test_cli.py::test_cli_daemon_starts_watcher_and_responds_to_sigterm``.
+"""
 
 from __future__ import annotations
-
-import io
-from contextlib import redirect_stdout
 
 
 def test_package_imports() -> None:
@@ -39,14 +42,8 @@ def test_config_defaults_validate(tmp_path, monkeypatch) -> None:
     assert cfg.mirror.enabled is False                               # spec §21.9
 
 
-def test_run_stub_exits_zero(monkeypatch) -> None:
-    # Exercise the "no config file present" branch — defaults parse, no path validation.
-    monkeypatch.delenv("JARVIS_CONFIG", raising=False)
-
+def test_run_main_importable() -> None:
+    """``run.main`` is now blocking; just confirm the entry symbol exists."""
     from jarvis.run import main
 
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        rc = main([])
-    assert rc == 0
-    assert "jarvis stub — phase P0" in buf.getvalue()
+    assert callable(main)

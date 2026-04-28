@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 qwen-tokenizer = ["transformers>=4.40"]   # only needed when llm.tokenizer == "qwen-native"
 openai-embeddings = ["openai>=1.20"]      # only needed for the OpenAI fallback embedding provider
+client = ["rich>=13.7"]                   # Mac terminal client (jarvis-chat); not needed on the daemon host
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -33,8 +34,12 @@ dev = [
 ]
 
 [project.scripts]
-# `jarvis` CLI entry — wires to jarvis.run:main once the CLI grows past the P0 stub.
-jarvis = "jarvis.run:main"
+# `jarvis` CLI entry — converged on jarvis.cli:main in P2. Subcommands today:
+# `reconcile`, `search`, `daemon` (the daemon shims into jarvis.run:main, which
+# in P5 mounts the FastAPI server on cfg.server.port).
+jarvis = "jarvis.cli:main"
+# Mac-side terminal client. Optional: install with `pip install jarvis[client]`.
+jarvis-chat = "jarvis.chat:main"
 
 # ---------------------------------------------------------------------------
 # Build backend — setuptools with package_dir trick so the directory containing

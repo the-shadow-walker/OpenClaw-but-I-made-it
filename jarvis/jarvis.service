@@ -17,16 +17,18 @@ WorkingDirectory=/mnt/storage/NAS/Jarvis/jarvis
 Environment="PYTHONPATH=/mnt/storage/NAS/Jarvis"
 Environment="PYTHONUNBUFFERED=1"
 
-# Optional: AGENT_CENTRAL_MIRROR_OWNER=jarvis flips Jarvis to the mirror writer
-# once CMD ships the env-flag check (BUILD_SPEC §15, §21.10). Leave commented
-# until the CMD patch lands.
-# Environment="AGENT_CENTRAL_MIRROR_OWNER=jarvis"
+# AGENT_CENTRAL_MIRROR_OWNER=jarvis flips Jarvis to the mirror writer.
+# CMD-Claude shipped the env-flag check prior to P9; with this set CMD's
+# own (now-disabled) curator backs off, leaving Jarvis the sole writer of
+# ~/.agent_bin/central_context.md (BUILD_SPEC §15, §21.10).
+Environment="AGENT_CENTRAL_MIRROR_OWNER=jarvis"
 
 ExecStart=/mnt/storage/NAS/Jarvis/.venv/bin/python -m jarvis.run
 
-# P0 stub exits 0 immediately; restart=no avoids a tight loop. Flip to
-# Restart=on-failure once P5 lands the long-lived FastAPI server.
-Restart=no
+# P5 mounts the FastAPI server in the main thread; the daemon is now
+# long-lived. Restart on failure (not on clean exit, which is a SIGTERM).
+Restart=on-failure
+RestartSec=5
 
 # Resource hygiene
 LimitNOFILE=65536

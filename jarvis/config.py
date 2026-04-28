@@ -11,6 +11,7 @@ fail loudly if a path field is malformed or unwritable.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -18,7 +19,17 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_CONFIG_PATH = "~/.config/jarvis/config.yaml"
+
+# Published context-window sizes for chat models we know about. Keep this
+# small and verified — anything not in here triggers a WARN at config load
+# so drift between cfg.llm.chat_model and cfg.llm.context_window is loud.
+KNOWN_MODEL_WINDOWS: dict[str, int] = {
+    "qwen2.5:3b": 32768,
+    # add more as deployments switch models
+}
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +59,43 @@ class LLMConfig(BaseModel):
     ollama_host: str = "http://localhost:11434"
     ollama_keep_alive: str = "30m"
     tokenizer: Literal["qwen-native", "approximation"] = "qwen-native"
+    # Bound to the chat model's published context window. Passed as
+    # ``num_ctx`` on every ``ollama.chat()`` so Ollama doesn't silently
+    # truncate underneath us. P6 compaction trips at trigger_pct of this.
+    context_window: int = 32768
+
+    def model_post_init(self, __context: Any) -> None:  # noqa: D401
+        """Warn when chat_model/context_window drift from KNOWN_MODEL_WINDOWS.
+
+        Operator can still override; the log makes it loud rather than silent.
+        Approximation token counts already drift ±15%, so a wrong window
+        compounds into wrong P6 compaction triggers — fail loud at config load.
+        """
+        published = KNOWN_MODEL_WINDOWS.get(self.chat_model)
+        if published is None:
+            logger.warning(
+                "llm: unknown chat_model %r; context_window=%d may not match — "
+                "verify per model and add to KNOWN_MODEL_WINDOWS",
+                self.chat_model, self.context_window,
+            )
+        elif published != self.context_window:
+            logger.info(
+                "llm: chat_model %r published context window is %d, "
+                "configured context_window=%d (override accepted)",
+                self.chat_model, published, self.context_window,
+            )
 
 
 class EmbeddingProviderConfig(BaseModel):
-    kind: Literal["ollama", "openai"]
+    # P3: Ollama-only. OpenAI returns 1536-dim vectors that don't fit the
+    # chunks_vec FLOAT[768] schema; rather than ship a runtime dance to
+    # detect/redirect, drop the multi-provider story until P14. The user
+    # has Ollama running locally on the same box; the failure mode where
+    # Ollama is down but OpenAI is reachable is rare enough not to justify
+    # the complexity.
+    kind: Literal["ollama"]
     model: str
     dimensions: int
-    api_key_env: str | None = None   # required when kind=openai
 
 
 class EmbeddingCacheConfig(BaseModel):
@@ -65,12 +106,6 @@ class EmbeddingsConfig(BaseModel):
     providers: list[EmbeddingProviderConfig] = Field(
         default_factory=lambda: [
             EmbeddingProviderConfig(kind="ollama", model="nomic-embed-text", dimensions=768),
-            EmbeddingProviderConfig(
-                kind="openai",
-                model="text-embedding-3-small",
-                dimensions=1536,
-                api_key_env="OPENAI_API_KEY",
-            ),
         ]
     )
     cache: EmbeddingCacheConfig = Field(default_factory=EmbeddingCacheConfig)
@@ -186,11 +221,12 @@ class OrchestrationConfig(BaseModel):
 
 
 class MirrorConfig(BaseModel):
-    central_context_md: Path = Path("~/.agent_bin/central_context.md")
-    poll_interval_s: float = 5.0
     enabled: bool = False             # spec §21.9 — flip after CMD env-flag patch lands
+    central_context_md: Path = Path("~/.agent_bin/central_context.md")
+    shared_db_path: Path = Path("~/.agent_bin/memory.db")
+    poll_interval_s: float = 5.0
 
-    @field_validator("central_context_md", mode="before")
+    @field_validator("central_context_md", "shared_db_path", mode="before")
     @classmethod
     def _expand(cls, v: Any) -> Path:
         return Path(os.path.expandvars(os.path.expanduser(str(v))))

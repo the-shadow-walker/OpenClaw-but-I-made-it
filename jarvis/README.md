@@ -10,9 +10,44 @@ decision. Read it before changing anything material.
 
 ## Status
 
-Phase **P0 — scaffolding**. Repo skeleton, config loader, deployable systemd unit (disabled).
-No memory yet, no LLM client yet, no FastAPI server yet. See `docs/BUILD_SPEC.md` §18 for the
-full phased build plan.
+Phase **P2 — chunking + SQLite + FTS5 BM25 search**. Heading-aware Markdown chunker,
+content-hash reconciliation, full §5 schema (vector table ships but stays empty until P3),
+and a `jarvis` CLI with `reconcile`, `search`, and `daemon` subcommands. No embeddings, no
+file watcher, no chat loop yet. See `docs/BUILD_SPEC.md` §18 for the full phased build plan.
+
+### CLI
+
+```bash
+jarvis reconcile                          # full reindex of workspace/
+jarvis search 'rocket fin design'         # BM25 search; --kind memory repeatable to filter
+jarvis daemon                             # P0 stub today; P5 grows this into FastAPI
+```
+
+`python -m jarvis.cli ...` is a fallback (useful before `pip install -e .`).
+`JARVIS_WORKSPACE` env var overrides `cfg.paths.workspace` post-load (paired with `JARVIS_CONFIG`).
+
+### P2 exit-criterion eval
+
+```bash
+ssh mcssh "cd /mnt/storage/NAS/Jarvis/jarvis && \
+  /mnt/storage/NAS/Jarvis/.venv/bin/python -m tests.fixtures.populate_workspace --root /tmp/p2-eval && \
+  JARVIS_WORKSPACE=/tmp/p2-eval /mnt/storage/NAS/Jarvis/.venv/bin/jarvis reconcile && \
+  for q in 'rocket fin' 'typescript' 'daily log' 'jarvis-rebuild' 'garden' \
+           'standup' 'preferences' 'fast model' 'grant' 'reconcile'; do \
+    echo == \"\$q\" ==; \
+    JARVIS_WORKSPACE=/tmp/p2-eval /mnt/storage/NAS/Jarvis/.venv/bin/jarvis search \"\$q\" -k 3; \
+  done > /tmp/p2-search-before.txt"
+
+# Disposability — search output must be byte-equal across delete+rebuild.
+ssh mcssh "rm /tmp/p2-eval/.index/memory.sqlite && \
+  JARVIS_WORKSPACE=/tmp/p2-eval /mnt/storage/NAS/Jarvis/.venv/bin/jarvis reconcile && \
+  for q in 'rocket fin' 'typescript' 'daily log' 'jarvis-rebuild' 'garden' \
+           'standup' 'preferences' 'fast model' 'grant' 'reconcile'; do \
+    echo == \"\$q\" ==; \
+    JARVIS_WORKSPACE=/tmp/p2-eval /mnt/storage/NAS/Jarvis/.venv/bin/jarvis search \"\$q\" -k 3; \
+  done > /tmp/p2-search-after.txt && \
+  diff /tmp/p2-search-before.txt /tmp/p2-search-after.txt"
+```
 
 ## Layout
 

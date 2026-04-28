@@ -23,7 +23,7 @@ __all__ = ["ChannelKind", "PROMPT_SIZE_WARN_BYTES", "assemble_system_prompt"]
 
 logger = logging.getLogger(__name__)
 
-ChannelKind = Literal["dm", "group", "heartbeat"]
+ChannelKind = Literal["dm", "group", "heartbeat", "cli"]
 
 # ~5K tokens. P3 retrieval will replace whole-file loads with hybrid search;
 # this is an early-warning trip so we notice ballooning before P5 hits a
@@ -71,7 +71,10 @@ def assemble_system_prompt(
 
     sections: list[str] = []
 
-    if channel_kind == "dm":
+    # CLI channel uses the same prompt scaffold as DM — single user, full memory
+    # access. Branch comparison stays explicit so the assertion-free narrowing
+    # that Literal provides isn't lost.
+    if channel_kind in ("dm", "cli"):
         sections.append(_section("USER.md", read_markdown(paths.user_md)))
         sections.append(_section("MEMORY.md", read_markdown(paths.memory_md)))
 
