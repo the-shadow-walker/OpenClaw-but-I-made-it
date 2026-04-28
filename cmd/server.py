@@ -287,6 +287,37 @@ class JobRunner:
                     searxng_url=job.get('searxng_url', 'http://10.0.0.58:8080')
                 )
                 agent.current_job_id = job_id
+                # Thread mode/master_mode onto the agent for downstream visibility
+                # (BUILD_SPEC §14 / Jarvis P10). When master_mode is set, this
+                # dispatch is subordinate — the runner takes a reduced-autonomy
+                # posture: tighter iteration cap + a pinned slot telling the model
+                # to stay in its specialty and defer ambiguous high-level
+                # decisions back to the master. None when not subordinate.
+                agent.mode = job.get('mode')
+                agent.master_mode = job.get('master_mode')
+                if agent.master_mode:
+                    # Reduced-autonomy posture for subordinate dispatches.
+                    # Cap iterations at 75% of the runner's default (rounded
+                    # to the nearest int, min 8). The actual cap may still be
+                    # overridden by an explicit job['max_iterations'] below —
+                    # callers who want the full budget can opt out by passing
+                    # max_iterations explicitly.
+                    _default_iters = int(getattr(agent, 'max_react_iterations', 50) or 50)
+                    agent.max_react_iterations = max(8, int(_default_iters * 0.75))
+                    # Pin a deferral slot so the model sees its subordinate
+                    # status on every iteration regardless of compaction.
+                    agent.pinned_messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[SUBORDINATE MODE]\n"
+                            f"You are dispatched as a subordinate runner. The master "
+                            f"is operating in '{agent.master_mode}' mode and owns the "
+                            f"high-level direction of this conversation. Your job: "
+                            f"complete your specialty cleanly and report. Do NOT "
+                            f"expand scope, do NOT take ambiguous follow-up "
+                            f"decisions on the master's behalf — finish and defer."
+                        ),
+                    })
                 
                 # Capture output — thread-local so concurrent workers don't conflict
                 output_buffer = []
@@ -366,6 +397,26 @@ class JobRunner:
                             raise RuntimeError("gui_agent module not available")
                         gui = _GUIAgent()
                         gui.agent.current_job_id = job_id
+                        # Mirror mode/master_mode onto the GUIAgent's inner ReAct
+                        # agent so the same subordinate posture applies on the GUI
+                        # side (BUILD_SPEC §14 / Jarvis P10).
+                        gui.agent.mode = job.get('mode')
+                        gui.agent.master_mode = job.get('master_mode')
+                        if gui.agent.master_mode:
+                            _gui_default = int(getattr(gui.agent, 'max_react_iterations', 30) or 30)
+                            gui.agent.max_react_iterations = max(8, int(_gui_default * 0.75))
+                            gui.agent.pinned_messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"[SUBORDINATE MODE]\n"
+                                    f"You are dispatched as a subordinate GUI runner. "
+                                    f"The master is operating in "
+                                    f"'{gui.agent.master_mode}' mode and owns the "
+                                    f"high-level direction. Complete the GUI specialty "
+                                    f"cleanly and report. Do NOT expand scope or take "
+                                    f"ambiguous follow-up decisions for the master."
+                                ),
+                            })
                         result = gui.run(
                             task=job['instruction'],
                             max_iterations=job.get('max_iterations', 30),
@@ -1153,13 +1204,20 @@ def execute_command():
         "model": "qwen3.6:35b-Grindlewalt",  // optional
         "searxng_url": "http://...",  // optional
         "async": true,  // optional, default true
-        "context_keys": ["project.workspace", "rocket.research"]  // optional
-                                                                  // INTEGRATION_CONTRACT §2:
-                                                                  // shared_context keys to
-                                                                  // pre-load into the agent's
-                                                                  // pinned slots before run.
-                                                                  // Missing keys are silently
-                                                                  // skipped (TTL expiry, etc).
+        "context_keys": ["project.workspace", "rocket.research"],  // optional
+                                                                   // INTEGRATION_CONTRACT §2:
+                                                                   // shared_context keys to
+                                                                   // pre-load into the agent's
+                                                                   // pinned slots before run.
+                                                                   // Missing keys are silently
+                                                                   // skipped (TTL expiry, etc).
+        "mode": "code" | "gui",  // optional — picks which CMD runner to spin up.
+                                 // Absent → legacy code/ReAct path (backward-compatible).
+                                 // BUILD_SPEC §14 / Jarvis P10 master/subordinate arbitration.
+        "master_mode": "code" | "gui"  // optional — present ONLY when this dispatch is
+                                       // subordinate to a master of the named mode. The
+                                       // subordinate runner takes a reduced-autonomy posture.
+                                       // Field omitted (never null) when not subordinate.
     }
     
     Returns:
@@ -1189,6 +1247,27 @@ def execute_command():
                 'error': "context_keys must be a list of non-empty strings"
             }), 400
 
+    # Parse optional mode / master_mode (BUILD_SPEC §14 / Jarvis P10).
+    # `mode` selects the CMD runner: "code" → ReAct loop (default), "gui" → GUIAgent.
+    # `master_mode` (when present) signals this dispatch is subordinate to a master
+    # of the named mode; the runner enters a reduced-autonomy posture (tighter
+    # iteration budget, deferral pin telling it to stay in its specialty and
+    # report rather than expand scope). Both fields are optional and additive —
+    # legacy callers omitting them keep the existing ReAct path unchanged.
+    _ALLOWED_MODES = {"code", "gui"}
+    mode_in = data.get('mode')
+    if mode_in is not None:
+        if not isinstance(mode_in, str) or mode_in not in _ALLOWED_MODES:
+            return jsonify({
+                'error': "mode must be one of: code, gui"
+            }), 400
+    master_mode_in = data.get('master_mode')
+    if master_mode_in is not None:
+        if not isinstance(master_mode_in, str) or master_mode_in not in _ALLOWED_MODES:
+            return jsonify({
+                'error': "master_mode must be one of: code, gui"
+            }), 400
+
     # Create job
     job_id = str(uuid.uuid4())
     job = {
@@ -1197,12 +1276,28 @@ def execute_command():
         'model': data.get('model', 'qwen3.6:35b-Grindlewalt'),
         'searxng_url': data.get('searxng_url', 'http://10.0.0.58:8080'),
         'context_keys': list(context_keys_in),
+        'mode': mode_in,                  # None | "code" | "gui"
+        'master_mode': master_mode_in,    # None | "code" | "gui"
         'status': 'queued',
         'created_at': datetime.now().isoformat(),
         'output': '',
         'execution_log': [],
         'success': None
     }
+    # When mode=="gui", set job_type so the worker's existing gui_task branch
+    # picks it up. When mode=="code" or absent, leave job_type unset → falls
+    # through to the legacy ReAct path. Stays backward compatible.
+    if mode_in == "gui":
+        job['job_type'] = 'gui_task'
+
+    # Single-line invocation log so Jarvis can verify CMD actually read the
+    # values via `journalctl -u ollama-cmd`. Mirrors the
+    # "[worker] injected ... context_keys" log pattern from the
+    # 2026-04-27T16:50 stanza.
+    _original_print(
+        f"[execute] job {job_id[:8]} mode={mode_in!r} master_mode={master_mode_in!r}",
+        flush=True,
+    )
     
     jobs[job_id] = job
     
