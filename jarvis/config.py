@@ -29,6 +29,8 @@ DEFAULT_CONFIG_PATH = "~/.config/jarvis/config.yaml"
 KNOWN_MODEL_WINDOWS: dict[str, int] = {
     "qwen2.5:3b": 32768,
     "qwen3.6:35b-chain": 262144,
+    "batiai/qwen3.6-27b:iq4": 262144,
+    "batiai/qwen3.6-35b:q3": 262144,
     # add more as deployments switch models
 }
 
@@ -239,6 +241,18 @@ class HeartbeatConfig(BaseModel):
     checklist_path: Path = Path("workspace/HEARTBEAT.md")
 
 
+class EmailConfig(BaseModel):
+    """Gmail tool wiring. Off by default; opt in by setting ``enabled: true``
+    in config.yaml *and* placing a token at ``token_path``."""
+    enabled: bool = False
+    token_path: Path = Path("~/.config/jarvis/gmail_token.pickle")
+
+    @field_validator("token_path", mode="before")
+    @classmethod
+    def _expand(cls, v: Any) -> Path:
+        return Path(os.path.expandvars(os.path.expanduser(str(v))))
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -255,6 +269,7 @@ class JarvisConfig(BaseModel):
     orchestration: OrchestrationConfig = Field(default_factory=OrchestrationConfig)
     mirror: MirrorConfig = Field(default_factory=MirrorConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    email: EmailConfig = Field(default_factory=EmailConfig)
 
     model_config = {"extra": "forbid"}   # typo guard — unknown YAML keys fail loudly
 

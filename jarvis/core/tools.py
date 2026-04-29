@@ -30,6 +30,7 @@ from jarvis.memory.workspace import WorkspacePaths
 
 if TYPE_CHECKING:
     from jarvis.clients.cmd import CMDClient
+    from jarvis.clients.gmail import GmailClient
     from jarvis.clients.ollama import OllamaClient
     from jarvis.clients.swarm import SwarmClient
     from jarvis.config import JarvisConfig
@@ -176,6 +177,53 @@ _DELEGATE_PARAMS: dict = {
     },
     "required": ["target", "task"],
 }
+
+
+_EMAIL_SEARCH_PARAMS: dict = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Gmail search syntax. Empty returns most recent. Examples: "
+                "'is:unread', 'from:foo@bar.com', 'subject:invoice', "
+                "'newer_than:2d', 'has:attachment'. Combine: "
+                "'from:school is:unread newer_than:7d'."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "description": "Max messages to return (default 10).",
+            "default": 10,
+        },
+    },
+    "required": [],
+}
+
+_EMAIL_READ_PARAMS: dict = {
+    "type": "object",
+    "properties": {
+        "email_id": {
+            "type": "string",
+            "description": "Gmail message id (from email_search results).",
+        },
+    },
+    "required": ["email_id"],
+}
+
+_EMAIL_SEND_PARAMS: dict = {
+    "type": "object",
+    "properties": {
+        "to": {"type": "string", "description": "Primary recipient(s), comma-separated."},
+        "subject": {"type": "string", "description": "Subject line."},
+        "body": {"type": "string", "description": "Plain-text body."},
+        "cc": {"type": "string", "description": "Optional CC recipient(s)."},
+        "bcc": {"type": "string", "description": "Optional BCC recipient(s)."},
+    },
+    "required": ["to", "subject", "body"],
+}
+
+_EMAIL_DRAFT_PARAMS: dict = _EMAIL_SEND_PARAMS  # same shape, different verb
 
 
 _PLAN_AND_EXECUTE_PARAMS: dict = {
@@ -376,6 +424,7 @@ def build_default_registry(
     swarm_client: SwarmClient | None = None,
     ollama: OllamaClient | None = None,
     cfg: JarvisConfig | None = None,
+    gmail_client: GmailClient | None = None,
 ) -> ToolRegistry:
     """Wire the four P5 tools into a fresh registry.
 
@@ -472,6 +521,65 @@ def build_default_registry(
         and ollama is not None
         and cfg is not None
     )
+    # Email tools (P11): only when gmail_client is wired.
+    if gmail_client is not None:
+        from jarvis.mail.tool_email import (
+            email_draft_tool,
+            email_read_tool,
+            email_search_tool,
+            email_send_tool,
+        )
+
+        registry.register(
+            ToolSpec(
+                name="email_search",
+                description=(
+                    "List or search Gmail messages. Returns compact "
+                    "summaries (id, from, subject, date, snippet, "
+                    "unread). Use Gmail search syntax in 'query'."
+                ),
+                parameters=_EMAIL_SEARCH_PARAMS,
+                handler=lambda **kw: email_search_tool(**kw, gmail=gmail_client),
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="email_read",
+                description=(
+                    "Fetch one Gmail message in full (headers + body). "
+                    "Body is truncated at 8000 chars; check "
+                    "'body_truncated' if you need to know."
+                ),
+                parameters=_EMAIL_READ_PARAMS,
+                handler=lambda **kw: email_read_tool(**kw, gmail=gmail_client),
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="email_send",
+                description=(
+                    "Send a plain-text email. ALWAYS confirm with the "
+                    "user (recipient, subject, body) before calling — "
+                    "this leaves the system. Prefer email_draft if the "
+                    "user hasn't explicitly said 'send it'."
+                ),
+                parameters=_EMAIL_SEND_PARAMS,
+                handler=lambda **kw: email_send_tool(**kw, gmail=gmail_client),
+            )
+        )
+        registry.register(
+            ToolSpec(
+                name="email_draft",
+                description=(
+                    "Save a Gmail draft (does NOT send). Safer default "
+                    "than email_send — user can review in Gmail UI "
+                    "before they hit send themselves."
+                ),
+                parameters=_EMAIL_DRAFT_PARAMS,
+                handler=lambda **kw: email_draft_tool(**kw, gmail=gmail_client),
+            )
+        )
+
     if plan_ready:
         plan_handler = _build_plan_and_execute_handler(
             ollama=ollama,            # type: ignore[arg-type]

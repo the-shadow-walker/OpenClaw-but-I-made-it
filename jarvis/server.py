@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from jarvis.clients.cmd import CMDClient
+from jarvis.clients.gmail import GmailClient
 from jarvis.clients.ollama import OllamaClient
 from jarvis.clients.swarm import SwarmClient
 from jarvis.config import JarvisConfig
@@ -93,6 +94,7 @@ def create_app(
     cmd_client: CMDClient | None = None,
     swarm_client: SwarmClient | None = None,
     arbiter: RoleArbiter | None = None,
+    gmail_client: GmailClient | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with all dependencies pre-wired.
 
@@ -159,7 +161,7 @@ def create_app(
             _ndjson_stream(req, paths=paths, cfg=cfg, indexer=indexer,
                            ollama=ollama, embedder=embedder, convo_cfg=convo_cfg,
                            cmd_client=cmd_client, swarm_client=swarm_client,
-                           arbiter=arbiter),
+                           arbiter=arbiter, gmail_client=gmail_client),
             media_type="application/x-ndjson",
         )
 
@@ -178,6 +180,7 @@ def _ndjson_stream(
     cmd_client: CMDClient | None,
     swarm_client: SwarmClient | None,
     arbiter: RoleArbiter,
+    gmail_client: GmailClient | None = None,
 ) -> Iterator[bytes]:
     """Wrap ``run_turn`` and emit one NDJSON line per yielded event.
 
@@ -216,6 +219,7 @@ def _ndjson_stream(
         shared_board=cfg.paths.shared_board,
         ollama=ollama,
         cfg=cfg,
+        gmail_client=gmail_client,
     )
 
     try:

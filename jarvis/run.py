@@ -18,6 +18,7 @@ import uvicorn
 
 from jarvis.bootstrap import apply_workspace_override, setup_logging
 from jarvis.clients.cmd import CMDClient
+from jarvis.clients.gmail import GmailClient
 from jarvis.clients.ollama import OllamaClient
 from jarvis.clients.swarm import SwarmClient
 from jarvis.config import load_config
@@ -80,6 +81,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     arbiter = RoleArbiter()
 
+    gmail_client: GmailClient | None = None
+    if cfg.email.enabled:
+        gmail_client = GmailClient(token_path=cfg.email.token_path)
+        logger.info("gmail: client wired (token=%s)", cfg.email.token_path)
+    else:
+        logger.info("gmail: disabled (set email.enabled: true to enable)")
+
     convo_cfg = ConversationConfig.from_jarvis_config(cfg)
 
     def _close_no_summary(channel_kinds: list[str]) -> None:
@@ -117,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         paths=paths, cfg=cfg, indexer=indexer,
         ollama=ollama, embedder=indexer.embedder,
         cmd_client=cmd_client, swarm_client=swarm_client,
-        arbiter=arbiter,
+        arbiter=arbiter, gmail_client=gmail_client,
     )
 
     uv_config = uvicorn.Config(
