@@ -213,6 +213,14 @@ class _ProgressRouter:
                         f.write(line + '\n')
                     except Exception:
                         pass
+                # Swarm 3.19 — also tee to job_manager.progress_log so /stream/<id>
+                # (which reads from progress_log) works for /query_async clients
+                # like the dashboard.  Previously only /query_stream consumers ever
+                # populated this, so async clients saw a permanently empty stream.
+                try:
+                    job_manager.append_log(job_id, line)
+                except (NameError, AttributeError):
+                    pass  # job_manager not yet defined at very early import time
         self._local.buf = buf
 
     def flush(self):
