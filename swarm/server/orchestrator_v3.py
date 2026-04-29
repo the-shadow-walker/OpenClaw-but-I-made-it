@@ -151,7 +151,7 @@ class OrchestratorV3:
         self.status = None
 
         _think_state = "on" if os.getenv("SWARM_THINK", "0") == "1" else "off"
-        print(f"🚀 Swarm 3.18 OrchestratorV3  —  default:{_MODEL_DEFAULT} | think:{_think_state}")
+        print(f"🚀 Swarm 3.19 OrchestratorV3  —  default:{_MODEL_DEFAULT} | think:{_think_state}")
         print(f"   planner:{_MODEL_SMART_PLANNER} (json-mode) | reasoner:{_MODEL_REASONER} | coder:{_MODEL_CODER}")
         print("   ✅ ReAct solver pipeline (MATHEMATICAL/HYBRID)")
         print("   ✅ Delegation to V2_1 (THEORETICAL/UNKNOWN)")
@@ -281,7 +281,8 @@ class OrchestratorV3:
         requirements: List = []
         if _HAS_PLANNER_V2:
             plan, requirements = await PlannerV2.create_plan(
-                question, classification, self._llm_query_planner
+                question, classification, self._llm_query_planner,
+                job_id=self._job_id,   # Swarm 3.19 — for raw-output dump on parse failure
             )
         else:
             print("⚠️  PlannerV2 not available — single-SP fallback")
@@ -1952,8 +1953,11 @@ Rules:
         )
 
     async def _llm_query_planner(self, prompt: str, system_prompt: str = "") -> str:
-        """qwq:32b — Lead Architect: deep CoT for requirement shredding + SP decomposition.
-        keep_alive uses default (600s) — explicit unload happens before solver if needed."""
+        """Smart Planner — Lead Architect: deep CoT for requirement shredding + SP decomposition.
+        keep_alive uses default (600s) — explicit unload happens before solver if needed.
+        Swarm 3.19: temperature 0.1 (from 0.6) — JSON-mode + low-temp is more reliable on
+        grammar-constrained MoE models. num_predict 8192 (from 4096) gives chain models
+        headroom for their CoT before the JSON object."""
         system = system_prompt or (
             "You are the Lead Systems Architect. You are being evaluated on COMPLETENESS. "
             "Every distinct mathematical operation, integral, series, chemical reaction, "
@@ -1966,8 +1970,9 @@ Rules:
             prompt=prompt,
             system=system,
             timeout=600,        # 10 min ceiling for planning
-            num_predict=4096,   # JSON plan fits well within 4k tokens
+            num_predict=8192,   # Swarm 3.19 — chain models need CoT + JSON headroom
             format="json",      # Swarm 3.18 — force structured JSON output
+            temperature=0.1,    # Swarm 3.19 — cold-blooded JSON, no creative drift
         )
 
     async def _llm_query_fallback(self, prompt: str, system_prompt: str = "") -> str:
@@ -1994,6 +1999,7 @@ Rules:
         keep_alive: int = 600,
         format: Optional[str] = None,   # Swarm 3.18 — set "json" for structured output
         emit_chunks: bool = False,      # Swarm 3.20 — emit ORCH_THINK per delta for dashboard
+        temperature: float = 0.6,        # Swarm 3.19 — caller can override (planner uses 0.1)
     ) -> str:
         """Direct Ollama /api/chat call using streaming (avoids HTTP timeout on large models)."""
         messages = []
@@ -2008,7 +2014,7 @@ Rules:
             "keep_alive": keep_alive,
             # NOTE: do NOT pass "think" — Ollama 0.17+ rejects it for qwq/deepseek models.
             "options": {
-                "temperature": 0.6,
+                "temperature": temperature,
                 "num_predict": num_predict,
                 "num_ctx": _NUM_CTX,
             },

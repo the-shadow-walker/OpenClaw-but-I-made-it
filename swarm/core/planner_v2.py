@@ -53,6 +53,23 @@ def _extract_json(text: str) -> dict:
     raise ValueError("No JSON object found in LLM response")
 
 
+# ── Debug helper (Swarm 3.19) ────────────────────────────────────────────────
+
+def _dump_raw(job_id: str, label: str, raw: str) -> None:
+    """Persist a raw LLM response to swarm_results/debug/<job_id>/<label>.txt.
+    Silent no-op if job_id missing or directory cannot be created — debug only."""
+    if not job_id:
+        return
+    try:
+        import pathlib
+        d = pathlib.Path("./swarm_results/debug") / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{label}.txt").write_text(raw or "<empty>", encoding="utf-8")
+        print(f"  📁 Raw planner output → swarm_results/debug/{job_id}/{label}.txt ({len(raw or '')} chars)")
+    except Exception:
+        pass  # debug only — never crash the planner over logging
+
+
 # ── Data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -281,13 +298,14 @@ class PlannerV2:
         question: str,
         classification,              # ClassificationResult or None
         llm_query_func: Callable,    # async (prompt, system) → str
+        job_id: str = "",            # Swarm 3.19 — optional, used for raw-output dump on failure
     ) -> Tuple["SolvePlan", List["Requirement"]]:
         """
         Generate and return (SolvePlan, List[Requirement]).
         Falls back to a single-SP plan wrapping the whole question on any failure.
         """
         # ── Step 1: Extract requirements (Requirement Shredder) ───────────────
-        requirements = await PlannerV2.extract_requirements(question, llm_query_func)
+        requirements = await PlannerV2.extract_requirements(question, llm_query_func, job_id=job_id)
         print(f"📝 Requirements: {len(requirements)} extracted"
               + (f" [{', '.join(r.id for r in requirements)}]" if requirements else ""))
 
@@ -349,6 +367,7 @@ class PlannerV2:
                 plan = PlannerV2._parse_plan(question, raw, classification, requirements)
             except (ValueError, KeyError, TypeError) as parse_err:
                 print(f"⚠️  PlannerV2 parse failed ({parse_err}) — retrying with stricter reminder")
+                _dump_raw(job_id, "planner_raw_attempt1", raw)  # Swarm 3.19 — capture for diagnosis
                 strict_prompt = (
                     prompt
                     + "\n\nIMPORTANT: Your previous reply was not valid JSON. "
@@ -356,7 +375,40 @@ class PlannerV2:
                     + "Begin with `{` and end with `}`."
                 )
                 raw = await llm_query_func(strict_prompt, system)
-                plan = PlannerV2._parse_plan(question, raw, classification, requirements)
+                try:
+                    plan = PlannerV2._parse_plan(question, raw, classification, requirements)
+                except (ValueError, KeyError, TypeError) as parse_err2:
+                    _dump_raw(job_id, "planner_raw_attempt2", raw)
+                    raise  # bubbles to outer except → fallback plan
+
+            # Swarm 3.19 — SP-count guardrail: if model emitted a lazy single-SP plan
+            # for a multi-requirement question, fire a third retry with explicit
+            # "one SP per requirement" mandate before accepting it.
+            if len(plan.sub_problems) == 1 and len(requirements) >= 5:
+                print(f"🚨 SP-COUNT GUARD: {len(requirements)} requirements but only 1 SP — "
+                      f"replanning with explicit one-SP-per-requirement mandate")
+                req_ids = ", ".join(r.id for r in requirements)
+                guard_prompt = (
+                    prompt
+                    + f"\n\n🚨 CRITICAL: Your previous plan had only 1 sub-problem, "
+                    + f"but there are {len(requirements)} distinct requirements ({req_ids}). "
+                    + "You MUST emit EXACTLY ONE sub-problem per requirement. "
+                    + "Do NOT merge them. Do NOT combine math + chemistry + physics into a "
+                    + "single SP. Each domain gets its own SP. Output the corrected JSON now."
+                )
+                try:
+                    raw3 = await llm_query_func(guard_prompt, system)
+                    plan3 = PlannerV2._parse_plan(question, raw3, classification, requirements)
+                    if len(plan3.sub_problems) > 1:
+                        print(f"  ✅ SP-count guard recovered: {len(plan3.sub_problems)} SPs now")
+                        plan = plan3
+                    else:
+                        _dump_raw(job_id, "planner_raw_guard_failed", raw3)
+                        print(f"  ⚠️  SP-count guard retry still emitted 1 SP — accepting lazy plan")
+                except Exception as guard_err:
+                    _dump_raw(job_id, "planner_raw_guard_error", str(guard_err))
+                    print(f"  ⚠️  SP-count guard retry crashed ({guard_err}) — accepting original plan")
+
             print(f"📋 SolvePlan: {len(plan.sub_problems)} sub-problem(s), "
                   f"order: {plan.dependency_order}")
             return plan, requirements
@@ -371,6 +423,7 @@ class PlannerV2:
     async def extract_requirements(
         question: str,
         llm_query_func: Callable,
+        job_id: str = "",            # Swarm 3.19 — optional, used for raw-output dump on failure
     ) -> List["Requirement"]:
         """
         Pre-planning step: extract all distinct tasks and negative constraints
@@ -391,6 +444,7 @@ class PlannerV2:
                 data = _extract_json(raw)
             except ValueError:
                 print("⚠️  extract_requirements: no JSON in first reply — retrying")
+                _dump_raw(job_id, "requirements_raw_attempt1", raw)  # Swarm 3.19
                 strict_prompt = (
                     prompt
                     + "\n\nIMPORTANT: Your previous reply was not valid JSON. "
@@ -398,7 +452,11 @@ class PlannerV2:
                     + "Begin with `{` and end with `}`."
                 )
                 raw = await llm_query_func(strict_prompt, system)
-                data = _extract_json(raw)
+                try:
+                    data = _extract_json(raw)
+                except ValueError:
+                    _dump_raw(job_id, "requirements_raw_attempt2", raw)
+                    raise
             reqs = []
             for item in data.get("requirements", []):
                 reqs.append(Requirement(
