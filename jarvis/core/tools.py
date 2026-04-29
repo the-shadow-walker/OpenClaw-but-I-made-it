@@ -25,6 +25,7 @@ from jarvis.core.conversation import ChannelKind
 from jarvis.memory.embeddings import EmbeddingPipeline
 from jarvis.memory.tool_get import memory_get_tool
 from jarvis.memory.tool_search import memory_search_tool
+from jarvis.memory.tool_user_profile import user_profile_append_tool
 from jarvis.memory.tool_write import memory_write_tool
 from jarvis.memory.workspace import WorkspacePaths
 
@@ -160,6 +161,30 @@ _MEMORY_WRITE_PARAMS: dict = {
     },
     "required": ["content"],
 }
+
+_USER_PROFILE_APPEND_PARAMS: dict = {
+    "type": "object",
+    "properties": {
+        "section": {
+            "type": "string",
+            "description": (
+                "H2 heading to append under (e.g. 'Identity', 'School', "
+                "'Daily Life', 'Relationships', 'Projects', 'Preferences'). "
+                "Created if missing. Match is case-insensitive."
+            ),
+        },
+        "content": {
+            "type": "string",
+            "description": (
+                "The fact to record about the user, as a single bullet. "
+                "Concise and durable — written exactly as it'll appear "
+                "in USER.md."
+            ),
+        },
+    },
+    "required": ["section", "content"],
+}
+
 
 _DELEGATE_PARAMS: dict = {
     "type": "object",
@@ -471,6 +496,21 @@ def build_default_registry(
             ),
             parameters=_MEMORY_WRITE_PARAMS,
             handler=lambda **kw: memory_write_tool(**kw, paths=paths),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="user_profile_append",
+            description=(
+                "Append a bullet to USER.md under a named H2 section "
+                "(e.g. Identity, School, Daily Life, Relationships, "
+                "Projects, Preferences). Use this for durable identity "
+                "facts about the user — name, age, schedule, preferences "
+                "— so they live in the system prompt forever. The "
+                "onboarding flow uses this for every answer."
+            ),
+            parameters=_USER_PROFILE_APPEND_PARAMS,
+            handler=lambda **kw: user_profile_append_tool(**kw, paths=paths),
         )
     )
     delegation_ready = (

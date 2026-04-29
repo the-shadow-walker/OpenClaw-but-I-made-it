@@ -95,7 +95,10 @@ def test_schemas_shape():
 
 def test_default_registry_has_all_four_tools(conn, paths):
     r = build_default_registry(conn=conn, embedder=None, paths=paths, channel_kind="dm")
-    assert set(r.names()) == {"memory_search", "memory_get", "memory_write", "delegate"}
+    assert set(r.names()) == {
+        "memory_search", "memory_get", "memory_write",
+        "user_profile_append", "delegate",
+    }
 
 
 def test_delegate_stub_returns_error(conn, paths):

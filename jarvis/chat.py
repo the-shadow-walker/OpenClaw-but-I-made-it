@@ -7,6 +7,9 @@ single-line status indicators.
 
 Slash commands handled client-side before posting:
   * ``/new`` — POST /api/session again, replace the active ``conv_id``.
+  * ``/onboard`` — flip on the get-to-know-you mode. Sets
+    ``active_project_slug=onboarding`` for subsequent turns and primes
+    Jarvis with a kickoff message. ``/onboard off`` clears it.
   * ``/quit`` — exit.
 
 Any tool argument printed in the trace is ``repr()``-truncated to keep
@@ -122,7 +125,12 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"[red]session failed: {e}[/red]")
             return 1
         console.print(f"[dim]conv_id={conv_id}[/dim]")
-        console.print("[dim]/new = new conversation, /quit = exit[/dim]")
+        console.print(
+            "[dim]/new = new conversation, /onboard [off] = "
+            "get-to-know-you mode, /quit = exit[/dim]"
+        )
+
+        active_project: str | None = None
 
         while True:
             try:
@@ -143,7 +151,26 @@ def main(argv: list[str] | None = None) -> int:
                     console.print(f"[red]session failed: {e}[/red]")
                     continue
                 console.print(f"[dim]conv_id={conv_id}[/dim]")
+                active_project = None
                 continue
+            if text in ("/onboard off", "/onboard stop"):
+                active_project = None
+                console.print("[dim]onboarding mode off[/dim]")
+                continue
+            if text == "/onboard":
+                active_project = "onboarding"
+                console.print("[dim]onboarding mode on — projects/onboarding.md is now in the prompt[/dim]")
+                # Replace the user input with a priming message so Jarvis
+                # opens the conversation rather than waiting for a question.
+                text = (
+                    "Begin the onboarding pass. Read USER.md to see what "
+                    "you already know about me, then pick the section "
+                    "with the most gaps and ask me 2-3 questions from "
+                    "projects/onboarding.md. Save each answer with "
+                    "user_profile_append. Stay conversational — this is "
+                    "a chat, not a survey."
+                )
+                # Fall through to the normal POST path with text replaced.
 
             payload = {
                 "conv_id": conv_id,
@@ -151,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                 "channel_kind": args.channel_kind,
                 "channel_id": args.channel_id,
             }
+            if active_project:
+                payload["active_project_slug"] = active_project
             try:
                 with cli.stream("POST", "/api/chat", json=payload) as resp:
                     if resp.status_code != 200:
