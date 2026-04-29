@@ -558,13 +558,41 @@ input[type=text]:focus,textarea:focus,select:focus{outline:none;border-color:var
   </div>
 </section>
     <section data-route="cmd">
-  <div class="page-title">Cmd <span class="crumb">· bash on the server (auth + denylist)</span></div>
-  <div class="cmd-shell">
-    <div class="cmd-output" id="cmd-output"><span class="info">▸ Bash terminal — type a command and press enter. ↑/↓ for history.  Ctrl+L clears.</span></div>
-    <div class="cmd-input-row">
-      <span class="marker">$</span>
-      <input id="cmd-input" type="text" autocomplete="off" spellcheck="false" placeholder="ls /tmp" />
-      <button class="btn primary" id="cmd-run">Run</button>
+  <div class="page-title">CMD Agent <span class="crumb">· integration plan / placeholder</span></div>
+  <div class="card">
+    <h2>What this page is for</h2>
+    <p style="color:var(--text-dim);line-height:1.55;margin:6px 0 12px;">
+      This is the seat for the <b>CMD agent</b> (the autonomous shell/desktop operator that lives in
+      <code>cmd/guiagent/</code> on the server). It is <b>not</b> a bash REPL — Swarm's job tree and the CMD
+      agent are different processes. When CMD's HTTP surface lands, this page is where its live activity will plug in.
+    </p>
+
+    <h2>Where CMD will plug in</h2>
+    <ul style="color:var(--text);line-height:1.6;margin:6px 0 14px 18px;">
+      <li><b>Live screen + thoughts</b> → SSE feed at <code>http://10.0.0.58:5005/stream</code>
+        (already wired into the <a href="#/gui">GUI</a> page; will mirror here with the agent's reasoning trace).</li>
+      <li><b>Latest screenshot</b> → <code>GET http://10.0.0.58:5005/screenshot</code>.</li>
+      <li><b>Goal submit</b> → <code>POST http://10.0.0.58:5005/goal</code> (planned) — fires off a CMD task and
+        returns a <code>task_id</code> we can stream below.</li>
+      <li><b>Task tree</b> → CMD emits <code>step / tool / observation</code> events that will render as a
+        family-tree similar to Swarm's <a href="#/jobs">job tree</a>.</li>
+    </ul>
+
+    <h2>Typical CMD plan</h2>
+    <ol style="color:var(--text);line-height:1.65;margin:6px 0 14px 18px;">
+      <li><b>Goal received</b> — natural-language request (e.g. "open Brave, search docs, copy the URL").</li>
+      <li><b>Plan</b> — CMD breaks it into actionable steps (open app, locate UI element, type, click, verify).</li>
+      <li><b>Per-step ReAct loop</b> — screenshot → reason → tool call (mouse/keyboard/shell) → observe → repeat.</li>
+      <li><b>Verification</b> — success criteria checked from the next screenshot or shell stdout.</li>
+      <li><b>Result</b> — final artifact (URL, file path, exit code) returned to the originating job/user.</li>
+    </ol>
+
+    <div style="display:flex;gap:10px;align-items:center;margin-top:14px;padding:10px 12px;border:1px dashed var(--border);border-radius:8px;background:var(--bg-elev);">
+      <span class="badge" style="background:var(--slate);color:#fff;">PLACEHOLDER</span>
+      <span style="color:var(--text-dim);font-size:12px;">
+        Hand-off pending CMD agent endpoints. Once <code>:5005</code> exposes <code>/goal</code> + task SSE,
+        wire them into <code>PAGE_INIT.cmd</code> below.
+      </span>
     </div>
   </div>
 </section>
@@ -946,7 +974,13 @@ function dispatchJobEvent(ev){
     }
 
     case 'agent': {
-      state.agentModel = ev.model || '';
+      let m = ev.model;
+      if (m && typeof m === 'object'){
+        // Model can arrive as a chain mapping (planner/solver/writer → name)
+        const vals = Array.isArray(m) ? m : Object.values(m);
+        m = vals.filter(Boolean).join(' → ');
+      }
+      state.agentModel = m || '';
       $('stat-model') && ($('stat-model').innerHTML = `MODEL <b>${escapeHtml(state.agentModel||'—')}</b>`);
       break;
     }
@@ -1405,20 +1439,25 @@ PAGE_INIT.dashboard = () => {
 
 function renderDashboardSystem(){
   const m = state.metrics;
-  if (!m || !m.gpu){
+  if (!m){
     $('dash-gpu-name') && ($('dash-gpu-name').textContent = '—');
     return;
   }
-  const g = m.gpu;
-  if (g.error){
-    $('dash-gpu-name').textContent = 'driver mismatch / unavailable';
-    return;
+  const g = m.gpu || {};
+  const gpuOk = !g.error && (g.name || g.mem_total_mb);
+  if (gpuOk){
+    $('dash-gpu-name').textContent = g.name || '—';
+    $('dash-gpu-fill').style.width = (g.mem_pct||0) + '%';
+    $('dash-vram').textContent     = `${g.mem_used_mb||0} / ${g.mem_total_mb||0} MB`;
+    $('dash-gpu-pct').textContent  = (g.gpu_pct||0) + '%';
+    $('dash-temp').textContent     = (g.temp_c||0) + '°C';
+  } else {
+    $('dash-gpu-name').textContent = g.error ? 'GPU unavailable (nvidia-smi parse error)' : 'GPU offline';
+    $('dash-gpu-fill').style.width = '0%';
+    $('dash-vram').textContent     = '—';
+    $('dash-gpu-pct').textContent  = '—';
+    $('dash-temp').textContent     = '—';
   }
-  $('dash-gpu-name').textContent = g.name || '—';
-  $('dash-gpu-fill').style.width = (g.mem_pct||0) + '%';
-  $('dash-vram').textContent     = `${g.mem_used_mb||0} / ${g.mem_total_mb||0} MB`;
-  $('dash-gpu-pct').textContent  = (g.gpu_pct||0) + '%';
-  $('dash-temp').textContent     = (g.temp_c||0) + '°C';
   if (m.cpu_pct != null) $('dash-cpu').textContent = m.cpu_pct.toFixed(0)+'%';
   if (m.mem_pct != null) $('dash-ram').textContent = m.mem_pct.toFixed(0)+'%';
   // Sparkline
@@ -1571,65 +1610,8 @@ async function submitQuestion(){
   } catch(e){ alert('submit error: '+e.message); }
   finally { btn.disabled = false; }
 }
-// ─── Page: Cmd ───────────────────────────────────────────────
-PAGE_INIT.cmd = () => {
-  setTimeout(() => $('cmd-input') && $('cmd-input').focus(), 50);
-};
-
-function cmdAppend(html){
-  const out = $('cmd-output');
-  if (!out) return;
-  out.innerHTML += '\n' + html;
-  out.scrollTop = out.scrollHeight;
-}
-
-async function runCmd(){
-  const inp = $('cmd-input');
-  const cmd = inp.value.trim();
-  if (!cmd) return;
-  inp.value = '';
-  state.cmdHistory.push(cmd);
-  state.cmdHistoryIdx = state.cmdHistory.length;
-  cmdAppend(`<span class="prompt">$ ${escapeHtml(cmd)}</span>`);
-  try {
-    const r = await fetch('/cmd/execute', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ cmd, timeout: 60 }),
-    });
-    const d = await r.json().catch(()=>({error:'invalid response'}));
-    if (!r.ok){
-      cmdAppend(`<span class="stderr">${escapeHtml(d.error || ('http '+r.status))}</span>`);
-      return;
-    }
-    if (d.stdout) cmdAppend(escapeHtml(d.stdout.replace(/\n+$/,'')));
-    if (d.stderr) cmdAppend(`<span class="stderr">${escapeHtml(d.stderr.replace(/\n+$/,''))}</span>`);
-    cmdAppend(`<span class="exit">[exit ${d.exit_code}]</span>`);
-  } catch(e){ cmdAppend(`<span class="stderr">${escapeHtml(e.message)}</span>`); }
-}
-
-function cmdKey(e){
-  if (e.key === 'Enter'){ runCmd(); return; }
-  if (e.key === 'ArrowUp'){
-    if (state.cmdHistoryIdx > 0){
-      state.cmdHistoryIdx--;
-      $('cmd-input').value = state.cmdHistory[state.cmdHistoryIdx] || '';
-    }
-    e.preventDefault();
-  } else if (e.key === 'ArrowDown'){
-    if (state.cmdHistoryIdx < state.cmdHistory.length - 1){
-      state.cmdHistoryIdx++;
-      $('cmd-input').value = state.cmdHistory[state.cmdHistoryIdx] || '';
-    } else {
-      state.cmdHistoryIdx = state.cmdHistory.length;
-      $('cmd-input').value = '';
-    }
-    e.preventDefault();
-  } else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'l'){
-    $('cmd-output').innerHTML = '<span class="info">▸ cleared</span>';
-    e.preventDefault();
-  }
-}
+// ─── Page: CMD agent (placeholder — pending CMD agent endpoints) ─────
+PAGE_INIT.cmd = () => { /* no-op until CMD :5005 hand-off lands */ };
 // ─── Page: GUI ──────────────────────────────────────────────
 PAGE_INIT.gui = () => {
   // Reuse the global guiES connection; just nothing to boot
@@ -1767,6 +1749,12 @@ async function pollMetrics(){
       $('stat-gpu').innerHTML  = `GPU <b>—</b>`;
       $('stat-vram').innerHTML = `VRAM <b>—</b>`;
     }
+    // MODEL fallback from /metrics when no agent event has fired yet
+    if (!state.agentModel && m.swarm && m.swarm.model){
+      let sm = m.swarm.model;
+      if (sm && typeof sm === 'object') sm = Object.values(sm).filter(Boolean).join(' → ');
+      $('stat-model') && ($('stat-model').innerHTML = `MODEL <b>${escapeHtml(sm)}</b>`);
+    }
     if (currentRoute === 'dashboard') renderDashboardSystem();
   } catch(_){}
 }
@@ -1776,7 +1764,8 @@ async function pollJobs(){
     const r = await fetch('/jobs?limit=50');
     if (!r.ok) return;
     const data = await r.json();
-    state.jobs = data.jobs || data || [];
+    const rawJobs = data.jobs || data || [];
+    state.jobs = rawJobs.map(j => ({...j, id: j.job_id || j.id || ''}));
     let running = 0;
     for (const j of state.jobs){
       const st = (j.status||'').toLowerCase();
@@ -1805,9 +1794,7 @@ function boot(){
     if ((e.ctrlKey||e.metaKey) && e.key === 'Enter') submitQuestion();
   });
 
-  // Cmd page
-  $('cmd-run')   && $('cmd-run').addEventListener('click', runCmd);
-  $('cmd-input') && $('cmd-input').addEventListener('keydown', cmdKey);
+  // CMD agent page — no event handlers yet (placeholder until :5005 hand-off)
 
   // Models page
   $('models-save')   && $('models-save').addEventListener('click', saveModels);
