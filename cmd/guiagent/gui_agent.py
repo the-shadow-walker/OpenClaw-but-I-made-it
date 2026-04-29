@@ -546,6 +546,7 @@ def _call_vision(model: str, prompt: str, image_b64: str,
         "model": model,
         "messages": messages,
         "stream": False,
+        "think": False,  # qwen3 thinking burns tokens on the thinking field; force off
         "options": {"temperature": 0.1, "num_ctx": 8192},
     }
     try:

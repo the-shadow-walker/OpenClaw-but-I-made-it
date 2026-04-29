@@ -28,6 +28,7 @@ def _call_ollama(prompt: str, model: str = _OLLAMA_MODEL, timeout: int = 30) -> 
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        "think": False,  # qwen3 thinking burns tokens; force off
         "options": {"temperature": 0.0, "num_ctx": 2048},
     }
     try:
