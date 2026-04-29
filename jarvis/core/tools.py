@@ -522,12 +522,15 @@ def build_default_registry(
         and cfg is not None
     )
     # Email tools (P11): only when gmail_client is wired.
+    # NOTE: email_send is intentionally NOT registered. Jarvis composes
+    # via email_draft only; the user reviews and sends from Gmail UI.
+    # To re-enable sending, uncomment the email_send registration below
+    # and the email_send_tool import.
     if gmail_client is not None:
         from jarvis.mail.tool_email import (
             email_draft_tool,
             email_read_tool,
             email_search_tool,
-            email_send_tool,
         )
 
         registry.register(
@@ -556,24 +559,12 @@ def build_default_registry(
         )
         registry.register(
             ToolSpec(
-                name="email_send",
-                description=(
-                    "Send a plain-text email. ALWAYS confirm with the "
-                    "user (recipient, subject, body) before calling — "
-                    "this leaves the system. Prefer email_draft if the "
-                    "user hasn't explicitly said 'send it'."
-                ),
-                parameters=_EMAIL_SEND_PARAMS,
-                handler=lambda **kw: email_send_tool(**kw, gmail=gmail_client),
-            )
-        )
-        registry.register(
-            ToolSpec(
                 name="email_draft",
                 description=(
-                    "Save a Gmail draft (does NOT send). Safer default "
-                    "than email_send — user can review in Gmail UI "
-                    "before they hit send themselves."
+                    "Save a Gmail draft (does NOT send). The user will "
+                    "review and send from Gmail UI themselves. Sending "
+                    "is intentionally not exposed as a tool — always "
+                    "compose via email_draft."
                 ),
                 parameters=_EMAIL_DRAFT_PARAMS,
                 handler=lambda **kw: email_draft_tool(**kw, gmail=gmail_client),
