@@ -1784,6 +1784,43 @@ def jarvis_chat():
 
 
 # =============================================================================
+# ROUTES -- Bash command exec (for /#cmd dashboard page)
+# =============================================================================
+
+_CMD_DENYLIST = re.compile(
+    r"(rm\s+-rf\s+/(?!\w)|:\(\)\s*\{|mkfs|dd\s+if=|>\s*/dev/sd|chmod\s+777\s+/(?!\w))",
+    re.IGNORECASE,
+)
+
+@app.route('/cmd/execute', methods=['POST'])
+@require_api_key
+def cmd_execute():
+    """Run a shell command. Auth-gated; small denylist for catastrophic patterns."""
+    body = request.get_json(silent=True) or {}
+    cmd  = (body.get('cmd') or '').strip()
+    if not cmd:
+        return jsonify({"error": "cmd required"}), 400
+    if _CMD_DENYLIST.search(cmd):
+        return jsonify({"error": "denied: matches deny pattern"}), 403
+    try:
+        timeout = int(body.get('timeout', 60))
+        timeout = max(1, min(timeout, 300))   # clamp 1-300s
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+        )
+        return jsonify({
+            "stdout":    r.stdout,
+            "stderr":    r.stderr,
+            "exit_code": r.returncode,
+            "cmd":       cmd,
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "timeout", "cmd": cmd}), 408
+    except Exception as e:
+        return jsonify({"error": str(e), "cmd": cmd}), 500
+
+
+# =============================================================================
 # ERROR HANDLERS
 # =============================================================================
 
@@ -1846,6 +1883,9 @@ def main():
     print("  POST /query_stream         -- SSE live progress stream")
     print("  POST /subagent/<role>      -- math|engineer|deep_search (sync long-poll)")
     print("  POST /config/models        -- set model for a role")
+    print("  POST /cmd/execute          -- bash exec for /#cmd dashboard page")
+    if not Config.API_KEY:
+        print("  ⚠  /cmd/execute is OPEN -- set SWARM_API_KEY to require auth")
     print("  POST /jobs/<id>/cancel     -- cancel a running job")
     print("  DELETE /jobs/<id>          -- cancel a running job (alias)")
     print("  POST /project/start")

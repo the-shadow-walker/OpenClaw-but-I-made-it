@@ -3,241 +3,439 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jarvis Command Station 2.0</title>
+<title>Jarvis Command Station 3.0</title>
 <style>
 :root {
-  --bg:           #000000;
-  --surface:      #050510;
-  --surface-2:    #0a0a18;
-  --surface-3:    #12121e;
-  --border:       #1a1a2e;
-  --border-glow:  #003366;
-  --blue:         #0088ff;
-  --blue-bright:  #00ccff;
-  --blue-dim:     #004488;
-  --green:        #00dd88;
-  --red:          #ff4466;
-  --yellow:       #ffcc44;
-  --text:         #e0e8f5;
-  --text-dim:     #6680a0;
-  --mono:         "JetBrains Mono","Fira Code","Cascadia Code",monospace;
+  --bg:           #07090c;
+  --surface:      #0c1015;
+  --surface-2:    #11161d;
+  --surface-3:    #181f29;
+  --border:       #1f2731;
+  --border-glow:  #2a3645;
+  --slate:        #3a4858;
+  --slate-bright: #5a6878;
+  --slate-dim:    #2a333f;
+  --green:        #6a8a72;
+  --red:          #8a5a5e;
+  --yellow:       #9a8a5a;
+  --text:         #c8d0d8;
+  --text-dim:     #6f7a86;
+  --mono:         "JetBrains Mono","Fira Code","Cascadia Code","Menlo",monospace;
   --sans:         system-ui,-apple-system,"Segoe UI",sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:100%;overflow-x:hidden}
-body{display:flex;flex-direction:column;min-height:100vh}
-a{color:var(--blue-bright);text-decoration:none}
-a:hover{text-decoration:underline}
-
-/* Scrollbars */
+html,body{background:var(--bg);color:var(--text);font-family:var(--sans);height:100%;overflow:hidden}
+body{display:flex;flex-direction:column;min-height:100vh;height:100vh}
+a{color:var(--slate-bright);text-decoration:none}
+a:hover{color:var(--text)}
+button{font-family:var(--mono)}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:var(--surface)}
-::-webkit-scrollbar-thumb{background:var(--blue-dim);border-radius:4px}
-::-webkit-scrollbar-thumb:hover{background:var(--blue)}
-
-/* Header */
+::-webkit-scrollbar-thumb{background:var(--slate-dim);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--slate)}
+/* Topbar */
 header.topbar{
-  position:sticky;top:0;z-index:100;
-  display:flex;align-items:center;gap:18px;
-  padding:10px 18px;
-  background:linear-gradient(180deg,#000 0%,#000 70%,rgba(0,0,0,0.85) 100%);
+  position:sticky;top:0;z-index:100;height:44px;flex-shrink:0;
+  display:flex;align-items:center;gap:18px;padding:0 16px;
+  background:linear-gradient(180deg,#06080b 0%,#06080b 70%,rgba(7,9,12,0.85) 100%);
   border-bottom:1px solid var(--border);
-  backdrop-filter:blur(8px);
 }
 header .logo{
-  font-family:var(--mono);font-size:15px;font-weight:600;
-  color:var(--blue-bright);letter-spacing:1px;
+  font-family:var(--mono);font-size:13px;font-weight:600;
+  color:var(--slate-bright);letter-spacing:1.2px;
 }
-header .logo .glyph{color:var(--blue);margin-right:6px}
-header .stats{display:flex;gap:16px;flex:1;justify-content:flex-end;font-family:var(--mono);font-size:12px}
+header .logo .glyph{color:var(--slate);margin-right:5px}
+header .stats{display:flex;gap:10px;flex:1;justify-content:flex-end;font-family:var(--mono);font-size:11px}
 header .stat{
-  padding:4px 10px;border:1px solid var(--border);border-radius:4px;
-  background:var(--surface-2);color:var(--text-dim);
+  padding:3px 9px;border:1px solid var(--border);border-radius:3px;
+  background:var(--surface-2);color:var(--text-dim);white-space:nowrap;
 }
-header .stat b{color:var(--blue-bright);font-weight:600}
+header .stat b{color:var(--slate-bright);font-weight:600}
 header .stat.warn b{color:var(--yellow)}
-header .stat.err b{color:var(--red)}
+header .stat.err  b{color:var(--red)}
 
-/* Layout */
-main.shell{
-  display:grid;
-  grid-template-columns:1fr 320px;
-  gap:14px;padding:14px;flex:1;
-  max-width:1920px;margin:0 auto;width:100%;
+/* Layout: sidebar + page-shell */
+.layout{
+  display:grid;grid-template-columns:200px 1fr;
+  flex:1;min-height:0;height:calc(100vh - 44px);
 }
-@media (max-width:1100px){
-  main.shell{grid-template-columns:1fr}
-  aside.sidebar{order:2}
-}
+.layout.collapsed{grid-template-columns:56px 1fr}
 
-/* Cards */
+aside.side-nav{
+  display:flex;flex-direction:column;
+  background:var(--surface);border-right:1px solid var(--border);
+  padding:8px 0;overflow-y:auto;overflow-x:hidden;
+}
+.nav-toggle{
+  background:transparent;border:0;color:var(--text-dim);cursor:pointer;
+  padding:8px 14px;font-size:14px;text-align:left;
+}
+.nav-toggle:hover{color:var(--slate-bright)}
+aside.side-nav a{
+  display:flex;align-items:center;gap:12px;
+  padding:9px 14px;font-family:var(--mono);font-size:12px;
+  color:var(--text-dim);border-left:2px solid transparent;
+  transition:background .12s,color .12s,border-color .12s;
+  white-space:nowrap;
+}
+aside.side-nav a i{
+  font-style:normal;display:inline-block;width:14px;text-align:center;
+  color:var(--slate);font-size:13px;
+}
+aside.side-nav a:hover{background:var(--surface-2);color:var(--text)}
+aside.side-nav a.active{
+  background:var(--surface-2);color:var(--slate-bright);
+  border-left-color:var(--slate-bright);
+}
+aside.side-nav a.active i{color:var(--slate-bright)}
+.layout.collapsed aside.side-nav a span{display:none}
+.layout.collapsed aside.side-nav a{justify-content:center;padding:9px 6px}
+.side-nav-spacer{flex:1}
+.side-nav-foot{
+  display:flex;align-items:center;gap:8px;
+  padding:10px 14px;font-family:var(--mono);font-size:10px;color:var(--text-dim);
+  border-top:1px solid var(--border);
+}
+.layout.collapsed .side-nav-foot span:not(.conn-dot){display:none}
+.conn-dot{width:7px;height:7px;border-radius:50%;background:var(--text-dim);flex-shrink:0}
+.conn-dot.live{background:var(--green);box-shadow:0 0 6px rgba(106,138,114,.6)}
+.conn-dot.err {background:var(--red)}
+
+/* Page shell */
+main.page-shell{
+  overflow-y:auto;overflow-x:hidden;padding:18px;min-width:0;
+  background:var(--bg);
+}
+section[data-route]{display:none;animation:fadeIn .18s ease-out}
+section[data-route].active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}
+
+/* Cards (shared) */
 .card{
-  background:var(--surface);
-  border:1px solid var(--border);
-  border-radius:6px;
-  padding:14px;margin-bottom:14px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;padding:14px;margin-bottom:14px;
 }
 .card h2{
   font-size:11px;font-family:var(--mono);
-  color:var(--blue);text-transform:uppercase;letter-spacing:1.5px;
+  color:var(--slate);text-transform:uppercase;letter-spacing:1.5px;
   margin-bottom:10px;font-weight:600;
 }
 .card h2 .badge{
-  font-size:10px;background:var(--blue-dim);color:#fff;
+  font-size:9px;background:var(--slate-dim);color:var(--text);
   padding:2px 6px;border-radius:3px;margin-left:8px;letter-spacing:.5px;
 }
+.empty-msg{
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  padding:20px;text-align:center;
+}
+.page-title{
+  font-family:var(--mono);font-size:12px;color:var(--slate-bright);
+  letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;
+  display:flex;align-items:center;gap:10px;
+}
+.page-title .crumb{color:var(--text-dim);font-size:11px}
+.page-title .crumb a{color:var(--slate)}
+.btn{
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);padding:7px 12px;border-radius:3px;
+  font-family:var(--mono);font-size:11px;cursor:pointer;
+}
+.btn:hover{border-color:var(--slate);color:var(--slate-bright)}
+.btn.primary{background:var(--slate);border-color:var(--slate);color:#fff;font-weight:600}
+.btn.primary:hover{background:var(--slate-bright);border-color:var(--slate-bright);color:var(--bg)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+input[type=text],textarea,select{
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);padding:8px 10px;border-radius:3px;
+  font-family:var(--mono);font-size:12px;
+}
+input[type=text]:focus,textarea:focus,select:focus{outline:none;border-color:var(--slate)}
+/* ── Dashboard page ── */
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+@media(max-width:1100px){.grid-3{grid-template-columns:1fr}}
+.metric-row{
+  display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  padding:3px 0;
+}
+.metric-row b{color:var(--text)}
+.gpu-bar{height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden;margin:6px 0}
+.gpu-bar .fill{
+  height:100%;background:linear-gradient(90deg,var(--slate),var(--slate-bright));
+  transition:width .4s;
+}
+.spark{
+  height:36px;display:flex;align-items:flex-end;gap:1px;
+  margin-top:8px;border-top:1px dashed var(--border);padding-top:6px;
+}
+.spark .bar{flex:1;background:var(--slate-dim);min-height:1px;border-radius:1px 1px 0 0;transition:height .2s}
+.spark .bar.hot{background:var(--slate-bright)}
 
-/* Submit row */
+.agent-row{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:11px;
+  padding:6px 8px;border-radius:3px;background:var(--surface-2);
+  margin-bottom:4px;
+}
+.agent-row .icon{color:var(--slate-bright);width:14px;text-align:center}
+.agent-row .name{color:var(--text);flex:1}
+.agent-row .meta{color:var(--text-dim);font-size:10px}
+.agent-row.idle .icon{color:var(--text-dim)}
+.agent-row.idle .name{color:var(--text-dim)}
+
+.recent-jobs{display:flex;flex-direction:column;gap:4px}
+.job-item{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:11px;
+  padding:6px 9px;border-radius:3px;background:var(--surface-2);
+  border:1px solid transparent;cursor:pointer;
+  transition:border-color .12s;
+}
+.job-item:hover{border-color:var(--slate-dim)}
+.job-item.active{border-color:var(--slate);background:var(--surface-3)}
+.job-item .id{color:var(--slate-bright);width:80px;overflow:hidden;text-overflow:ellipsis}
+.job-item .q{flex:1;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-item .status{font-size:9px;text-transform:uppercase;color:var(--text-dim)}
+.job-item .status.completed{color:var(--green)}
+.job-item .status.failed{color:var(--red)}
+.job-item .status.running,.job-item .status.processing{color:var(--yellow)}
+
+/* ── Swarm submit page ── */
 .submit-row{display:flex;gap:10px;align-items:flex-start}
 .submit-row textarea{
-  flex:1;min-height:60px;max-height:200px;
-  background:var(--surface-2);border:1px solid var(--border);
-  color:var(--text);padding:10px 12px;border-radius:4px;
-  font-family:var(--mono);font-size:13px;resize:vertical;
+  flex:1;min-height:80px;max-height:240px;resize:vertical;
 }
-.submit-row textarea:focus{outline:none;border-color:var(--blue)}
-.submit-row select,.submit-row button{
-  background:var(--surface-2);border:1px solid var(--border);
-  color:var(--text);padding:10px 14px;border-radius:4px;
-  font-family:var(--mono);font-size:12px;cursor:pointer;
+.submit-help{
+  font-family:var(--mono);font-size:10px;color:var(--text-dim);
+  margin-top:8px;line-height:1.6;
 }
-.submit-row select:hover,.submit-row button:hover{border-color:var(--blue);color:var(--blue-bright)}
-.submit-row button.primary{
-  background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600;
+.submit-help kbd{
+  background:var(--surface-3);border:1px solid var(--border);
+  padding:1px 5px;border-radius:2px;font-size:9px;color:var(--slate-bright);
 }
-.submit-row button.primary:hover{background:var(--blue-bright);border-color:var(--blue-bright);color:#000}
-.submit-row button.primary:disabled{opacity:.5;cursor:not-allowed}
 
-/* Phase pills */
-.phase-rail{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
-.phase-pill{
-  font-family:var(--mono);font-size:10px;font-weight:600;
-  padding:3px 9px;border-radius:3px;
-  background:var(--surface-3);color:var(--text-dim);
-  border:1px solid var(--border);
-  transition:all .15s;
+/* ── Cmd page ── */
+.cmd-shell{
+  display:flex;flex-direction:column;height:calc(100vh - 130px);
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
 }
-.phase-pill.active{
-  background:var(--blue);color:#fff;border-color:var(--blue-bright);
-  box-shadow:0 0 8px rgba(0,136,255,.5);
+.cmd-output{
+  flex:1;overflow-y:auto;padding:12px 14px;
+  font-family:var(--mono);font-size:12px;line-height:1.5;
+  color:var(--text);white-space:pre-wrap;word-break:break-word;
+  background:#04060a;
 }
-.phase-pill.done{background:var(--blue-dim);color:var(--blue-bright);border-color:var(--blue-dim)}
-.phase-pill .arr{color:var(--text-dim);margin:0 2px}
-.elapsed-clock{
-  margin-left:auto;font-family:var(--mono);font-size:11px;
-  color:var(--text-dim);
+.cmd-output .prompt{color:var(--slate-bright)}
+.cmd-output .stderr{color:var(--red)}
+.cmd-output .exit{color:var(--text-dim);font-size:10px}
+.cmd-output .info{color:var(--yellow)}
+.cmd-input-row{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 14px;border-top:1px solid var(--border);
+  background:var(--surface-2);
 }
-.elapsed-clock b{color:var(--blue-bright)}
+.cmd-input-row .marker{color:var(--slate-bright);font-family:var(--mono);font-size:13px}
+.cmd-input-row input{flex:1}
 
-/* Orchestrator card */
-.orch-stream{
-  background:var(--surface-2);border:1px solid var(--border);
-  border-radius:4px;padding:10px;
-  font-family:var(--mono);font-size:11px;line-height:1.5;
-  color:var(--text-dim);
-  height:140px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;
-}
-.orch-stream .think{color:var(--blue-bright)}
-
-/* SP grid */
-.sp-grid{display:flex;flex-direction:column;gap:10px}
-.sp-wave{
-  display:flex;gap:10px;flex-wrap:wrap;
-  padding:6px;border-left:2px solid var(--blue-dim);padding-left:12px;
+/* ── GUI page ── */
+.gui-stage{
+  width:100%;height:calc(100vh - 130px);
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;overflow:hidden;
   position:relative;
 }
-.sp-wave::before{
-  content:attr(data-wave);
-  position:absolute;left:-22px;top:6px;
-  font-family:var(--mono);font-size:9px;color:var(--blue);
-  background:var(--bg);padding:1px 4px;
-}
-.sp-card{
-  flex:1;min-width:280px;max-width:480px;
-  background:var(--surface-2);
-  border:1px solid var(--border);
-  border-radius:4px;padding:10px;
-  transition:border-color .2s,box-shadow .2s;
-}
-.sp-card.active{
-  border-color:var(--blue);
-  box-shadow:0 0 0 1px var(--border-glow), 0 0 12px rgba(0,136,255,.18);
-}
-.sp-card.solved{border-color:var(--green)}
-.sp-card.failed{border-color:var(--red)}
-.sp-head{
-  display:flex;align-items:center;gap:8px;
-  font-family:var(--mono);font-size:12px;font-weight:600;
-  margin-bottom:8px;
-}
-.sp-head .id{color:var(--blue-bright)}
-.sp-head .icon{font-size:13px}
-.sp-head .icon.pending{color:var(--text-dim)}
-.sp-head .icon.active{color:var(--yellow)}
-.sp-head .icon.solved{color:var(--green)}
-.sp-head .icon.failed{color:var(--red)}
-.sp-head .meta{margin-left:auto;color:var(--text-dim);font-weight:400;font-size:10px}
-.sp-desc{
-  font-family:var(--sans);font-size:11px;color:var(--text-dim);
-  margin-bottom:8px;line-height:1.4;
-}
-.tool-chain{display:flex;flex-direction:column;gap:3px;margin-bottom:8px}
-.tool-row{
-  display:flex;align-items:center;gap:6px;
-  font-family:var(--mono);font-size:10px;
-  padding:3px 6px;border-radius:3px;
-  background:var(--surface-3);
-}
-.tool-row .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.tool-row .dot.ok{background:var(--green)}
-.tool-row .dot.err{background:var(--red)}
-.tool-row .dot.run{background:var(--yellow);animation:pulse 1.2s infinite}
-.tool-row .name{color:var(--blue-bright);min-width:62px}
-.tool-row .preview{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.tool-row .bytes{color:var(--text-dim);font-size:9px}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.sp-results{
-  font-family:var(--mono);font-size:10px;
-  background:var(--surface);border-top:1px dashed var(--border);
-  padding-top:6px;color:var(--green);
-  word-break:break-all;
-}
-.sp-results.soft{color:var(--yellow)}
-.sp-tokens{
-  height:36px;overflow:hidden;font-family:var(--mono);font-size:10px;
-  color:var(--text-dim);margin-top:6px;
-  -webkit-mask-image:linear-gradient(180deg,transparent,#000 30%);
-  mask-image:linear-gradient(180deg,transparent,#000 30%);
-  white-space:pre-wrap;word-break:break-word;
+.gui-stage img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.gui-stage .placeholder{font-family:var(--mono);font-size:12px;color:var(--text-dim);text-align:center}
+.gui-overlay{
+  position:absolute;left:12px;bottom:12px;
+  background:rgba(7,9,12,0.78);border:1px solid var(--border);
+  padding:6px 10px;border-radius:3px;
+  font-family:var(--mono);font-size:10px;color:var(--text-dim);
 }
 
-/* Answer card */
+/* ── Jarvis page ── */
+.jarvis-frame{
+  width:100%;height:calc(100vh - 130px);
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+}
+
+/* ── Models page ── */
+.model-table{
+  display:grid;grid-template-columns:160px 1fr 280px;
+  gap:1px;background:var(--border);border-radius:4px;overflow:hidden;
+  font-family:var(--mono);font-size:11px;
+}
+.model-table > div{background:var(--surface);padding:10px 12px}
+.model-table .head{background:var(--surface-2);color:var(--slate);font-size:10px;text-transform:uppercase;letter-spacing:1px}
+.model-table .role{color:var(--slate-bright)}
+.model-table .desc{color:var(--text-dim)}
+.model-table select{width:100%}
+.models-actions{margin-top:14px;display:flex;gap:8px}
+.models-msg{font-family:var(--mono);font-size:11px;color:var(--green);margin-top:8px;height:14px}
+.models-msg.err{color:var(--red)}
+
+/* ── Logs page ── */
+.logs-controls{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.logs-controls select,.logs-controls input{font-size:11px}
+.logs-view{
+  background:#04060a;border:1px solid var(--border);border-radius:4px;
+  padding:10px 12px;font-family:var(--mono);font-size:11px;
+  color:var(--text);white-space:pre-wrap;word-break:break-word;
+  height:calc(100vh - 220px);overflow-y:auto;
+}
+.logs-view .err{color:var(--red)}
+.logs-view .ok{color:var(--green)}
+/* ── Family tree ── */
+.tree-wrap{
+  position:relative;background:var(--surface);
+  border:1px solid var(--border);border-radius:6px;
+  padding:24px 18px 32px;overflow-x:auto;
+}
+.tree-wrap svg.connectors{
+  position:absolute;top:0;left:0;width:100%;height:100%;
+  pointer-events:none;z-index:0;
+}
+.tree-wrap svg.connectors line{
+  stroke:var(--slate-dim);stroke-width:1.5;
+}
+.tree-row{
+  display:flex;justify-content:center;gap:14px;
+  margin:18px 0;flex-wrap:nowrap;position:relative;z-index:1;
+  min-width:max-content;
+}
+.tree-node{
+  background:var(--surface-2);border:1px solid var(--border);
+  border-radius:5px;padding:8px 12px;cursor:pointer;
+  font-family:var(--mono);font-size:11px;color:var(--text);
+  min-width:140px;max-width:280px;text-align:center;
+  position:relative;transition:border-color .15s,background .15s;
+}
+.tree-node:hover{border-color:var(--slate);background:var(--surface-3)}
+.tree-node.active{
+  border-color:var(--slate-bright);background:var(--surface-3);
+  box-shadow:0 0 0 1px var(--border-glow);
+}
+.tree-node.solved{border-color:var(--green)}
+.tree-node.failed{border-color:var(--red)}
+.tree-node.running{border-color:var(--yellow);box-shadow:0 0 6px rgba(154,138,90,.25)}
+.tree-node .ico{display:block;color:var(--slate-bright);font-size:13px;margin-bottom:3px}
+.tree-node .label{display:block;font-size:10px;color:var(--text-dim);margin-top:2px}
+.tree-node.kind-question .ico{color:var(--text)}
+.tree-node.kind-question{background:var(--surface-3);min-width:280px;max-width:520px}
+.tree-node.kind-question .question-text{
+  font-family:var(--sans);font-size:12px;color:var(--text);
+  line-height:1.4;margin-top:4px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.tree-node.kind-tool{
+  min-width:90px;font-size:10px;padding:5px 8px;
+}
+.tree-node.kind-tool .ico{font-size:11px}
+.tree-row.tools{gap:6px}
+
+/* Inline expansion below the tree */
+.node-expansion{
+  margin-top:14px;border:1px solid var(--slate-dim);border-radius:5px;
+  background:var(--surface-2);overflow:hidden;
+  animation:expandIn .2s ease-out;
+}
+@keyframes expandIn{from{opacity:0;max-height:0}to{opacity:1;max-height:1200px}}
+.node-expansion-head{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 14px;background:var(--surface-3);
+  border-bottom:1px solid var(--border);
+  font-family:var(--mono);font-size:11px;
+}
+.node-expansion-head .title{color:var(--slate-bright);font-weight:600}
+.node-expansion-head .meta{color:var(--text-dim);font-size:10px}
+.node-expansion-head .close-x{
+  margin-left:auto;background:transparent;border:0;
+  color:var(--text-dim);cursor:pointer;font-size:14px;
+}
+.node-expansion-head .close-x:hover{color:var(--red)}
+/* ── Embedded per-node terminal ── */
+.term-strip{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:6px 10px;background:var(--surface-3);
+  border-bottom:1px solid var(--border);
+  font-family:var(--mono);font-size:10px;
+}
+.term-chip{
+  padding:3px 8px;border-radius:3px;background:var(--surface-2);
+  border:1px solid var(--border);color:var(--text-dim);cursor:pointer;
+  white-space:nowrap;
+}
+.term-chip:hover{border-color:var(--slate);color:var(--slate-bright)}
+.term-chip.live{
+  border-color:var(--yellow);color:var(--yellow);
+  animation:livePulse 1.6s infinite;
+}
+.term-chip.solved{color:var(--green);border-color:var(--green)}
+.term-chip.viewing{
+  background:var(--slate-dim);color:var(--text);border-color:var(--slate);
+}
+@keyframes livePulse{0%,100%{opacity:1}50%{opacity:.55}}
+.term-tps{
+  margin-left:auto;color:var(--slate-bright);font-weight:600;
+}
+.term-resume{
+  background:var(--slate);border:0;color:#fff;
+  padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;
+}
+.term-resume:hover{background:var(--slate-bright)}
+.term-body{
+  height:300px;overflow-y:auto;padding:10px 14px;
+  font-family:var(--mono);font-size:11px;line-height:1.55;
+  color:var(--text);background:#04060a;
+  white-space:pre-wrap;word-break:break-word;
+}
+.term-turnhdr{
+  font-weight:600;color:var(--slate-bright);
+  border-bottom:1px dashed var(--border);
+  padding:2px 0 4px;margin:0 0 6px;display:flex;align-items:center;gap:8px;
+}
+.term-turnhdr .dur{color:var(--text-dim);font-size:10px;font-weight:400}
+.term-think{color:var(--text-dim)}
+.term-action{color:var(--slate-bright)}
+.term-result{color:var(--green)}
+.term-tool{
+  background:var(--surface-2);border:1px solid var(--border);
+  border-radius:3px;padding:6px 9px;margin:6px 0;
+}
+.term-tool .name{color:var(--slate-bright);font-weight:600}
+.term-tool .bytes{color:var(--text-dim);font-size:10px;margin-left:6px}
+.term-tool pre{
+  margin-top:5px;color:var(--text);white-space:pre-wrap;
+  border-top:1px dashed var(--border);padding-top:5px;font-size:10px;
+}
+.term-empty{color:var(--text-dim);font-style:italic}
+/* ── Final answer (markdown) ── */
 .answer-md{
-  font-family:var(--sans);font-size:14px;line-height:1.6;
-  color:var(--text);max-height:none;
+  font-family:var(--sans);font-size:14px;line-height:1.6;color:var(--text);
 }
 .answer-md h1,.answer-md h2,.answer-md h3,.answer-md h4{
-  font-family:var(--mono);color:var(--blue-bright);
+  font-family:var(--mono);color:var(--slate-bright);
   margin:18px 0 8px;font-weight:600;
 }
 .answer-md h1{font-size:18px;border-bottom:1px solid var(--border);padding-bottom:4px}
 .answer-md h2{font-size:15px}
-.answer-md h3{font-size:13px;color:var(--blue)}
-.answer-md h4{font-size:12px;color:var(--blue-dim)}
+.answer-md h3{font-size:13px;color:var(--slate)}
+.answer-md h4{font-size:12px;color:var(--slate-dim)}
 .answer-md p{margin:6px 0}
 .answer-md ul,.answer-md ol{margin:6px 0 6px 22px}
 .answer-md li{margin:3px 0}
 .answer-md hr{border:0;border-top:1px solid var(--border);margin:14px 0}
 .answer-md table{border-collapse:collapse;margin:10px 0;font-size:12px}
 .answer-md th,.answer-md td{border:1px solid var(--border);padding:5px 9px}
-.answer-md th{background:var(--surface-2);color:var(--blue-bright)}
+.answer-md th{background:var(--surface-2);color:var(--slate-bright)}
 .answer-md code{
   font-family:var(--mono);font-size:12px;
   background:var(--surface-3);padding:1px 5px;border-radius:3px;
-  color:var(--blue-bright);
+  color:var(--slate-bright);
 }
 .answer-md strong{color:#fff}
-.answer-md em{color:var(--blue-bright)}
+.answer-md em{color:var(--slate-bright)}
 .code-block{
   background:var(--surface-2);border:1px solid var(--border);
   border-radius:4px;margin:10px 0;overflow:hidden;
@@ -246,367 +444,447 @@ main.shell{
   display:flex;align-items:center;gap:8px;
   background:var(--surface-3);
   padding:6px 10px;border-bottom:1px solid var(--border);
-  font-family:var(--mono);font-size:11px;color:var(--text-dim);
+  font-family:var(--mono);font-size:10px;color:var(--text-dim);
 }
-.code-header .lang{color:var(--blue);font-weight:600}
+.code-header .lang{color:var(--slate);font-weight:600}
 .code-header .actions{margin-left:auto;display:flex;gap:6px}
 .code-header button{
   background:var(--surface);border:1px solid var(--border);
-  color:var(--text);padding:3px 9px;border-radius:3px;
+  color:var(--text);padding:2px 8px;border-radius:3px;
   font-family:var(--mono);font-size:10px;cursor:pointer;
 }
-.code-header button:hover{border-color:var(--blue);color:var(--blue-bright)}
+.code-header button:hover{border-color:var(--slate);color:var(--slate-bright)}
 .code-block pre{
-  padding:10px;font-family:var(--mono);font-size:12px;
+  padding:10px;font-family:var(--mono);font-size:11px;
   line-height:1.5;color:var(--text);overflow-x:auto;white-space:pre;
-}
-
-/* Sidebar */
-aside.sidebar{display:flex;flex-direction:column;gap:14px;align-self:flex-start;position:sticky;top:60px}
-.gpu-bar{
-  height:8px;background:var(--surface-3);border-radius:3px;overflow:hidden;
-  margin:6px 0 4px;
-}
-.gpu-bar .fill{
-  height:100%;background:linear-gradient(90deg,var(--blue),var(--blue-bright));
-  transition:width .4s;
-}
-.gpu-row{
-  display:flex;justify-content:space-between;
-  font-family:var(--mono);font-size:11px;color:var(--text-dim);
-  padding:2px 0;
-}
-.gpu-row b{color:var(--text)}
-
-#gui-feed-wrap{
-  position:relative;background:var(--surface-2);
-  border:1px solid var(--border);border-radius:4px;
-  aspect-ratio:16/10;overflow:hidden;
-  display:flex;align-items:center;justify-content:center;
-}
-#gui-feed-wrap img{width:100%;height:100%;object-fit:contain;display:block}
-#gui-feed-wrap .placeholder{
-  font-family:var(--mono);font-size:11px;color:var(--text-dim);text-align:center;padding:20px;
-}
-.gui-status{
-  font-family:var(--mono);font-size:10px;color:var(--text-dim);
-  margin-top:6px;display:flex;justify-content:space-between;
-}
-.gui-status .live{color:var(--green)}
-.gui-status .live::before{content:"●";margin-right:4px;animation:pulse 1.5s infinite}
-
-.jobs-list{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto}
-.job-item{
-  display:flex;justify-content:space-between;
-  font-family:var(--mono);font-size:11px;
-  padding:5px 8px;border-radius:3px;background:var(--surface-2);
-  border:1px solid transparent;cursor:pointer;
-  transition:border-color .15s;
-}
-.job-item:hover{border-color:var(--blue-dim)}
-.job-item.active{border-color:var(--blue);background:var(--surface-3)}
-.job-item .id{color:var(--blue-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
-.job-item .status{color:var(--text-dim)}
-.job-item .status.completed{color:var(--green)}
-.job-item .status.failed{color:var(--red)}
-.job-item .status.processing,.job-item .status.running{color:var(--yellow)}
-
-.empty-msg{
-  font-family:var(--mono);font-size:11px;color:var(--text-dim);
-  padding:20px;text-align:center;
 }
 </style>
 </head>
 <body>
 
 <header class="topbar">
-  <div class="logo"><span class="glyph">⬡</span> JARVIS COMMAND STATION 2.0</div>
+  <div class="logo"><span class="glyph">⬡</span> JARVIS · COMMAND STATION 3.0</div>
   <div class="stats">
     <div class="stat" id="stat-jobs">JOBS <b>0/3</b></div>
     <div class="stat" id="stat-gpu">GPU <b>—</b></div>
-    <div class="stat" id="stat-model">MODEL <b>—</b></div>
+    <div class="stat" id="stat-vram">VRAM <b>—</b></div>
+    <div class="stat" id="stat-model" title="model chain">MODEL <b>—</b></div>
   </div>
 </header>
 
-<main class="shell">
-  <section class="main-col">
-
-    <!-- Submit row -->
-    <div class="card">
-      <h2>Submit Question</h2>
-      <div class="submit-row">
-        <textarea id="q-text" placeholder="Ask anything…  e.g. Compute the kinetic energy of a 1500 kg car at 25 m/s, then derive the work-energy theorem from first principles."></textarea>
-        <select id="q-service" title="Service">
-          <option value="swarm">Swarm</option>
-          <option value="execute">Execute</option>
-          <option value="engineer">Engineer</option>
-          <option value="deepsearch">DeepSearch</option>
-        </select>
-        <button id="q-submit" class="primary">SUBMIT</button>
-      </div>
-    </div>
-
-    <!-- Agent flow stage -->
-    <div class="card" id="orch-card">
-      <h2>Orchestrator <span class="badge" id="orch-job">no job</span></h2>
-      <div class="phase-rail" id="phase-rail">
-        <span class="phase-pill" data-phase="0A">0A</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="0B">0B</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="0C">0C</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="1">1</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="2">2</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="3">3</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="3C">3C</span><span class="arr">→</span>
-        <span class="phase-pill" data-phase="W">W</span>
-        <span class="elapsed-clock">elapsed <b id="orch-elapsed">0s</b></span>
-      </div>
-      <div class="orch-stream" id="orch-stream"><span class="placeholder">Awaiting job…</span></div>
-    </div>
-
-    <div class="card">
-      <h2>Sub-Problems &amp; Tool Chain</h2>
-      <div class="sp-grid" id="sp-grid">
-        <div class="empty-msg">Submit a question to see the agent flow.</div>
-      </div>
-    </div>
-
-    <div class="card" id="answer-card">
-      <h2>Final Answer</h2>
-      <div class="answer-md" id="answer-md">
-        <div class="empty-msg">Waiting for first answer…</div>
-      </div>
-    </div>
-
-  </section>
-
-  <aside class="sidebar">
-    <div class="card">
-      <h2>GPU + System</h2>
-      <div id="gpu-name" style="font-family:var(--mono);font-size:11px;color:var(--blue-bright);margin-bottom:6px">—</div>
-      <div class="gpu-bar"><div class="fill" id="gpu-fill" style="width:0%"></div></div>
-      <div class="gpu-row"><span>VRAM</span><b id="gpu-vram">—</b></div>
-      <div class="gpu-row"><span>GPU%</span><b id="gpu-pct">—</b></div>
-      <div class="gpu-row"><span>Temp</span><b id="gpu-temp">—</b></div>
-      <div class="gpu-row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>CPU%</span><b id="cpu-pct">—</b></div>
-      <div class="gpu-row"><span>RAM%</span><b id="ram-pct">—</b></div>
-    </div>
-
-    <div class="card">
-      <h2>GUI Desktop <span class="badge" id="gui-state">offline</span></h2>
-      <div id="gui-feed-wrap">
-        <div class="placeholder" id="gui-placeholder">Awaiting CMD live feed at<br>http://10.0.0.58:5005/stream</div>
-        <img id="gui-feed" style="display:none" alt="GUI desktop">
-      </div>
-      <div class="gui-status">
-        <span id="gui-iter">—</span>
-        <span id="gui-live"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Recent Jobs</h2>
-      <div class="jobs-list" id="jobs-list">
-        <div class="empty-msg">No jobs yet.</div>
-      </div>
+<div class="layout">
+  <aside class="side-nav" id="side-nav">
+    <button class="nav-toggle" id="nav-toggle" title="collapse">☰</button>
+    <a href="#/dashboard" data-route="dashboard"><i>◇</i><span>Dashboard</span></a>
+    <a href="#/jobs"      data-route="jobs"     ><i>⌘</i><span>Jobs</span></a>
+    <a href="#/swarm"     data-route="swarm"    ><i>✎</i><span>Swarm</span></a>
+    <a href="#/cmd"       data-route="cmd"      ><i>$</i><span>Cmd</span></a>
+    <a href="#/gui"       data-route="gui"      ><i>▢</i><span>GUI</span></a>
+    <a href="#/jarvis"    data-route="jarvis"   ><i>♢</i><span>Jarvis</span></a>
+    <a href="#/models"    data-route="models"   ><i>⊟</i><span>Models</span></a>
+    <a href="#/logs"      data-route="logs"     ><i>≡</i><span>Logs</span></a>
+    <a href="#/memories"  data-route="memories" ><i>♻</i><span>Memories</span></a>
+    <div class="side-nav-spacer"></div>
+    <div class="side-nav-foot">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-text">connecting…</span>
     </div>
   </aside>
-</main>
+
+  <main class="page-shell" id="page-shell">
+    <section data-route="dashboard">
+  <div class="page-title">Overview <span class="crumb">· what the swarm is doing right now</span></div>
+  <div class="grid-3">
+    <div class="card">
+      <h2>System</h2>
+      <div id="dash-gpu-name" style="font-family:var(--mono);font-size:11px;color:var(--slate-bright);margin-bottom:6px">—</div>
+      <div class="gpu-bar"><div class="fill" id="dash-gpu-fill" style="width:0%"></div></div>
+      <div class="metric-row"><span>VRAM</span><b id="dash-vram">—</b></div>
+      <div class="metric-row"><span>GPU%</span><b id="dash-gpu-pct">—</b></div>
+      <div class="metric-row"><span>Temp</span><b id="dash-temp">—</b></div>
+      <div class="metric-row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span>CPU%</span><b id="dash-cpu">—</b></div>
+      <div class="metric-row"><span>RAM%</span><b id="dash-ram">—</b></div>
+      <div class="spark" id="dash-spark"></div>
+    </div>
+    <div class="card">
+      <h2>Active Agents <span class="badge" id="dash-agents-job">no job</span></h2>
+      <div id="dash-agents"><div class="empty-msg">No job watched. Start one in <a href="#/swarm">/swarm</a>.</div></div>
+    </div>
+    <div class="card">
+      <h2>Recent Jobs</h2>
+      <div class="recent-jobs" id="dash-jobs"><div class="empty-msg">No jobs yet.</div></div>
+    </div>
+  </div>
+</section>
+    <section data-route="jobs">
+  <div class="page-title" id="jobs-title">Jobs</div>
+  <div id="jobs-list-view">
+    <div class="card">
+      <h2>Recent Jobs</h2>
+      <div class="recent-jobs" id="jobs-page-list"><div class="empty-msg">No jobs yet.</div></div>
+    </div>
+  </div>
+  <div id="jobs-tree-view" style="display:none">
+    <div class="card">
+      <h2>Family Tree <span class="badge" id="tree-job-id">—</span></h2>
+      <div class="tree-wrap" id="tree-wrap">
+        <svg class="connectors" id="tree-connectors"></svg>
+        <div id="tree-rows"></div>
+      </div>
+      <div id="tree-expansion-host"></div>
+    </div>
+    <div class="card" id="tree-answer-card">
+      <h2>Final Answer</h2>
+      <div class="answer-md" id="tree-answer"><div class="empty-msg">Streaming…</div></div>
+    </div>
+  </div>
+</section>
+    <section data-route="swarm">
+  <div class="page-title">Submit Question <span class="crumb">· routes to ReAct or Engineer pipeline</span></div>
+  <div class="card">
+    <h2>Question</h2>
+    <div class="submit-row">
+      <textarea id="swarm-q" placeholder="Ask anything…  e.g. Compute the kinetic energy of a 1500 kg car at 25 m/s, then derive the work-energy theorem from first principles."></textarea>
+      <select id="swarm-service" title="Service">
+        <option value="swarm">Swarm</option>
+        <option value="engineer">Engineer</option>
+        <option value="deepsearch">DeepSearch</option>
+      </select>
+      <button id="swarm-submit" class="btn primary">SUBMIT</button>
+    </div>
+    <div class="submit-help">
+      <kbd>Ctrl/Cmd+Enter</kbd> to submit · on submit you'll be redirected to <kbd>/jobs/&lt;id&gt;</kbd> for the live tree view.
+    </div>
+  </div>
+</section>
+    <section data-route="cmd">
+  <div class="page-title">Cmd <span class="crumb">· bash on the server (auth + denylist)</span></div>
+  <div class="cmd-shell">
+    <div class="cmd-output" id="cmd-output"><span class="info">▸ Bash terminal — type a command and press enter. ↑/↓ for history.  Ctrl+L clears.</span></div>
+    <div class="cmd-input-row">
+      <span class="marker">$</span>
+      <input id="cmd-input" type="text" autocomplete="off" spellcheck="false" placeholder="ls /tmp" />
+      <button class="btn primary" id="cmd-run">Run</button>
+    </div>
+  </div>
+</section>
+    <section data-route="gui">
+  <div class="page-title">GUI Desktop <span class="crumb">· cross-origin SSE from <code>10.0.0.58:5005</code></span> <span class="badge" id="gui-state">offline</span></div>
+  <div class="gui-stage" id="gui-stage">
+    <div class="placeholder" id="gui-placeholder">Awaiting feed at http://10.0.0.58:5005/stream …</div>
+    <img id="gui-img" style="display:none" alt="GUI desktop">
+    <div class="gui-overlay" id="gui-overlay" style="display:none"><span id="gui-iter">—</span></div>
+  </div>
+</section>
+    <section data-route="jarvis">
+  <div class="page-title">Jarvis Chat <span class="crumb">· embedded <a href="/jarvis" target="_blank">/jarvis</a></span></div>
+  <iframe class="jarvis-frame" id="jarvis-frame" src="about:blank" title="Jarvis chat"></iframe>
+</section>
+    <section data-route="models">
+  <div class="page-title">Models <span class="crumb">· per-role assignment for planner/classifier/solver/writer</span></div>
+  <div class="card">
+    <h2>Role Assignments</h2>
+    <div class="model-table" id="models-table">
+      <div class="head">Role</div><div class="head">Description</div><div class="head">Model</div>
+      <div class="role">—</div><div class="desc">loading…</div><div>—</div>
+    </div>
+    <div class="models-actions">
+      <button class="btn primary" id="models-save">Save All</button>
+      <button class="btn" id="models-reload">Reload</button>
+    </div>
+    <div class="models-msg" id="models-msg"></div>
+  </div>
+</section>
+    <section data-route="logs">
+  <div class="page-title">Logs <span class="crumb">· tail any job + grep</span></div>
+  <div class="card">
+    <div class="logs-controls">
+      <select id="logs-job"><option value="">— pick a job —</option></select>
+      <input type="text" id="logs-grep" placeholder="grep pattern (regex)" />
+      <select id="logs-tail">
+        <option value="200">tail 200</option>
+        <option value="500">tail 500</option>
+        <option value="1000">tail 1000</option>
+        <option value="0">full</option>
+      </select>
+      <button class="btn" id="logs-refresh">Refresh</button>
+      <button class="btn" id="logs-debug">SP Debug Files</button>
+    </div>
+    <div class="logs-view" id="logs-view"><div class="empty-msg">Pick a job to tail its log.</div></div>
+  </div>
+</section>
+    <section data-route="memories">
+  <div class="page-title">Memories <span class="crumb">· coming soon</span></div>
+  <div class="card">
+    <h2>Persistent Memory CRUD</h2>
+    <div class="empty-msg" style="padding:40px 20px">
+      <div style="font-size:32px;color:var(--slate-dim);margin-bottom:12px">♻</div>
+      <div>Memory CRUD UI is not implemented yet.</div>
+      <div style="margin-top:8px;font-size:10px">Files are at <code>~/.claude/projects/-Users-grant-swarm3/memory/</code> on the dev box.</div>
+      <button class="btn" disabled style="margin-top:14px">+ New memory</button>
+    </div>
+  </div>
+</section>
+  </main>
+</div>
 
 <script>
 'use strict';
-//=============================================================
-// Jarvis Command Station 2.0 — Live Agent-Flow Dashboard
-// Pure-vanilla JS, zero CDN deps. Single-file IIFE-style modules.
-//=============================================================
+// ─── Global state ────────────────────────────────────────────
+const ROUTES = ["dashboard","jobs","swarm","cmd","gui","jarvis","models","logs","memories"];
 
-// ─── State ──────────────────────────────────────────────────
 const state = {
-  currentJob: null,            // {id, question, t0, phasesDone:Set, currentPhase}
-  sps: {},                     // sp_id → {id, desc, deps, status, turns, tools:[], results:'', tokenBuf:''}
-  waves: [],                   // [[sp_id,...], ...]
-  llmTarget: null,             // sp_id receiving current [LLMTOK] stream
-  llmFlushPending: false,
-  orchThinkBuf: '',
-  jobs: [],                    // last fetched /jobs
+  // Job tree state (persists across page switches)
+  currentJob: null,         // {id, question, t0}
+  phases: {},               // phase_id → {name, stream:"", done:false, model:""}
+  phasesOrder: ['0A','0B','0C','1','2','3','3C','W'],
+  sps: {},                  // sp_id → SP record
+  waves: [],                // [[sp_id,...]]
+  llmTarget: null,          // currently-streaming sp_id
+  agentModel: '',           // last known model from `agent` event
+  // UI state
+  expandedNode: null,       // {kind:'question'|'phase'|'sp'|'tool', key:'...'}
+  jobs: [],                 // recent jobs from /jobs
   metrics: {},
+  metricsHistory: [],       // [{t, gpu_pct, cpu_pct, mem_pct}]
   guiOnline: false,
-  startedAt: 0,
+  // CMD page
+  cmdHistory: [],
+  cmdHistoryIdx: -1,
+  // Models page
+  modelConfig: null,        // {current:{role:{model,desc,...}}, available:[...]}
 };
 
-// ─── Utility ────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
+// SP record shape (created lazily):
+//   { id, desc, deps:[], status:'pending|running|solved|failed',
+//     turn:0, maxTurns:0, tools:[],
+//     turnHistory:[{turn, content, tools, t0, t1}],
+//     liveBuf:'',
+//     tokenWindow:[{t,n}],   // for tok/s
+//     locked:false }
+// ─── Utility ─────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const $$ = sel => document.querySelectorAll(sel);
 const escapeHtml = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtBytes = n => n<1024 ? n+'B' : n<1024*1024 ? (n/1024).toFixed(1)+'K' : (n/1048576).toFixed(1)+'M';
 const fmtElapsed = sec => {
-  if (!sec) return '0s';
+  if (sec == null || isNaN(sec)) return '—';
   if (sec < 60) return Math.round(sec)+'s';
   const m = Math.floor(sec/60), s = Math.round(sec%60);
   return `${m}m${s.toString().padStart(2,'0')}s`;
 };
+const now = () => Date.now();
 
-// ─── Throttled render scheduler ─────────────────────────────
+function ensureSP(id, partial){
+  if (!state.sps[id]){
+    state.sps[id] = {
+      id, desc:'', deps:[], status:'pending',
+      turn:0, maxTurns:0, tools:[],
+      turnHistory:[], liveBuf:'', tokenWindow:[],
+      currentTurnT0: 0, viewingTurn: null, // null = live
+    };
+  }
+  if (partial) Object.assign(state.sps[id], partial);
+  return state.sps[id];
+}
+
+function ensurePhase(pid, partial){
+  if (!state.phases[pid]) state.phases[pid] = { id:pid, name:'', stream:'', done:false, model:'' };
+  if (partial) Object.assign(state.phases[pid], partial);
+  return state.phases[pid];
+}
+
+function tokpsFor(sp){
+  if (!sp || !sp.tokenWindow.length) return 0;
+  const cutoff = now() - 5000;
+  sp.tokenWindow = sp.tokenWindow.filter(x => x.t > cutoff);
+  const total = sp.tokenWindow.reduce((s,x)=>s+x.n, 0);
+  return Math.round(total / 5);
+}
+
 let _renderQueued = false;
-const queueRender = () => {
+function queueRender(){
   if (_renderQueued) return;
   _renderQueued = true;
   requestAnimationFrame(() => {
     _renderQueued = false;
-    renderOrchCard();
-    renderSPGrid();
-  });
-};
-
-// ─── Phase management ───────────────────────────────────────
-const PHASE_ORDER = ['0A','0B','0C','1','2','3','3C','W'];
-const phasesDone = new Set();
-let currentPhase = null;
-
-function setPhase(pid){
-  if (currentPhase) phasesDone.add(currentPhase);
-  currentPhase = pid;
-  document.querySelectorAll('.phase-pill').forEach(p=>{
-    const id = p.dataset.phase;
-    p.classList.remove('active','done');
-    if (id === currentPhase) p.classList.add('active');
-    else if (phasesDone.has(id)) p.classList.add('done');
+    if (currentRoute === 'jobs' && state.currentJob) renderJobTree();
+    if (currentRoute === 'dashboard') renderDashboardAgents();
   });
 }
+// ─── Hash router ─────────────────────────────────────────────
+let currentRoute = 'dashboard';
+let currentRouteArg = null;
 
-function resetPhases(){
-  phasesDone.clear();
-  currentPhase = null;
-  document.querySelectorAll('.phase-pill').forEach(p=>p.classList.remove('active','done'));
+const PAGE_INIT = {};   // populated below
+
+function parseHash(){
+  const h = (location.hash.slice(2) || 'dashboard');
+  const parts = h.split('/');
+  return { route: parts[0], arg: parts[1] || null };
 }
 
-// ─── Connection: main job stream ────────────────────────────
+function navigate(){
+  const { route, arg } = parseHash();
+  const r = ROUTES.includes(route) ? route : 'dashboard';
+  currentRoute = r;
+  currentRouteArg = arg;
+  // toggle visibility
+  $$('section[data-route]').forEach(sec => {
+    sec.classList.toggle('active', sec.dataset.route === r);
+  });
+  // sidebar active
+  $$('aside.side-nav a').forEach(a => {
+    a.classList.toggle('active', a.dataset.route === r);
+  });
+  // boot per-page
+  if (PAGE_INIT[r]) {
+    try { PAGE_INIT[r](arg); }
+    catch(e){ console.error(`page-init ${r}`, e); }
+  }
+}
+
+window.addEventListener('hashchange', navigate);
+
+// Sidebar collapse
+function toggleSidebar(){
+  const layout = document.querySelector('.layout');
+  layout.classList.toggle('collapsed');
+  try { localStorage.setItem('jarvis_nav_collapsed', layout.classList.contains('collapsed') ? '1':'0'); }
+  catch(_){}
+}
+// ─── Main job SSE stream ─────────────────────────────────────
 let mainES = null;
 let mainBackoff = 1000;
 
+function setConn(status){
+  const dot = $('conn-dot'), txt = $('conn-text');
+  if (!dot) return;
+  dot.classList.remove('live','err');
+  if (status === 'live'){ dot.classList.add('live'); txt.textContent='live'; }
+  else if (status === 'err'){ dot.classList.add('err'); txt.textContent='lost'; }
+  else { txt.textContent = status; }
+}
+
 function connectStream(jobId){
-  if (mainES){ mainES.close(); mainES = null; }
-  const url = `/stream/${encodeURIComponent(jobId)}`;
-  const es  = new EventSource(url);
+  if (mainES){ try{mainES.close();}catch(_){}; mainES=null; }
+  if (!jobId) return;
+  setConn('connecting…');
+  const es = new EventSource(`/stream/${encodeURIComponent(jobId)}`);
   mainES = es;
   es.onmessage = ev => {
-    try { dispatchEvent(JSON.parse(ev.data)); }
-    catch(e){ console.warn('parse error',e,ev.data); }
+    try { dispatchJobEvent(JSON.parse(ev.data)); }
+    catch(e){ /* ignore parse error */ }
   };
+  es.onopen  = () => { mainBackoff = 1000; setConn('live'); };
   es.onerror = () => {
     es.close();
+    setConn('err');
     if (state.currentJob && state.currentJob.id === jobId){
       setTimeout(()=>connectStream(jobId), Math.min(mainBackoff,10000));
       mainBackoff = Math.min(mainBackoff*2, 10000);
     }
   };
-  es.onopen = () => { mainBackoff = 1000; };
 }
 
-// ─── Connection: GUI feed (cross-origin) ────────────────────
-let guiES = null;
-let guiBackoff = 1000;
-
+// ─── GUI cross-origin SSE ────────────────────────────────────
+let guiES = null, guiBackoff = 1000;
 function connectGUIFeed(){
   if (guiES){ try{guiES.close();}catch(_){}}
-  try {
-    guiES = new EventSource('http://10.0.0.58:5005/stream', { withCredentials:false });
-  } catch(e){ return; }
+  try { guiES = new EventSource('http://10.0.0.58:5005/stream', { withCredentials:false }); }
+  catch(_){ return; }
   guiES.addEventListener('screenshot', ev => {
     try {
-      const data = JSON.parse(ev.data);
-      const b64 = data.image || data.frame || data.b64 || data;
-      if (typeof b64 === 'string' && b64.length > 100){
-        const img = $('gui-feed');
-        img.src = b64.startsWith('data:') ? b64 : `data:image/jpeg;base64,${b64}`;
-        img.style.display = 'block';
-        $('gui-placeholder').style.display = 'none';
-        $('gui-state').textContent = 'live';
-        $('gui-live').className = 'live';
-        $('gui-live').textContent = 'streaming';
-        state.guiOnline = true;
-      }
+      const d = JSON.parse(ev.data);
+      const b64 = d.image || d.frame || d.b64;
+      if (typeof b64 !== 'string' || b64.length < 100) return;
+      const img = $('gui-img'), ph = $('gui-placeholder'), ov = $('gui-overlay');
+      if (!img) return;
+      img.src = b64.startsWith('data:') ? b64 : `data:image/jpeg;base64,${b64}`;
+      img.style.display = 'block';
+      if (ph) ph.style.display = 'none';
+      if (ov) ov.style.display = 'block';
+      $('gui-state') && ($('gui-state').textContent = 'live');
+      state.guiOnline = true;
     } catch(_){}
   });
   guiES.addEventListener('iter', ev => {
     try {
       const d = JSON.parse(ev.data);
-      $('gui-iter').textContent = `Iter: ${d.iter||'?'} • ${d.action||'idle'}`;
+      $('gui-iter') && ($('gui-iter').textContent = `iter:${d.iter||'?'} · ${d.action||'idle'}`);
     } catch(_){}
   });
   guiES.onerror = () => {
     state.guiOnline = false;
-    $('gui-state').textContent = 'offline';
-    $('gui-live').className = '';
-    $('gui-live').textContent = '';
+    $('gui-state') && ($('gui-state').textContent = 'offline');
     try{guiES.close();}catch(_){}
-    setTimeout(connectGUIFeed, Math.min(guiBackoff,15000));
+    setTimeout(connectGUIFeed, Math.min(guiBackoff, 15000));
     guiBackoff = Math.min(guiBackoff*2, 15000);
   };
   guiES.onopen = () => { guiBackoff = 1000; };
 }
-
-// ─── Event dispatch ─────────────────────────────────────────
-function dispatchEvent(ev){
+// ─── Event dispatch ──────────────────────────────────────────
+function dispatchJobEvent(ev){
   const t = ev.type;
   if (ev.elapsed != null && state.currentJob){
-    $('orch-elapsed').textContent = fmtElapsed(ev.elapsed);
+    state.currentJob.elapsed = ev.elapsed;
   }
 
   switch(t){
-    case 'phase':
-      setPhase(ev.phase_id);
-      appendOrchLine(`Phase ${ev.phase_id} ${ev.phase_name||''}`);
+    case 'phase': {
+      const p = ensurePhase(ev.phase_id, { name: ev.phase_name||'', model: ev.model||'' });
+      // mark previous phases done
+      const idx = state.phasesOrder.indexOf(ev.phase_id);
+      for (let i=0; i<idx; i++){
+        const prev = state.phases[state.phasesOrder[i]];
+        if (prev) prev.done = true;
+      }
+      p.done = false;
+      queueRender();
       break;
+    }
 
-    case 'dependency_graph':
-      // Build SP cards up-front from the orchestrator's plan
+    case 'dependency_graph': {
       state.waves = ev.waves || [];
       for (const sp of (ev.sps || [])){
-        if (!state.sps[sp.id]){
-          state.sps[sp.id] = {
-            id: sp.id, desc: sp.desc, deps: sp.deps || [],
-            status: 'pending', turns: 0, maxTurns: 0,
-            tools: [], results: '', tokenBuf: '', resultsSoft: false,
-          };
-        } else {
-          Object.assign(state.sps[sp.id], { desc: sp.desc, deps: sp.deps });
-        }
+        ensureSP(sp.id, { desc: sp.desc, deps: sp.deps || [] });
       }
       queueRender();
       break;
+    }
 
-    case 'wave_dispatch':
-      appendOrchLine(`Wave ${ev.wave}/${ev.total} → [${(ev.sp_ids||[]).join(', ')}]  (${ev.reason||''})`);
+    case 'wave_dispatch': {
+      // Optional log; tree handles structural display via dependency_graph
       break;
+    }
 
-    case 'wave':
-      // Older wave event — fallback grouping
-      if (!state.waves.length){
-        state.waves.push(ev.sps || []);
-        for (const id of (ev.sps||[])){
-          if (!state.sps[id]){
-            state.sps[id] = { id, desc:'', deps:[], status:'pending',
-              turns:0, maxTurns:0, tools:[], results:'', tokenBuf:'', resultsSoft:false };
-          }
-        }
-      }
+    case 'wave': {
+      if (!state.waves.length) state.waves.push(ev.sps || []);
+      for (const id of (ev.sps || [])) ensureSP(id);
       queueRender();
       break;
+    }
 
     case 'sp_turn': {
-      const sp = state.sps[ev.sp_id] || (state.sps[ev.sp_id] = {
-        id: ev.sp_id, desc:'', deps:[], status:'active',
-        turns:0, maxTurns:0, tools:[], results:'', tokenBuf:'', resultsSoft:false,
-      });
-      sp.status = 'active';
-      sp.turns = ev.turn;
+      const sp = ensureSP(ev.sp_id);
+      // If this is a new turn (different from sp.turn), close prior turn into history
+      if (sp.turn && sp.turn !== ev.turn && sp.liveBuf){
+        sp.turnHistory.push({
+          turn: sp.turn, content: sp.liveBuf, tools: sp.tools.slice(),
+          t0: sp.currentTurnT0 || 0, t1: now(),
+        });
+        sp.liveBuf = '';
+        sp.tools = [];
+      }
+      sp.status   = 'running';
+      sp.turn     = ev.turn;
       sp.maxTurns = ev.max_turns;
-      sp.tools.push({
-        tool: ev.tool, preview: ev.preview, status: 'run',
-        bytes: 0, result: '',
-      });
-      sp.tokenBuf = '';
+      sp.currentTurnT0 = now();
+      sp.tools.push({ tool: ev.tool, preview: ev.preview, status:'run', bytes:0, result:'' });
       state.llmTarget = ev.sp_id;
+      sp.viewingTurn = null;  // reset to live on new turn
       queueRender();
+      maybeUpdateTerminal(sp.id);
       break;
     }
 
@@ -617,205 +895,438 @@ function dispatchEvent(ev){
         if (last.status === 'run' && last.tool === ev.tool){
           last.bytes  = ev.bytes;
           last.result = ev.preview;
-          last.status = /(error|trace|failed)/i.test(ev.preview) ? 'err' : 'ok';
+          last.status = /(error|trace|failed|exception)/i.test(ev.preview||'') ? 'err' : 'ok';
         }
       }
       queueRender();
+      maybeUpdateTerminal(ev.sp_id);
       break;
     }
 
     case 'sp_done': {
-      const sp = state.sps[ev.sp_id] || {};
-      sp.id = ev.sp_id;
+      const sp = ensureSP(ev.sp_id);
       sp.status  = ev.status === 'solved' ? 'solved' : 'failed';
       sp.results = ev.values || '';
-      sp.turns   = ev.turns;
-      // Mark last running tool as ok if not already
-      if (sp.tools){
-        for (const t of sp.tools) if (t.status === 'run') t.status = 'ok';
+      sp.turn    = ev.turns || sp.turn;
+      // Close current live buf into history
+      if (sp.liveBuf){
+        sp.turnHistory.push({
+          turn: sp.turn, content: sp.liveBuf, tools: sp.tools.slice(),
+          t0: sp.currentTurnT0 || 0, t1: now(),
+        });
+        sp.liveBuf = ''; sp.tools = [];
       }
-      state.sps[ev.sp_id] = sp;
+      // last running tool → ok
+      if (sp.tools){ for (const tt of sp.tools) if (tt.status==='run') tt.status='ok'; }
       if (state.llmTarget === ev.sp_id) state.llmTarget = null;
       queueRender();
+      maybeUpdateTerminal(ev.sp_id);
       break;
     }
 
     case 'llm_chunk': {
-      // Append to current SP's token buffer (fading ticker under tool chain)
       const target = state.llmTarget;
-      if (target && state.sps[target]){
-        const buf = (state.sps[target].tokenBuf || '') + ev.content;
-        state.sps[target].tokenBuf = buf.length > 600 ? buf.slice(-600) : buf;
-        if (!state.llmFlushPending){
-          state.llmFlushPending = true;
-          setTimeout(()=>{ state.llmFlushPending = false; queueRender(); }, 80);
-        }
-      }
+      if (!target) break;
+      const sp = ensureSP(target);
+      sp.liveBuf += ev.content;
+      if (sp.liveBuf.length > 12000) sp.liveBuf = sp.liveBuf.slice(-12000);
+      sp.tokenWindow.push({ t: now(), n: (ev.content||'').length });
+      maybeUpdateTerminal(target, /*throttle=*/true);
       break;
     }
 
     case 'orch_think': {
-      state.orchThinkBuf += ev.content;
-      if (state.orchThinkBuf.length > 4000){
-        state.orchThinkBuf = state.orchThinkBuf.slice(-4000);
-      }
-      if (!state.llmFlushPending){
-        state.llmFlushPending = true;
-        setTimeout(()=>{ state.llmFlushPending = false; renderOrchCard(); }, 80);
-      }
+      // Route to the writer phase ('W') or current active phase
+      const pid = currentActivePhase() || 'W';
+      const p = ensurePhase(pid);
+      p.stream += ev.content;
+      if (p.stream.length > 8000) p.stream = p.stream.slice(-8000);
+      maybeUpdateTerminal(`phase:${pid}`, true);
       break;
     }
 
-    case 'agent':
-      $('stat-model').innerHTML = `MODEL <b>${escapeHtml(ev.model||'—')}</b>`;
+    case 'agent': {
+      state.agentModel = ev.model || '';
+      $('stat-model') && ($('stat-model').innerHTML = `MODEL <b>${escapeHtml(state.agentModel||'—')}</b>`);
       break;
+    }
 
-    case 'answer':
-      renderAnswer(ev.answer || '');
-      setPhase(null);
-      phasesDone.add('W');
-      document.querySelectorAll('.phase-pill').forEach(p=>{
-        if (phasesDone.has(p.dataset.phase)) p.classList.add('done');
-      });
+    case 'answer': {
+      $('tree-answer') && ($('tree-answer').innerHTML = renderMarkdown(ev.answer||''));
+      // mark writer phase done
+      ensurePhase('W', { done:true });
       break;
+    }
 
-    case 'done':
-      appendOrchLine(`✓ done`);
+    case 'done': {
       pollJobs();
       break;
+    }
 
     case 'error':
-    case 'error_line':
-      appendOrchLine(`⚠ ${ev.error || ev.line || ''}`);
+    case 'error_line': {
+      console.warn('job event error', ev.error || ev.line);
       break;
-
-    case 'log':
-    default:
-      // Skip generic log spam from dashboard rendering (visible in /logs)
-      break;
+    }
   }
 }
 
-// ─── Renderers ──────────────────────────────────────────────
-function appendOrchLine(line){
-  const el = $('orch-stream');
-  if (!el) return;
-  // Replace placeholder on first line
-  if (el.querySelector('.placeholder')) el.innerHTML = '';
-  const div = document.createElement('div');
-  div.textContent = line;
-  el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
-  // Keep last 200 lines
-  while (el.childNodes.length > 200) el.removeChild(el.firstChild);
-}
-
-function renderOrchCard(){
-  // Stream the orch_think buffer into the bottom of the pane
-  const el = $('orch-stream');
-  if (!el || !state.orchThinkBuf) return;
-  let live = el.querySelector('.live-think');
-  if (!live){
-    live = document.createElement('div');
-    live.className = 'think live-think';
-    el.appendChild(live);
+function currentActivePhase(){
+  for (const pid of state.phasesOrder){
+    const p = state.phases[pid];
+    if (p && !p.done) return pid;
   }
-  live.textContent = state.orchThinkBuf.slice(-1500);
-  el.scrollTop = el.scrollHeight;
+  return null;
 }
+// ─── Family tree ─────────────────────────────────────────────
+const PHASE_LABELS = { '0A':'Classify', '0B':'Plan', '0C':'Research', '1':'Solve', '2':'Verify', '3':'Synthesize', '3C':'Audit', 'W':'Write' };
+const PHASE_ICONS  = { '0A':'🔍','0B':'📋','0C':'🌐','1':'⚙','2':'✓','3':'∮','3C':'🛡','W':'✎' };
 
-function renderSPGrid(){
-  const grid = $('sp-grid');
-  if (!grid) return;
-  if (!Object.keys(state.sps).length){
-    grid.innerHTML = '<div class="empty-msg">Submit a question to see the agent flow.</div>';
+function renderJobTree(){
+  const wrap = $('tree-rows');
+  if (!wrap) return;
+  if (!state.currentJob){
+    wrap.innerHTML = '<div class="empty-msg">No job selected.</div>';
     return;
   }
-
-  // Group by waves; orphans go into a final wave
-  const inWave = new Set();
-  const waveRows = [];
-  for (const wave of (state.waves || [])){
-    const row = wave.filter(id => state.sps[id]);
-    row.forEach(id => inWave.add(id));
-    if (row.length) waveRows.push(row);
-  }
-  const orphans = Object.keys(state.sps).filter(id => !inWave.has(id));
-  if (orphans.length) waveRows.push(orphans);
+  const job = state.currentJob;
 
   let html = '';
-  for (let wi = 0; wi < waveRows.length; wi++){
-    const row = waveRows[wi];
-    html += `<div class="sp-wave" data-wave="W${wi+1}">`;
-    for (const id of row){
-      const sp = state.sps[id];
-      html += renderSPCard(sp);
-    }
-    html += '</div>';
-  }
-  grid.innerHTML = html;
-}
 
-function renderSPCard(sp){
-  const ICONS = { pending:'⏳', active:'⟳', solved:'✓', failed:'✗' };
-  const statusCls = sp.status || 'pending';
-  const turnTxt = sp.turns ? `T${sp.turns}${sp.maxTurns?'/'+sp.maxTurns:''}` : '';
+  // Row 1: Question root
+  html += `<div class="tree-row">
+    <div class="tree-node kind-question ${expandedIs('question','q') ? 'active':''}"
+         data-kind="question" data-key="q">
+      <span class="ico">📨</span>
+      <div style="font-size:9px;color:var(--text-dim)">QUESTION · ${escapeHtml((job.id||'').slice(0,12))}</div>
+      <div class="question-text">${escapeHtml(job.question||'(streaming…)')}</div>
+    </div>
+  </div>`;
 
-  let toolsHtml = '';
-  for (const t of (sp.tools||[])){
-    const dotCls = t.status === 'ok' ? 'ok' : t.status === 'err' ? 'err' : 'run';
-    const bytesTxt = t.bytes ? fmtBytes(t.bytes) : '';
-    const previewTxt = t.result || t.preview || '';
-    toolsHtml += `
-      <div class="tool-row">
-        <span class="dot ${dotCls}"></span>
-        <span class="name">${escapeHtml(t.tool||'')}</span>
-        <span class="preview" title="${escapeHtml(previewTxt)}">${escapeHtml((previewTxt||'').slice(0,80))}</span>
-        ${bytesTxt ? `<span class="bytes">${bytesTxt}</span>` : ''}
+  // Row 2: Phases (active + done shown)
+  const phaseEntries = state.phasesOrder
+    .map(pid => state.phases[pid])
+    .filter(p => p);
+  if (phaseEntries.length){
+    html += `<div class="tree-row">`;
+    for (const p of phaseEntries){
+      const cls = p.done ? 'solved' : (p.id === currentActivePhase() ? 'running' : '');
+      const active = expandedIs('phase', p.id) ? 'active':'';
+      html += `<div class="tree-node ${cls} ${active}" data-kind="phase" data-key="${escapeHtml(p.id)}">
+        <span class="ico">${PHASE_ICONS[p.id]||'•'}</span>
+        <div style="font-weight:600">${escapeHtml(p.id)}</div>
+        <span class="label">${escapeHtml(PHASE_LABELS[p.id]||p.name||'')}</span>
       </div>`;
+    }
+    html += `</div>`;
   }
 
-  const tokens = sp.tokenBuf
-    ? `<div class="sp-tokens">${escapeHtml(sp.tokenBuf.slice(-300))}</div>`
-    : '';
+  // Row 3: SPs grouped by waves
+  if (Object.keys(state.sps).length){
+    html += `<div class="tree-row">`;
+    const seen = new Set();
+    for (const wave of (state.waves||[])){
+      for (const id of wave){
+        if (!state.sps[id] || seen.has(id)) continue;
+        html += renderSPNode(state.sps[id]);
+        seen.add(id);
+      }
+    }
+    // Orphans
+    for (const id of Object.keys(state.sps)){
+      if (seen.has(id)) continue;
+      html += renderSPNode(state.sps[id]);
+    }
+    html += `</div>`;
 
-  const results = sp.results
-    ? `<div class="sp-results ${sp.resultsSoft?'soft':''}">${escapeHtml(sp.results)}</div>`
-    : '';
+    // Row 4: Tool calls for currently-watched SP (most recent)
+    const focusSp = state.expandedNode && state.expandedNode.kind === 'sp'
+      ? state.sps[state.expandedNode.key]
+      : findRunningSp();
+    if (focusSp && focusSp.tools.length){
+      html += `<div class="tree-row tools">`;
+      for (let i=0; i<focusSp.tools.length; i++){
+        const tt = focusSp.tools[i];
+        const cls = tt.status === 'ok' ? 'solved' : tt.status === 'err' ? 'failed' : 'running';
+        const key = `tool:${focusSp.id}:${i}`;
+        const active = expandedIs('tool', key) ? 'active':'';
+        html += `<div class="tree-node kind-tool ${cls} ${active}" data-kind="tool" data-key="${escapeHtml(key)}">
+          <span class="ico">${tt.tool === 'run_code' ? '▷' : tt.tool === 'search' ? '🌐' : tt.tool === 'rag' ? '📚' : '·'}</span>
+          <div>${escapeHtml(tt.tool||'tool')}</div>
+          <span class="label">${tt.bytes ? fmtBytes(tt.bytes) : (tt.status==='run'?'running':'…')}</span>
+        </div>`;
+      }
+      html += `</div>`;
+    }
+  }
 
-  const desc = sp.desc
-    ? `<div class="sp-desc">${escapeHtml(sp.desc.slice(0,200))}</div>`
-    : '';
+  wrap.innerHTML = html;
 
-  return `
-    <div class="sp-card ${statusCls}">
-      <div class="sp-head">
-        <span class="icon ${statusCls}">${ICONS[statusCls]||'?'}</span>
-        <span class="id">${escapeHtml(sp.id)}</span>
-        <span class="meta">${turnTxt}</span>
-      </div>
-      ${desc}
-      <div class="tool-chain">${toolsHtml || '<div class="tool-row"><span class="preview">(no tool calls yet)</span></div>'}</div>
-      ${results}
-      ${tokens}
-    </div>`;
+  // Wire clicks
+  wrap.querySelectorAll('.tree-node').forEach(el => {
+    el.addEventListener('click', () => onNodeClick(el.dataset.kind, el.dataset.key));
+  });
+
+  // Re-render expansion if open (preserve viewing-turn state)
+  renderExpansion();
+  // Draw SVG connectors after layout settles
+  requestAnimationFrame(drawConnectors);
 }
 
-// ─── Markdown renderer (small subset) ──────────────────────
-function renderMarkdown(md){
-  if (!md) return '';
-  // Normalize CRLF
-  md = md.replace(/\r\n/g,'\n');
+function renderSPNode(sp){
+  const cls = sp.status === 'solved' ? 'solved' : sp.status === 'failed' ? 'failed' : sp.status === 'running' ? 'running' : '';
+  const active = expandedIs('sp', sp.id) ? 'active':'';
+  const turn = sp.turn ? `T${sp.turn}${sp.maxTurns?'/'+sp.maxTurns:''}` : '';
+  const tps = tokpsFor(sp);
+  return `<div class="tree-node ${cls} ${active}" data-kind="sp" data-key="${escapeHtml(sp.id)}">
+    <span class="ico">⚙</span>
+    <div style="font-weight:600">${escapeHtml(sp.id)}</div>
+    <span class="label">${escapeHtml((sp.desc||'').slice(0,42))}</span>
+    <span class="label" style="color:var(--slate-bright);margin-top:3px">${escapeHtml(turn)}${tps?` · ${tps} tok/s`:''}</span>
+  </div>`;
+}
 
-  // Pull fenced code blocks aside (so other regex can't touch them)
+function findRunningSp(){
+  for (const id of Object.keys(state.sps)){
+    if (state.sps[id].status === 'running') return state.sps[id];
+  }
+  return null;
+}
+
+function expandedIs(kind, key){
+  return state.expandedNode && state.expandedNode.kind === kind && state.expandedNode.key === key;
+}
+
+function onNodeClick(kind, key){
+  if (expandedIs(kind, key)){
+    state.expandedNode = null;
+  } else {
+    state.expandedNode = { kind, key };
+  }
+  renderJobTree();
+}
+
+// ─── SVG connector lines ─────────────────────────────────────
+function drawConnectors(){
+  const svg = $('tree-connectors');
+  const wrap = $('tree-wrap');
+  const rows = $('tree-rows');
+  if (!svg || !wrap || !rows) return;
+  // Resize SVG to match wrap
+  const wb = wrap.getBoundingClientRect();
+  svg.setAttribute('width',  wb.width);
+  svg.setAttribute('height', wb.height);
+  svg.style.width  = wb.width+'px';
+  svg.style.height = wb.height+'px';
+
+  const lines = [];
+  const rowEls = rows.querySelectorAll('.tree-row');
+  for (let i=0; i<rowEls.length-1; i++){
+    const parents  = rowEls[i].querySelectorAll('.tree-node');
+    const children = rowEls[i+1].querySelectorAll('.tree-node');
+    if (!parents.length || !children.length) continue;
+    // Connect each child to nearest parent (by x-center)
+    const pCenters = Array.from(parents).map(p => {
+      const r = p.getBoundingClientRect();
+      return { el:p, cx: r.left + r.width/2 - wb.left, cy: r.bottom - wb.top };
+    });
+    children.forEach(c => {
+      const cr = c.getBoundingClientRect();
+      const ccx = cr.left + cr.width/2 - wb.left;
+      const ccy = cr.top - wb.top;
+      // pick closest parent
+      let best = pCenters[0], bd = Math.abs(pCenters[0].cx - ccx);
+      for (const p of pCenters){
+        const d = Math.abs(p.cx - ccx);
+        if (d < bd){ bd = d; best = p; }
+      }
+      lines.push({ x1: best.cx, y1: best.cy, x2: ccx, y2: ccy });
+    });
+  }
+  svg.innerHTML = lines.map(l =>
+    `<line x1="${l.x1}" y1="${l.y1}" x2="${l.x2}" y2="${l.y2}" />`
+  ).join('');
+}
+let _drawTimer = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(_drawTimer);
+  _drawTimer = setTimeout(drawConnectors, 80);
+});
+// ─── Embedded terminal (per expanded node) ──────────────────
+function renderExpansion(){
+  const host = $('tree-expansion-host');
+  if (!host) return;
+  if (!state.expandedNode){ host.innerHTML = ''; return; }
+  const { kind, key } = state.expandedNode;
+
+  let title='', meta='', body='', strip='';
+  if (kind === 'question'){
+    title = 'Question · full job stream';
+    meta  = state.currentJob ? state.currentJob.id : '';
+    // Merged: every phase stream + every SP live buf
+    const parts = [];
+    for (const pid of state.phasesOrder){
+      if (state.phases[pid] && state.phases[pid].stream){
+        parts.push(`──── Phase ${pid} ────\n${state.phases[pid].stream}`);
+      }
+    }
+    for (const sid of Object.keys(state.sps)){
+      const sp = state.sps[sid];
+      if (sp.liveBuf) parts.push(`──── ${sid} (live) ────\n${sp.liveBuf}`);
+    }
+    body = `<div class="term-body">${parts.length ? escapeHtml(parts.join('\n\n').slice(-6000)) : '<span class="term-empty">no output yet</span>'}</div>`;
+  }
+  else if (kind === 'phase'){
+    const p = state.phases[key];
+    title = `Phase ${key} · ${PHASE_LABELS[key]||''}`;
+    meta  = p ? (p.model ? `model: ${p.model}` : '') : '';
+    body  = `<div class="term-body">${p && p.stream ? escapeHtml(p.stream.slice(-6000)) : '<span class="term-empty">no orch_think emitted for this phase</span>'}</div>`;
+  }
+  else if (kind === 'sp'){
+    const sp = state.sps[key];
+    if (!sp){ host.innerHTML = ''; return; }
+    title = `${sp.id} · ${escapeHtml((sp.desc||'').slice(0,60))}`;
+    meta  = `${sp.status||'pending'} · ${sp.turnHistory.length+(sp.liveBuf?1:0)} turn(s)`;
+    strip = renderTermStrip(sp);
+    body  = `<div class="term-body" id="term-body-${escapeHtml(sp.id)}">${renderTermBody(sp)}</div>`;
+  }
+  else if (kind === 'tool'){
+    const [, spId, idx] = key.split(':');
+    const sp = state.sps[spId];
+    const tt = sp && sp.tools[+idx];
+    title = `Tool · ${tt ? tt.tool : '?'}`;
+    meta  = tt ? (tt.bytes ? fmtBytes(tt.bytes) : '—') : '';
+    if (tt){
+      body = `<div class="term-body">
+        <div class="term-action"># input preview</div>
+        <pre style="white-space:pre-wrap;color:var(--text)">${escapeHtml(tt.preview||'(none)')}</pre>
+        <div class="term-result" style="margin-top:10px"># result</div>
+        <pre style="white-space:pre-wrap;color:var(--text)">${escapeHtml(tt.result||'(running…)')}</pre>
+      </div>`;
+    } else body = '<div class="term-body"><span class="term-empty">tool not found</span></div>';
+  }
+
+  host.innerHTML = `
+    <div class="node-expansion">
+      <div class="node-expansion-head">
+        <span class="title">${escapeHtml(title)}</span>
+        <span class="meta">${escapeHtml(meta)}</span>
+        <button class="close-x" id="exp-close">✕</button>
+      </div>
+      ${strip}
+      ${body}
+    </div>`;
+
+  $('exp-close').addEventListener('click', () => {
+    state.expandedNode = null;
+    renderJobTree();
+  });
+  // Wire chip clicks
+  if (kind === 'sp') wireTermStripEvents(state.sps[key]);
+  // Auto-scroll
+  const tb = host.querySelector('.term-body');
+  if (tb) tb.scrollTop = tb.scrollHeight;
+}
+
+function renderTermStrip(sp){
+  const chips = [];
+  for (const h of sp.turnHistory){
+    const dur = h.t1 && h.t0 ? Math.round((h.t1-h.t0)/1000)+'s' : '';
+    const cls = sp.viewingTurn === h.turn ? 'viewing solved' : 'solved';
+    chips.push(`<span class="term-chip ${cls}" data-turn="${h.turn}">T${h.turn} ✓ ${dur}</span>`);
+  }
+  if (sp.status === 'running' || sp.liveBuf){
+    const cls = sp.viewingTurn == null ? 'live viewing' : 'live';
+    chips.push(`<span class="term-chip ${cls}" data-turn="live">▸ T${sp.turn||'?'} live</span>`);
+  }
+  const tps = tokpsFor(sp);
+  const resumeBtn = sp.viewingTurn != null
+    ? `<button class="term-resume" data-resume="1">↓ resume live</button>` : '';
+  return `<div class="term-strip">
+    ${chips.join('')}
+    ${resumeBtn}
+    <span class="term-tps">${tps?`${tps} tok/s`:''}</span>
+  </div>`;
+}
+
+function wireTermStripEvents(sp){
+  if (!sp) return;
+  document.querySelectorAll(`.term-chip[data-turn]`).forEach(el => {
+    el.addEventListener('click', () => {
+      const v = el.dataset.turn;
+      sp.viewingTurn = (v === 'live') ? null : (+v);
+      renderExpansion();
+    });
+  });
+  const rb = document.querySelector('.term-resume[data-resume]');
+  if (rb) rb.addEventListener('click', () => { sp.viewingTurn = null; renderExpansion(); });
+}
+
+function renderTermBody(sp){
+  // If viewing a historical turn → show that turn frozen
+  if (sp.viewingTurn != null){
+    const h = sp.turnHistory.find(x => x.turn === sp.viewingTurn);
+    if (!h) return '<span class="term-empty">turn not found</span>';
+    return `<div class="term-turnhdr">▸ Turn ${h.turn} <span class="dur">${h.t1&&h.t0?Math.round((h.t1-h.t0)/1000)+'s':''} · archived</span></div>${colorize(h.content)}${renderToolsInTurn(h.tools)}`;
+  }
+  // Live: show current turn header + liveBuf
+  const dur = sp.currentTurnT0 ? Math.round((now() - sp.currentTurnT0)/1000)+'s' : '';
+  const hdr = sp.turn ? `<div class="term-turnhdr">▸ Turn ${sp.turn} <span class="dur">${dur} · live</span></div>` : '';
+  const content = sp.liveBuf ? colorize(sp.liveBuf) : '<span class="term-empty">awaiting output…</span>';
+  return hdr + content + renderToolsInTurn(sp.tools);
+}
+
+function colorize(text){
+  if (!text) return '';
+  // Cheap classifier: lines starting with THOUGHT/ACTION/RESULT
+  const out = escapeHtml(text)
+    .replace(/^(THOUGHT[: ].*)$/gm, '<span class="term-think">$1</span>')
+    .replace(/^(ACTION[: ].*)$/gm,  '<span class="term-action">$1</span>')
+    .replace(/^(RESULT[: ].*)$/gm,  '<span class="term-result">$1</span>')
+    .replace(/^(FINAL_ANSWER[: ].*)$/gm, '<span class="term-result">$1</span>');
+  return out;
+}
+
+function renderToolsInTurn(tools){
+  if (!tools || !tools.length) return '';
+  return tools.map(tt => {
+    const dotCls = tt.status === 'ok' ? 'term-result' : tt.status === 'err' ? 'term-empty' : 'term-action';
+    return `<div class="term-tool">
+      <span class="name ${dotCls}">▸ ${escapeHtml(tt.tool||'')}</span>
+      ${tt.bytes ? `<span class="bytes">${fmtBytes(tt.bytes)}</span>` : ''}
+      ${tt.result ? `<pre>${escapeHtml((tt.result||'').slice(0,1500))}</pre>` : ''}
+    </div>`;
+  }).join('');
+}
+
+let _termFlushPending = false;
+function maybeUpdateTerminal(spId, throttle){
+  // Only update if the matching node is currently expanded
+  if (!state.expandedNode) return;
+  const k = state.expandedNode.kind, key = state.expandedNode.key;
+  const isMatch =
+    (k === 'sp' && key === spId) ||
+    (k === 'phase' && spId === `phase:${key}`) ||
+    (k === 'question');
+  if (!isMatch) return;
+  if (throttle){
+    if (_termFlushPending) return;
+    _termFlushPending = true;
+    setTimeout(() => { _termFlushPending = false; renderExpansion(); }, 120);
+  } else {
+    renderExpansion();
+  }
+}
+// ─── Markdown (small subset, same behavior as 2.0) ──────────
+function renderMarkdown(md){
+  if (!md) return '<div class="empty-msg">No answer.</div>';
+  md = md.replace(/\r\n/g,'\n');
   const blocks = [];
   md = md.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
     const idx = blocks.length;
     blocks.push({ lang: lang||'', code: code.replace(/\n+$/,'') });
-    return `\u0001CODEBLK${idx}\u0001`;
+    return `\u0001CB${idx}\u0001`;
   });
-
-  // Tables
   md = md.replace(/(^\|.+\|\n\|[\s|:-]+\|\n(?:\|.+\|\n?)+)/gm, (m) => {
     const lines = m.trim().split('\n');
     const header = lines[0].slice(1,-1).split('|').map(s=>s.trim());
@@ -823,24 +1334,14 @@ function renderMarkdown(md){
     let out = '<table><thead><tr>';
     for (const h of header) out += `<th>${inline(h)}</th>`;
     out += '</tr></thead><tbody>';
-    for (const r of rows){
-      out += '<tr>';
-      for (const c of r) out += `<td>${inline(c)}</td>`;
-      out += '</tr>';
-    }
-    out += '</tbody></table>';
-    return out;
+    for (const r of rows){ out += '<tr>'; for (const c of r) out += `<td>${inline(c)}</td>`; out += '</tr>'; }
+    return out + '</tbody></table>';
   });
-
-  // Headings
-  md = md.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
-  md = md.replace(/^###\s+(.+)$/gm,  '<h3>$1</h3>');
-  md = md.replace(/^##\s+(.+)$/gm,   '<h2>$1</h2>');
-  md = md.replace(/^#\s+(.+)$/gm,    '<h1>$1</h1>');
-  // hr
-  md = md.replace(/^---+$/gm, '<hr>');
-
-  // Lists (very small subset)
+  md = md.replace(/^####\s+(.+)$/gm,'<h4>$1</h4>')
+         .replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
+         .replace(/^##\s+(.+)$/gm,  '<h2>$1</h2>')
+         .replace(/^#\s+(.+)$/gm,   '<h1>$1</h1>')
+         .replace(/^---+$/gm, '<hr>');
   md = md.replace(/(?:^[ \t]*[-*]\s+.+(?:\n|$))+/gm, m => {
     const items = m.trim().split(/\n/).map(l => l.replace(/^[ \t]*[-*]\s+/,''));
     return '<ul>' + items.map(i => `<li>${inline(i)}</li>`).join('') + '</ul>';
@@ -849,197 +1350,496 @@ function renderMarkdown(md){
     const items = m.trim().split(/\n/).map(l => l.replace(/^[ \t]*\d+\.\s+/,''));
     return '<ol>' + items.map(i => `<li>${inline(i)}</li>`).join('') + '</ol>';
   });
-
-  // Paragraphs (anything else not already block-level)
   md = md.split(/\n{2,}/).map(blk => {
-    const trimmed = blk.trim();
-    if (!trimmed) return '';
-    if (/^\s*<(h\d|ul|ol|table|hr|pre|div)/.test(trimmed)) return blk;
-    if (/^\u0001CODEBLK\d+\u0001$/.test(trimmed)) return blk;
+    const t = blk.trim();
+    if (!t) return '';
+    if (/^\s*<(h\d|ul|ol|table|hr|pre|div)/.test(t)) return blk;
+    if (/^\u0001CB\d+\u0001$/.test(t)) return blk;
     return `<p>${inline(blk.replace(/\n/g,' '))}</p>`;
   }).join('\n\n');
-
-  // Restore code blocks with copy/download UI
-  md = md.replace(/\u0001CODEBLK(\d+)\u0001/g, (_, i) => {
+  md = md.replace(/\u0001CB(\d+)\u0001/g, (_, i) => {
     const blk = blocks[+i];
     const lang = blk.lang || 'text';
-    const codeId = 'code_' + Math.random().toString(36).slice(2,9);
+    const id = 'cb_' + Math.random().toString(36).slice(2,9);
     const buttons = lang === 'python'
-      ? `<button onclick="copyCode('${codeId}')">Copy</button>
-         <button onclick="downloadCode('${codeId}','sp_${codeId}.py')">Download .py</button>`
-      : `<button onclick="copyCode('${codeId}')">Copy</button>`;
-    return `
-      <div class="code-block">
-        <div class="code-header">
-          <span class="lang">${escapeHtml(lang)}</span>
-          <div class="actions">${buttons}</div>
-        </div>
-        <pre><code id="${codeId}">${escapeHtml(blk.code)}</code></pre>
-      </div>`;
+      ? `<button onclick="copyCode('${id}')">Copy</button>
+         <button onclick="downloadCode('${id}','${id}.py')">Download .py</button>`
+      : `<button onclick="copyCode('${id}')">Copy</button>`;
+    return `<div class="code-block">
+      <div class="code-header"><span class="lang">${escapeHtml(lang)}</span><div class="actions">${buttons}</div></div>
+      <pre><code id="${id}">${escapeHtml(blk.code)}</code></pre>
+    </div>`;
   });
-
   return md;
 }
-
 function inline(s){
   if (!s) return '';
-  s = escapeHtml(s);
-  // inline code first
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // bold / italic
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = escapeHtml(s)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g,'<em>$1</em>')
+    .replace(/__([^_]+)__/g,'<strong>$1</strong>');
   return s;
 }
-
 function copyCode(id){
-  const el = document.getElementById(id);
-  if (!el) return;
-  navigator.clipboard.writeText(el.textContent).then(()=>{
-    flashButton(event && event.target, 'Copied!');
-  }).catch(()=>{});
+  const el = document.getElementById(id); if (!el) return;
+  navigator.clipboard.writeText(el.textContent).catch(()=>{});
 }
-
-function downloadCode(id, filename){
-  const el = document.getElementById(id);
-  if (!el) return;
+function downloadCode(id, fname){
+  const el = document.getElementById(id); if (!el) return;
   const blob = new Blob([el.textContent], { type:'text/x-python' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = filename;
+  a.href = url; a.download = fname;
   document.body.appendChild(a); a.click();
   setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 200);
-  flashButton(event && event.target, 'Saved!');
-}
-
-function flashButton(btn, txt){
-  if (!btn) return;
-  const orig = btn.textContent;
-  btn.textContent = txt;
-  setTimeout(()=>{ btn.textContent = orig; }, 1100);
 }
 window.copyCode = copyCode;
 window.downloadCode = downloadCode;
+// ─── Page: Dashboard ─────────────────────────────────────────
+PAGE_INIT.dashboard = () => {
+  renderDashboardSystem();
+  renderDashboardAgents();
+  renderDashboardJobs();
+};
 
-function renderAnswer(md){
-  const el = $('answer-md');
-  if (!el) return;
-  if (!md){ el.innerHTML = '<div class="empty-msg">No answer.</div>'; return; }
-  el.innerHTML = renderMarkdown(md);
-  el.scrollIntoView({ behavior:'smooth', block:'nearest' });
+function renderDashboardSystem(){
+  const m = state.metrics;
+  if (!m || !m.gpu){
+    $('dash-gpu-name') && ($('dash-gpu-name').textContent = '—');
+    return;
+  }
+  const g = m.gpu;
+  if (g.error){
+    $('dash-gpu-name').textContent = 'driver mismatch / unavailable';
+    return;
+  }
+  $('dash-gpu-name').textContent = g.name || '—';
+  $('dash-gpu-fill').style.width = (g.mem_pct||0) + '%';
+  $('dash-vram').textContent     = `${g.mem_used_mb||0} / ${g.mem_total_mb||0} MB`;
+  $('dash-gpu-pct').textContent  = (g.gpu_pct||0) + '%';
+  $('dash-temp').textContent     = (g.temp_c||0) + '°C';
+  if (m.cpu_pct != null) $('dash-cpu').textContent = m.cpu_pct.toFixed(0)+'%';
+  if (m.mem_pct != null) $('dash-ram').textContent = m.mem_pct.toFixed(0)+'%';
+  // Sparkline
+  const spark = $('dash-spark');
+  if (spark){
+    const samples = state.metricsHistory.slice(-30);
+    const max = 100;
+    spark.innerHTML = samples.map(s => {
+      const h = Math.max(1, (s.gpu_pct||0) / max * 30);
+      const hot = (s.gpu_pct||0) > 70 ? 'hot' : '';
+      return `<div class="bar ${hot}" style="height:${h}px"></div>`;
+    }).join('');
+  }
 }
 
-// ─── GPU + Jobs polling ─────────────────────────────────────
+function renderDashboardAgents(){
+  const el = $('dash-agents');
+  if (!el) return;
+  const job = state.currentJob;
+  $('dash-agents-job') && ($('dash-agents-job').textContent = job ? job.id.slice(0,12) : 'no job');
+  if (!job){
+    el.innerHTML = '<div class="empty-msg">No job watched. Start one in <a href="#/swarm">/swarm</a>.</div>';
+    return;
+  }
+  const rows = [];
+  const phase = currentActivePhase();
+  if (phase){
+    rows.push(`<div class="agent-row">
+      <span class="icon">${PHASE_ICONS[phase]||'•'}</span>
+      <span class="name">Phase ${phase} · ${escapeHtml(PHASE_LABELS[phase]||'')}</span>
+      <span class="meta">${escapeHtml(state.agentModel||'')}</span>
+    </div>`);
+  }
+  for (const id of Object.keys(state.sps)){
+    const sp = state.sps[id];
+    if (sp.status === 'running'){
+      const tps = tokpsFor(sp);
+      rows.push(`<div class="agent-row">
+        <span class="icon">⚙</span>
+        <span class="name">${escapeHtml(id)} · T${sp.turn||'?'}/${sp.maxTurns||'?'}</span>
+        <span class="meta">${tps?tps+' tok/s':''}</span>
+      </div>`);
+    }
+  }
+  if (!rows.length) rows.push('<div class="agent-row idle"><span class="icon">·</span><span class="name">idle</span></div>');
+  el.innerHTML = rows.join('');
+}
+
+function renderDashboardJobs(){
+  const el = $('dash-jobs');
+  if (!el) return;
+  const jobs = state.jobs.slice(0,8);
+  if (!jobs.length){ el.innerHTML = '<div class="empty-msg">No jobs yet.</div>'; return; }
+  el.innerHTML = jobs.map(j => renderJobItem(j)).join('');
+  el.querySelectorAll('.job-item').forEach(it => {
+    it.addEventListener('click', () => location.hash = `#/jobs/${it.dataset.id}`);
+  });
+}
+
+function renderJobItem(j){
+  const st = (j.status||'').toLowerCase();
+  const active = state.currentJob && state.currentJob.id === j.id ? 'active' : '';
+  return `<div class="job-item ${active}" data-id="${escapeHtml(j.id||'')}">
+    <span class="id">${escapeHtml((j.id||'').slice(0,10))}</span>
+    <span class="q" title="${escapeHtml(j.question||'')}">${escapeHtml(j.question||'(no question)')}</span>
+    <span class="status ${st}">${escapeHtml(st)}</span>
+  </div>`;
+}
+// ─── Page: Jobs ──────────────────────────────────────────────
+PAGE_INIT.jobs = (arg) => {
+  if (arg){
+    // Tree view for a specific job
+    $('jobs-list-view').style.display = 'none';
+    $('jobs-tree-view').style.display = 'block';
+    $('jobs-title').innerHTML = `Jobs <span class="crumb">· <a href="#/jobs">all</a> · ${escapeHtml(arg)}</span>`;
+    $('tree-job-id').textContent = arg.slice(0,12);
+    if (!state.currentJob || state.currentJob.id !== arg){
+      watchJob(arg);
+    } else {
+      renderJobTree();
+    }
+  } else {
+    $('jobs-list-view').style.display = 'block';
+    $('jobs-tree-view').style.display = 'none';
+    $('jobs-title').textContent = 'Jobs';
+    renderJobsList();
+  }
+};
+
+function renderJobsList(){
+  const el = $('jobs-page-list');
+  if (!el) return;
+  const jobs = state.jobs;
+  if (!jobs.length){ el.innerHTML = '<div class="empty-msg">No jobs yet.</div>'; return; }
+  el.innerHTML = jobs.map(renderJobItem).join('');
+  el.querySelectorAll('.job-item').forEach(it => {
+    it.addEventListener('click', () => location.hash = `#/jobs/${it.dataset.id}`);
+  });
+}
+
+async function watchJob(jobId){
+  state.currentJob = { id: jobId, t0: now()/1000, question: '' };
+  state.phases = {};
+  state.sps    = {};
+  state.waves  = [];
+  state.llmTarget = null;
+  state.expandedNode = null;
+
+  // Try to fetch question + answer if completed
+  try {
+    const r = await fetch(`/result/${encodeURIComponent(jobId)}`);
+    if (r.ok){
+      const d = await r.json();
+      if (d.question) state.currentJob.question = d.question;
+      if (d.answer)   $('tree-answer') && ($('tree-answer').innerHTML = renderMarkdown(d.answer));
+    }
+  } catch(_){}
+  // Look up question from /jobs cache
+  if (!state.currentJob.question){
+    const j = state.jobs.find(j => j.id === jobId);
+    if (j) state.currentJob.question = j.question || '';
+  }
+  renderJobTree();
+  connectStream(jobId);
+}
+// ─── Page: Swarm submit ──────────────────────────────────────
+PAGE_INIT.swarm = () => {
+  setTimeout(() => $('swarm-q') && $('swarm-q').focus(), 50);
+};
+
+async function submitQuestion(){
+  const q = $('swarm-q').value.trim();
+  if (!q) return;
+  const service = $('swarm-service').value;
+  const btn = $('swarm-submit');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/query_async', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ question: q, service }),
+    });
+    if (!r.ok){ alert('submit failed: '+r.status); return; }
+    const d = await r.json();
+    const jid = d.job_id || d.id;
+    if (jid){
+      // jump to tree view for this job
+      location.hash = `#/jobs/${jid}`;
+    }
+  } catch(e){ alert('submit error: '+e.message); }
+  finally { btn.disabled = false; }
+}
+// ─── Page: Cmd ───────────────────────────────────────────────
+PAGE_INIT.cmd = () => {
+  setTimeout(() => $('cmd-input') && $('cmd-input').focus(), 50);
+};
+
+function cmdAppend(html){
+  const out = $('cmd-output');
+  if (!out) return;
+  out.innerHTML += '\n' + html;
+  out.scrollTop = out.scrollHeight;
+}
+
+async function runCmd(){
+  const inp = $('cmd-input');
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+  inp.value = '';
+  state.cmdHistory.push(cmd);
+  state.cmdHistoryIdx = state.cmdHistory.length;
+  cmdAppend(`<span class="prompt">$ ${escapeHtml(cmd)}</span>`);
+  try {
+    const r = await fetch('/cmd/execute', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ cmd, timeout: 60 }),
+    });
+    const d = await r.json().catch(()=>({error:'invalid response'}));
+    if (!r.ok){
+      cmdAppend(`<span class="stderr">${escapeHtml(d.error || ('http '+r.status))}</span>`);
+      return;
+    }
+    if (d.stdout) cmdAppend(escapeHtml(d.stdout.replace(/\n+$/,'')));
+    if (d.stderr) cmdAppend(`<span class="stderr">${escapeHtml(d.stderr.replace(/\n+$/,''))}</span>`);
+    cmdAppend(`<span class="exit">[exit ${d.exit_code}]</span>`);
+  } catch(e){ cmdAppend(`<span class="stderr">${escapeHtml(e.message)}</span>`); }
+}
+
+function cmdKey(e){
+  if (e.key === 'Enter'){ runCmd(); return; }
+  if (e.key === 'ArrowUp'){
+    if (state.cmdHistoryIdx > 0){
+      state.cmdHistoryIdx--;
+      $('cmd-input').value = state.cmdHistory[state.cmdHistoryIdx] || '';
+    }
+    e.preventDefault();
+  } else if (e.key === 'ArrowDown'){
+    if (state.cmdHistoryIdx < state.cmdHistory.length - 1){
+      state.cmdHistoryIdx++;
+      $('cmd-input').value = state.cmdHistory[state.cmdHistoryIdx] || '';
+    } else {
+      state.cmdHistoryIdx = state.cmdHistory.length;
+      $('cmd-input').value = '';
+    }
+    e.preventDefault();
+  } else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'l'){
+    $('cmd-output').innerHTML = '<span class="info">▸ cleared</span>';
+    e.preventDefault();
+  }
+}
+// ─── Page: GUI ──────────────────────────────────────────────
+PAGE_INIT.gui = () => {
+  // Reuse the global guiES connection; just nothing to boot
+};
+
+// Jarvis lazy-load iframe (avoids triggering /jarvis if user never visits)
+PAGE_INIT.jarvis = () => {
+  const f = $('jarvis-frame');
+  if (f && f.src === 'about:blank') f.src = '/jarvis';
+};
+// ─── Page: Models ────────────────────────────────────────────
+PAGE_INIT.models = () => loadModels();
+
+async function loadModels(){
+  const tbl = $('models-table');
+  if (!tbl) return;
+  tbl.innerHTML = `<div class="head">Role</div><div class="head">Description</div><div class="head">Model</div>
+                   <div class="role">—</div><div class="desc">loading…</div><div>—</div>`;
+  try {
+    const r = await fetch('/config/models');
+    if (!r.ok) throw new Error('http '+r.status);
+    const d = await r.json();
+    state.modelConfig = d;
+    let html = `<div class="head">Role</div><div class="head">Description</div><div class="head">Model</div>`;
+    for (const role of Object.keys(d.current||{})){
+      const meta = d.current[role];
+      const opts = (d.available||[]).map(m =>
+        `<option value="${escapeHtml(m)}" ${m===meta.model?'selected':''}>${escapeHtml(m)}</option>`
+      ).join('');
+      html += `<div class="role">${escapeHtml(meta.emoji||'•')} ${escapeHtml(role)}</div>
+               <div class="desc">${escapeHtml(meta.desc||'')}</div>
+               <div><select data-role="${escapeHtml(role)}">${opts}</select></div>`;
+    }
+    tbl.innerHTML = html;
+  } catch(e){
+    tbl.innerHTML = `<div class="head">Role</div><div class="head">Description</div><div class="head">Model</div>
+                     <div class="role">!</div><div class="desc">load failed: ${escapeHtml(e.message)}</div><div>—</div>`;
+  }
+}
+
+async function saveModels(){
+  const msg = $('models-msg');
+  msg.classList.remove('err');
+  const selects = document.querySelectorAll('#models-table select[data-role]');
+  let ok = 0, fail = 0;
+  for (const sel of selects){
+    const role = sel.dataset.role;
+    const model = sel.value;
+    const cur = state.modelConfig && state.modelConfig.current[role];
+    if (cur && cur.model === model) continue;   // unchanged
+    try {
+      const r = await fetch('/config/models', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ role, model }),
+      });
+      if (r.ok) ok++; else fail++;
+    } catch(_){ fail++; }
+  }
+  if (fail){ msg.classList.add('err'); msg.textContent = `${fail} failed, ${ok} ok`; }
+  else if (ok) msg.textContent = `Saved ${ok} role(s).`;
+  else msg.textContent = 'No changes.';
+  setTimeout(()=>{ msg.textContent = ''; }, 3000);
+  loadModels();
+}
+// ─── Page: Logs ──────────────────────────────────────────────
+PAGE_INIT.logs = () => populateLogJobs();
+
+function populateLogJobs(){
+  const sel = $('logs-job');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— pick a job —</option>' +
+    state.jobs.map(j => `<option value="${escapeHtml(j.id||'')}">${escapeHtml((j.id||'').slice(0,12))} · ${escapeHtml((j.question||'').slice(0,60))}</option>`).join('');
+  if (cur) sel.value = cur;
+}
+
+async function loadJobLogs(){
+  const id = $('logs-job').value;
+  const view = $('logs-view');
+  if (!id){ view.innerHTML = '<div class="empty-msg">Pick a job to tail its log.</div>'; return; }
+  const tail = $('logs-tail').value;
+  const grep = $('logs-grep').value.trim();
+  view.innerHTML = '<div class="empty-msg">loading…</div>';
+  let url = `/logs/${encodeURIComponent(id)}`;
+  const params = [];
+  if (tail && tail !== '0') params.push('tail=' + encodeURIComponent(tail));
+  if (grep) params.push('grep=' + encodeURIComponent(grep));
+  if (params.length) url += '?' + params.join('&');
+  try {
+    const r = await fetch(url);
+    if (!r.ok){ view.innerHTML = `<div class="empty-msg">http ${r.status}</div>`; return; }
+    const txt = await r.text();
+    view.textContent = txt || '(empty)';
+  } catch(e){ view.innerHTML = `<div class="empty-msg">${escapeHtml(e.message)}</div>`; }
+}
+
+async function loadDebugIndex(){
+  const id = $('logs-job').value;
+  const view = $('logs-view');
+  if (!id){ view.innerHTML = '<div class="empty-msg">Pick a job first.</div>'; return; }
+  view.innerHTML = '<div class="empty-msg">loading debug index…</div>';
+  try {
+    const r = await fetch(`/debug/${encodeURIComponent(id)}`);
+    if (!r.ok){ view.innerHTML = `<div class="empty-msg">no debug logs (http ${r.status})</div>`; return; }
+    const d = await r.json();
+    const files = d.files || [];
+    if (!files.length){ view.innerHTML = '<div class="empty-msg">no SP debug files for this job</div>'; return; }
+    let html = `<b>${escapeHtml(id)}</b>\n\n`;
+    for (const f of files){
+      html += `<div style="margin:6px 0"><a href="/debug/${encodeURIComponent(id)}/${encodeURIComponent(f)}" target="_blank">${escapeHtml(f)}</a></div>`;
+    }
+    view.innerHTML = html;
+  } catch(e){ view.innerHTML = `<div class="empty-msg">${escapeHtml(e.message)}</div>`; }
+}
+// ─── Polling loops ───────────────────────────────────────────
 async function pollMetrics(){
   try {
     const r = await fetch('/metrics');
     if (!r.ok) return;
     const m = await r.json();
     state.metrics = m;
+    state.metricsHistory.push({
+      t: now(),
+      gpu_pct: (m.gpu && m.gpu.gpu_pct) || 0,
+      cpu_pct: m.cpu_pct || 0,
+      mem_pct: m.mem_pct || 0,
+    });
+    if (state.metricsHistory.length > 60) state.metricsHistory.shift();
+
+    // Topbar
     if (m.gpu && !m.gpu.error){
-      $('gpu-name').textContent = m.gpu.name;
-      $('gpu-fill').style.width  = (m.gpu.mem_pct||0) + '%';
-      $('gpu-vram').textContent  = `${m.gpu.mem_used_mb||0} / ${m.gpu.mem_total_mb||0} MB`;
-      $('gpu-pct').textContent   = (m.gpu.gpu_pct||0) + '%';
-      $('gpu-temp').textContent  = (m.gpu.temp_c||0) + '°C';
-      $('stat-gpu').innerHTML    = `GPU <b>${m.gpu.gpu_pct||0}%</b>`;
+      $('stat-gpu').innerHTML  = `GPU <b>${m.gpu.gpu_pct||0}%</b>`;
+      $('stat-vram').innerHTML = `VRAM <b>${m.gpu.mem_used_mb||0}/${m.gpu.mem_total_mb||0}MB</b>`;
     } else {
-      $('gpu-name').textContent = 'driver mismatch / unavailable';
+      $('stat-gpu').innerHTML  = `GPU <b>—</b>`;
+      $('stat-vram').innerHTML = `VRAM <b>—</b>`;
     }
-    if (m.cpu_pct != null) $('cpu-pct').textContent = m.cpu_pct.toFixed(0)+'%';
-    if (m.mem_pct != null) $('ram-pct').textContent = m.mem_pct.toFixed(0)+'%';
+    if (currentRoute === 'dashboard') renderDashboardSystem();
   } catch(_){}
 }
 
 async function pollJobs(){
   try {
-    const r = await fetch('/jobs?limit=30');
+    const r = await fetch('/jobs?limit=50');
     if (!r.ok) return;
     const data = await r.json();
-    const jobs = data.jobs || data || [];
-    state.jobs = jobs;
+    state.jobs = data.jobs || data || [];
     let running = 0;
-    const list = $('jobs-list');
-    if (!jobs.length){ list.innerHTML = '<div class="empty-msg">No jobs yet.</div>'; }
-    else {
-      list.innerHTML = jobs.map(j => {
-        const st = (j.status||'').toLowerCase();
-        if (st === 'running' || st === 'processing') running++;
-        const active = state.currentJob && state.currentJob.id === j.id ? 'active' : '';
-        return `
-          <div class="job-item ${active}" data-id="${escapeHtml(j.id||'')}">
-            <span class="id" title="${escapeHtml(j.question||'')}">${escapeHtml((j.id||'').slice(0,12))}</span>
-            <span class="status ${st}">${escapeHtml(st)}</span>
-          </div>`;
-      }).join('');
-      list.querySelectorAll('.job-item').forEach(el => {
-        el.addEventListener('click', () => watchJob(el.dataset.id));
-      });
+    for (const j of state.jobs){
+      const st = (j.status||'').toLowerCase();
+      if (st === 'running' || st === 'processing') running++;
     }
     $('stat-jobs').innerHTML = `JOBS <b>${running}/3</b>`;
+    if (currentRoute === 'dashboard') renderDashboardJobs();
+    if (currentRoute === 'jobs' && !currentRouteArg) renderJobsList();
+    if (currentRoute === 'logs') populateLogJobs();
   } catch(_){}
-}
-
-// ─── Submit + watch ─────────────────────────────────────────
-async function watchJob(jobId){
-  state.currentJob = { id: jobId, t0: Date.now()/1000 };
-  state.sps = {}; state.waves = []; state.llmTarget = null; state.orchThinkBuf = '';
-  resetPhases();
-  $('orch-job').textContent = jobId.slice(0,12);
-  $('orch-stream').innerHTML = '';
-  $('answer-md').innerHTML = '<div class="empty-msg">Streaming…</div>';
-  queueRender();
-  pollJobs();
-
-  // If job is already complete, render its answer + code immediately
-  try {
-    const r = await fetch(`/result/${encodeURIComponent(jobId)}`);
-    if (r.ok){
-      const data = await r.json();
-      if (data.answer) renderAnswer(data.answer);
-    }
-  } catch(_){}
-
-  connectStream(jobId);
-}
-
-async function submitQuestion(){
-  const q = $('q-text').value.trim();
-  if (!q) return;
-  const service = $('q-service').value;
-  const btn = $('q-submit');
-  btn.disabled = true;
-  try {
-    let url = '/query_async';
-    if (service === 'engineer') url = '/query_async';   // server detects via classifier
-    if (service === 'execute' || service === 'deepsearch') url = '/query_async';
-    const body = JSON.stringify({ question: q, service });
-    const r = await fetch(url, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body,
-    });
-    if (!r.ok){ alert('submit failed: '+r.status); return; }
-    const data = await r.json();
-    const jid = data.job_id || data.id;
-    if (jid) watchJob(jid);
-  } catch(e){
-    alert('submit error: '+e.message);
-  } finally {
-    btn.disabled = false;
-  }
 }
 
 // ─── Boot ───────────────────────────────────────────────────
 function boot(){
-  $('q-submit').addEventListener('click', submitQuestion);
-  $('q-text').addEventListener('keydown', e => {
+  // Restore sidebar collapse state
+  try {
+    if (localStorage.getItem('jarvis_nav_collapsed') === '1'){
+      document.querySelector('.layout').classList.add('collapsed');
+    }
+  } catch(_){}
+  $('nav-toggle').addEventListener('click', toggleSidebar);
+
+  // Swarm submit
+  $('swarm-submit') && $('swarm-submit').addEventListener('click', submitQuestion);
+  $('swarm-q') && $('swarm-q').addEventListener('keydown', e => {
     if ((e.ctrlKey||e.metaKey) && e.key === 'Enter') submitQuestion();
   });
+
+  // Cmd page
+  $('cmd-run')   && $('cmd-run').addEventListener('click', runCmd);
+  $('cmd-input') && $('cmd-input').addEventListener('keydown', cmdKey);
+
+  // Models page
+  $('models-save')   && $('models-save').addEventListener('click', saveModels);
+  $('models-reload') && $('models-reload').addEventListener('click', loadModels);
+
+  // Logs page
+  $('logs-refresh') && $('logs-refresh').addEventListener('click', loadJobLogs);
+  $('logs-debug')   && $('logs-debug').addEventListener('click', loadDebugIndex);
+  $('logs-job')     && $('logs-job').addEventListener('change', loadJobLogs);
+
+  // Initial route
+  navigate();
+
+  // Polling
   pollMetrics(); setInterval(pollMetrics, 3000);
-  pollJobs();    setInterval(pollJobs, 5000);
+  pollJobs();    setInterval(pollJobs, 4000);
+
+  // GUI cross-origin SSE (always running)
   connectGUIFeed();
+
+  // Periodic re-render for tok/s + dashboard
+  setInterval(() => {
+    if (currentRoute === 'dashboard') renderDashboardAgents();
+    if (currentRoute === 'jobs' && state.currentJob && !state.expandedNode){
+      // Refresh tok/s in tree node labels
+      renderJobTree();
+    } else if (currentRoute === 'jobs' && state.expandedNode && state.expandedNode.kind === 'sp'){
+      // Refresh SP terminal periodically (token count)
+      const sp = state.sps[state.expandedNode.key];
+      if (sp && sp.viewingTurn == null) renderExpansion();
+    }
+  }, 1000);
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
